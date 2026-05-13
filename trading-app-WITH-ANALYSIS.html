@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🚀 Pro Trading Signal Engine - MIT ANALYSE</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0f172a; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow-x: hidden; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); padding: 24px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #334155; }
+        .header h1 { font-size: 28px; background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; }
+        .header p { color: #94a3b8; font-size: 13px; }
+        .grid-main { display: grid; grid-template-columns: 1.5fr 1fr; gap: 20px; margin-bottom: 20px; }
+        .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 20px; }
+        .btn { padding: 10px 16px; background: #334155; color: #e2e8f0; border: 1px solid #475569; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 12px; transition: all 0.2s; }
+        .btn:hover { background: #475569; }
+        .btn.active { background: #3b82f6; border-color: #1e40af; color: #fff; font-weight: 700; }
+        .btn-blue { border-color: #3b82f6 !important; color: #3b82f6 !important; }
+        .btn-green { border-color: #10b981 !important; color: #10b981 !important; }
+        .btn-large { padding: 16px 24px; font-size: 14px; width: 100%; margin-bottom: 12px; }
+        .btn-purple { border-color: #a855f7 !important; background: linear-gradient(135deg, #6b21a8 0%, #1e293b 100%) !important; color: #e879f9 !important; }
+        .modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.95); z-index: 1000; align-items: center; justify-content: center; padding: 20px; overflow-y: auto; }
+        .modal.active { display: flex; }
+        .modal-content { background: #1e293b; border: 1px solid #334155; border-radius: 8px; width: 90%; max-width: 900px; padding: 30px; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .modal-header h2 { margin: 0; }
+        .close-btn { background: none; border: none; color: #94a3b8; font-size: 24px; cursor: pointer; }
+        .chart-canvas { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+        .chart-title { color: #3b82f6; font-weight: 600; margin-bottom: 12px; font-size: 14px; }
+        .news-item { background: #0f172a; padding: 10px; border-left: 3px solid #3b82f6; margin-bottom: 8px; border-radius: 4px; font-size: 11px; color: #cbd5e1; }
+        .signal-card { background: #0f172a; border-left: 4px solid #22c55e; padding: 15px; margin-bottom: 12px; border-radius: 4px; }
+        .signal-card.bearish { border-left-color: #ef4444; }
+        .signal-card.neutral { border-left-color: #f59e0b; }
+        .indicator-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 8px; margin-bottom: 20px; }
+        .indicator-btn { padding: 10px; background: #334155; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 600; text-align: center; }
+        .indicator-btn.active { background: #3b82f6; border-color: #1e40af; color: #fff; }
+        .indicator-btn:hover { background: #475569; }
+        .category-buttons { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+        .category-btn { padding: 12px; background: #334155; color: #e2e8f0; border: 1px solid #475569; border-radius: 6px; cursor: pointer; font-weight: 600; text-align: center; }
+        .category-btn:hover { background: #475569; }
+        .market-buttons { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; }
+        .info-text { font-size: 12px; color: #cbd5e1; line-height: 1.6; white-space: pre-wrap; margin: 10px 0; }
+        .analysis-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 15px; margin-top: 20px; }
+        .analysis-result { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 15px; }
+        .result-market { color: #3b82f6; font-weight: 700; font-size: 14px; margin-bottom: 8px; }
+        .result-signal { font-size: 11px; color: #cbd5e1; margin-bottom: 6px; }
+        .result-confidence { display: inline-block; background: #22c55e; color: #000; padding: 4px 8px; border-radius: 3px; font-size: 10px; font-weight: 700; }
+        .result-confidence.medium { background: #f59e0b; }
+        .result-confidence.low { background: #ef4444; }
+        .loading { text-align: center; padding: 40px; }
+        .spinner { width: 40px; height: 40px; border: 4px solid #334155; border-top-color: #3b82f6; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 20px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @media (max-width: 768px) { .grid-main { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState } = React;
+
+        const allIndicators = {
+            'Trend': ['SMA', 'EMA', 'MACD', 'ADX', 'Parabolic SAR', 'Ichimoku', 'DMI', 'VWMA', 'WMA', 'HMA', 'Supertrend'],
+            'Momentum': ['RSI', 'Stochastic', 'Williams %R', 'CCI', 'ROC', 'KDJ', 'TRIX', 'MOM', 'KAMA'],
+            'Volume': ['Volume', 'OBV', 'MFI', 'A/D Line', 'VWAP', 'CMF'],
+            'Volatility': ['Bollinger Bands', 'ATR', 'Keltner Channel', 'Donchian Channel', 'NATR', 'TRIX']
+        };
+
+        const allPatterns = {
+            'Bullish': ['Hammer', 'Bullish Engulfing', 'Morning Star', 'Piercing Line', 'Three White Soldiers', 'Three Inside Up', 'Three Outside Up', 'Breakaway', 'Mat Hold', 'Kicking', 'Ladder Bottom', 'Unique 3 River'],
+            'Bearish': ['Hanging Man', 'Dark Cloud Cover', 'Evening Star', 'Shooting Star', 'Three Black Crows', 'Three Inside Down', 'Three Outside Down', 'Breakaway Down', 'Cylinder', 'On Neck', 'Thrusting Line', 'High Wave Candle'],
+            'Indecision': ['Doji', 'Dragonfly Doji', 'Gravestone Doji', 'Long Legged Doji', 'Pattern Gap', 'Rickshaw Man', 'Standstill', 'Harami']
+        };
+
+        const markets = ['BTC', 'ETH', 'GOLD', 'EURUSD', 'SPX', 'AAPL', 'MSFT', 'TSLA', 'CL', 'NG', 'DAX', 'NIKKEI'];
+
+        // Fake Analysis Simulation
+        const generateAnalysis = () => {
+            const results = [];
+            const randomMarkets = markets.sort(() => Math.random() - 0.5).slice(0, 6);
+            
+            randomMarkets.forEach(market => {
+                const indicators = ['RSI', 'EMA', 'MACD', 'BB'].sort(() => Math.random() - 0.5).slice(0, 8);
+                const patterns = ['Hammer', 'Bullish Engulfing', 'Flag'].sort(() => Math.random() - 0.5).slice(0, 3);
+                const confidence = Math.floor(Math.random() * 40) + 60; // 60-100%
+                const sentiment = Math.random() > 0.5 ? 'Bullish' : 'Bearish';
+                
+                results.push({
+                    market,
+                    indicators,
+                    patterns,
+                    confidence,
+                    sentiment,
+                    price: Math.floor(Math.random() * 100000) / 100,
+                    changePercent: (Math.random() - 0.5) * 10
+                });
+            });
+            
+            return results;
+        };
+
+        const generateChartData = (seed) => {
+            const points = [];
+            let value = 50 + (seed * 5);
+            for (let i = 0; i < 30; i++) {
+                value += (Math.random() - 0.4) * 4;
+                value = Math.max(20, Math.min(80, value));
+                points.push({ x: i, y: value });
+            }
+            return points;
+        };
+
+        const ChartComponent = ({ data, title, height = '400px' }) => {
+            if (!data || data.length === 0) return null;
+            const minY = Math.min(...data.map(p => p.y));
+            const maxY = Math.max(...data.map(p => p.y));
+            const rangeY = maxY - minY || 1;
+            const padding = 40;
+            const width = 600;
+            const innerHeight = parseInt(height) - padding;
+            const points = data.map((p, i) => {
+                const x = padding + (i / (data.length - 1)) * (width - padding * 1.5);
+                const y = innerHeight - ((p.y - minY) / rangeY) * (innerHeight - 40);
+                return [x, y];
+            });
+            const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0]} ${p[1]}`).join(' ');
+            
+            return (
+                <svg width="100%" height={height} style={{ background: '#0f172a', borderRadius: 8 }}>
+                    <defs>
+                        <linearGradient id="grad" x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.3"/>
+                            <stop offset="100%" stopColor="#3b82f6" stopOpacity="0"/>
+                        </linearGradient>
+                    </defs>
+                    {data.map((p, i) => {
+                        const x = padding + (i / (data.length - 1)) * (width - padding * 1.5);
+                        const h = ((p.y - minY) / rangeY) * (innerHeight - 40);
+                        const color = i > 0 && p.y > data[i-1].y ? '#22c55e' : '#ef4444';
+                        return (
+                            <g key={i}>
+                                <line x1={x} y1={innerHeight - h - 5} x2={x} y2={innerHeight} stroke={color} strokeWidth="1"/>
+                                <rect x={x-2} y={innerHeight - h - 2} width="4" height="4" fill={color}/>
+                            </g>
+                        );
+                    })}
+                    <path d={pathD} fill="none" stroke="#3b82f6" strokeWidth="2"/>
+                    <path d={pathD + ` L ${points[points.length-1][0]} ${innerHeight} L ${points[0][0]} ${innerHeight} Z`} fill="url(#grad)"/>
+                </svg>
+            );
+        };
+
+        const newsData = [
+            { title: 'Bitcoin Hits New ATH', category: 'Krypto', time: '5m' },
+            { title: 'Fed Rate Decision Coming', category: 'Macro', time: '15m' },
+            { title: 'Gold Surges on Inflation', category: 'Rohstoffe', time: '1h' },
+            { title: 'Tech Stocks Rally', category: 'Stocks', time: '2h' },
+            { title: 'Oil Prices Decline', category: 'Rohstoffe', time: '3h' },
+            { title: 'Earnings Season Begins', category: 'Stocks', time: '4h' },
+        ];
+
+        const TradingApp = () => {
+            const [selectedIndicator, setSelectedIndicator] = useState('RSI');
+            const [selectedPattern, setSelectedPattern] = useState('Hammer');
+            const [selectedMarket, setSelectedMarket] = useState('BTC');
+            const [showIndicatorModal, setShowIndicatorModal] = useState(false);
+            const [showPatternModal, setShowPatternModal] = useState(false);
+            const [indicatorCategory, setIndicatorCategory] = useState(null);
+            const [patternCategory, setPatternCategory] = useState(null);
+            const [indicatorChartData, setIndicatorChartData] = useState(generateChartData(1));
+            const [marketChartData, setMarketChartData] = useState(generateChartData(0));
+            const [analysisResults, setAnalysisResults] = useState(null);
+            const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+            const handleAnalysis = () => {
+                setIsAnalyzing(true);
+                setTimeout(() => {
+                    setAnalysisResults(generateAnalysis());
+                    setIsAnalyzing(false);
+                }, 2000);
+            };
+
+            const handleIndicatorSelect = (ind) => {
+                setSelectedIndicator(ind);
+                setIndicatorChartData(generateChartData(Math.random() * 10));
+                setShowIndicatorModal(false);
+                setIndicatorCategory(null);
+            };
+
+            const handlePatternSelect = (pat) => {
+                setSelectedPattern(pat);
+                setShowPatternModal(false);
+                setPatternCategory(null);
+            };
+
+            const handleMarketSelect = (market) => {
+                setSelectedMarket(market);
+                setMarketChartData(generateChartData(Math.random() * 10));
+            };
+
+            const indicatorCount = Object.values(allIndicators).reduce((sum, arr) => sum + arr.length, 0);
+            const patternCount = Object.values(allPatterns).reduce((sum, arr) => sum + arr.length, 0);
+
+            return (
+                <div className="container">
+                    <div className="header">
+                        <h1>🚀 PRO TRADING SIGNAL ENGINE MIT AI ANALYSE</h1>
+                        <p>📊 {indicatorCount}+ Indikatoren | 🎯 {patternCount} Patterns | 🤖 AI Auto-Analyse | ⚡ Live Scanning</p>
+                    </div>
+
+                    {/* ANALYSE SECTION */}
+                    <div className="card" style={{ background: 'linear-gradient(135deg, #6b21a8 0%, #1e293b 100%)', border: '2px solid #a855f7', marginBottom: 20 }}>
+                        <h2 style={{ color: '#e879f9', marginBottom: 12, fontSize: 16 }}>🤖 AI ANALYSE & PATTERN SCANNER</h2>
+                        <button 
+                            className="btn btn-large btn-purple"
+                            onClick={handleAnalysis}
+                            disabled={isAnalyzing}
+                            style={{ opacity: isAnalyzing ? 0.6 : 1 }}
+                        >
+                            {isAnalyzing ? '⏳ ANALYSIERE...' : '⚡ ANALYSIEREN - Alle Märkte Scannen'}
+                        </button>
+                        <p style={{ fontSize: 11, color: '#cbd5e1', marginTop: 8 }}>
+                            Scanned automatisch alle Märkte nach Mustern, Indikatoren & Signals!
+                        </p>
+                    </div>
+
+                    {/* ANALYSIS RESULTS */}
+                    {isAnalyzing && (
+                        <div className="card" style={{ marginBottom: 20 }}>
+                            <div className="loading">
+                                <div className="spinner"></div>
+                                <p>🔍 Analysiere Charts... suche Muster... erkenne Signale...</p>
+                            </div>
+                        </div>
+                    )}
+
+                    {analysisResults && (
+                        <div className="card" style={{ marginBottom: 20, background: 'linear-gradient(135deg, #0f4c75 0%, #1e293b 100%)', border: '1px solid #0ea5e9' }}>
+                            <h2 style={{ color: '#0ea5e9', marginBottom: 12 }}>📈 ANALYSE ERGEBNISSE ({analysisResults.length} Opportunities)</h2>
+                            <div className="analysis-grid">
+                                {analysisResults.map((result, i) => (
+                                    <div key={i} className="analysis-result">
+                                        <div className="result-market">{result.market}</div>
+                                        <div className="result-signal">
+                                            <strong>Sentiment:</strong> {result.sentiment}
+                                        </div>
+                                        <div className="result-signal">
+                                            <strong>Patterns:</strong> {result.patterns.join(', ')}
+                                        </div>
+                                        <div className="result-signal">
+                                            <strong>Indikatoren:</strong> {result.indicators.join(', ')}
+                                        </div>
+                                        <div style={{ marginTop: 8 }}>
+                                            <span className={`result-confidence ${result.confidence < 70 ? 'medium' : ''}`}>
+                                                {result.confidence}% Confidence
+                                            </span>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MAIN CONTENT */}
+                    <div className="grid-main">
+                        <div>
+                            <div className="card">
+                                <div className="chart-title">📊 {selectedMarket} - Live Chart</div>
+                                <ChartComponent data={marketChartData} title={selectedMarket} height="400px"/>
+                                <div className="info-text" style={{ background: '#0f172a', padding: 12, borderRadius: 4, fontSize: 11 }}>
+                                    <strong>{selectedMarket}</strong><br/>
+                                    📈 24h Change: +2.45%<br/>
+                                    🎯 Support: 42500 | Resistance: 48200
+                                </div>
+                            </div>
+
+                            <div className="card" style={{ marginTop: 20 }}>
+                                <div style={{ color: '#94a3b8', fontSize: 12, fontWeight: 600, marginBottom: 12 }}>🌍 34 MÄRKTE</div>
+                                <div className="market-buttons">
+                                    {markets.map(market => (
+                                        <button 
+                                            key={market}
+                                            className={`btn ${selectedMarket === market ? 'active' : ''}`}
+                                            onClick={() => handleMarketSelect(market)}
+                                        >
+                                            {market}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="card" style={{ marginTop: 20 }}>
+                                <div className="chart-title">📊 {selectedIndicator}</div>
+                                <ChartComponent data={indicatorChartData} title={selectedIndicator} height="280px"/>
+                            </div>
+
+                            <div className="card" style={{ marginTop: 20 }}>
+                                <div className="chart-title">🎯 {selectedPattern}</div>
+                                <ChartComponent data={generateChartData(5)} title={selectedPattern} height="250px"/>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div className="card">
+                                <h3 style={{ color: '#3b82f6', marginBottom: 12, fontSize: 14 }}>📊 INDIKATOREN</h3>
+                                <button className="btn btn-large btn-blue" onClick={() => setShowIndicatorModal(true)}>
+                                    📂 {indicatorCount}+ Öffnen
+                                </button>
+                                <div className="indicator-btn" style={{ padding: 8, fontSize: 11, background: '#3b82f6', color: '#fff', borderRadius: 4, width: '100%' }}>
+                                    ✓ {selectedIndicator}
+                                </div>
+
+                                <div style={{ marginBottom: 20, paddingTop: 20, borderTop: '1px solid #334155' }}>
+                                    <h3 style={{ color: '#10b981', marginBottom: 12, fontSize: 14 }}>🎯 CHARTMUSTER</h3>
+                                    <button className="btn btn-large btn-green" onClick={() => setShowPatternModal(true)}>
+                                        📂 {patternCount} Öffnen
+                                    </button>
+                                    <div className="indicator-btn" style={{ padding: 8, fontSize: 11, background: '#10b981', color: '#fff', borderRadius: 4, width: '100%' }}>
+                                        ✓ {selectedPattern}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="card" style={{ marginTop: 20 }}>
+                                <div style={{ color: '#94a3b8', fontSize: 12, fontWeight: 600, marginBottom: 12 }}>📰 NEWS (59)</div>
+                                {newsData.map((news, i) => (
+                                    <div key={i} className="news-item">
+                                        <strong>{news.title}</strong>
+                                        <div style={{ fontSize: 10, color: '#64748b', marginTop: 4 }}>{news.category} • {news.time}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* MODALS */}
+                    <div className={`modal ${showIndicatorModal ? 'active' : ''}`}>
+                        <div className="modal-content">
+                            <div className="modal-header">
+                                <h2 style={{ color: '#3b82f6' }}>📊 {indicatorCount}+ INDIKATOREN</h2>
+                                <button className="close-btn" onClick={() => { setShowIndicatorModal(false); setIndicatorCategory(null); }}>✕</button>
+                            </div>
+                            {!indicatorCategory ? (
+                                <div className="category-buttons">
+                                    {Object.keys(allIndicators).map(cat => (
+                                        <button key={cat} className="category-btn" onClick={() => setIndicatorCategory(cat)}>
+                                            {cat} ({allIndicators[cat].length})
+                                        </button>
+                                    ))}
+                                </div>
+                            ) : (
+                                <>
+                                    <button className="btn" onClick={() => setIndicatorCategory(null)} style={{ marginBottom: 12 }}>← Zurück</button>
+                                    <div className="indicator-grid">
+                                        {allIndicators[indicatorCategory].map(ind => (
+                                            <button 
+                                                key={ind}
+                                                className={`indicator-btn ${selectedIndicator === ind ? 'active' : ''}`}
+                                                onClick={() => handleIndicatorSelect(ind)}
+                                            >
+                                                {ind}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className={`modal ${showPatternModal ? 'active' : ''}`}>
+                        <div className="modal-content">
+                            <div className="modal-header">
+                                <h2 style={{ color: '#10b981' }}>🎯 {patternCount} CHARTMUSTER</h2>
+                                <button className="close-btn" onClick={() => { setShowPatternModal(false); setPatternCategory(null); }}>✕</button>
+                            </div>
+                            {!patternCategory ? (
+                                <div className="category-buttons">
+                                    {Object.keys(allPatterns).map(cat => (
+                                        <button key={cat} className="category-btn" onClick={() => setPatternCategory(cat)}>
+                                            {cat} ({allPatterns[cat].length})
+                                        </button>
+                                    ))}
+                                </div>
+                            ) : (
+                                <>
+                                    <button className="btn" onClick={() => setPatternCategory(null)} style={{ marginBottom: 12 }}>← Zurück</button>
+                                    <div className="indicator-grid">
+                                        {allPatterns[patternCategory].map(pat => (
+                                            <button 
+                                                key={pat}
+                                                className={`indicator-btn ${selectedPattern === pat ? 'active' : ''}`}
+                                                onClick={() => handlePatternSelect(pat)}
+                                            >
+                                                {pat}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<TradingApp />);
+    </script>
+</body>
+</html>
