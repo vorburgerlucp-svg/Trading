@@ -137,10 +137,13 @@ function setStatus(ok, msg){
   statusText.textContent = msg;
 }
 
+const DB_URL = 'https://finanzen-7dfd4-default-rtdb.europe-west1.firebasedatabase.app';
+
 async function loadMonths(){
   try{
-    const res = await window.storage.get('months', true);
-    months = res ? JSON.parse(res.value) : [];
+    const res = await fetch(DB_URL + '/months.json');
+    const data = await res.json();
+    months = Array.isArray(data) ? data.filter(Boolean) : [];
   }catch(e){ months = []; }
   if(!months.includes(monthKey(todayISO()))){
     months.push(monthKey(todayISO()));
@@ -149,7 +152,11 @@ async function loadMonths(){
   await saveMonths();
 }
 async function saveMonths(){
-  await window.storage.set('months', JSON.stringify(months), true);
+  await fetch(DB_URL + '/months.json', {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(months)
+  });
 }
 function renderMonthSelect(){
   monthSelect.innerHTML = '';
@@ -162,12 +169,19 @@ function renderMonthSelect(){
 }
 async function loadEntries(month){
   try{
-    const res = await window.storage.get('entries:'+month, true);
-    entries = res ? JSON.parse(res.value) : [];
+    const res = await fetch(DB_URL + '/entries/' + month + '.json');
+    const data = await res.json();
+    entries = data ? Object.values(data) : [];
   }catch(e){ entries = []; }
 }
 async function saveEntries(){
-  await window.storage.set('entries:'+currentMonth, JSON.stringify(entries), true);
+  const obj = {};
+  entries.forEach(e => { obj[e.id] = e; });
+  await fetch(DB_URL + '/entries/' + currentMonth + '.json', {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(obj)
+  });
 }
 
 function render(){
@@ -227,7 +241,7 @@ async function init(){
     renderMonthSelect();
     await loadEntries(currentMonth);
     render();
-    setStatus(true, 'Verbunden');
+    setStatus(true, 'Verbunden mit Firebase');
   }catch(e){
     setStatus(false, 'Verbindungsfehler: ' + e.message);
   }
