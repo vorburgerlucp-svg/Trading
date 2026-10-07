@@ -13,7 +13,8 @@ import {
   type CapitalEngine,
   type CommandMeta,
 } from '../capital/capital-engine.js';
-import type { AccountKey, JournalEntry } from '../capital/capital-types.js';
+import type { AppendResult } from '../capital/capital-ledger.js';
+import type { AccountKey } from '../capital/capital-types.js';
 import { Decimal, divRound, type DecimalInput } from '../money/decimal.js';
 import {
   addChf,
@@ -122,7 +123,7 @@ export class InventoryService {
       owedTo?: AccountKey;
       opportunityId?: string;
     },
-  ): Promise<JournalEntry> {
+  ): Promise<AppendResult> {
     this.getProduct(input.productId);
     const quantity = requirePositiveQuantity(input.quantity);
     requirePositive(input.purchaseCostChf, 'purchase cost');
@@ -135,10 +136,10 @@ export class InventoryService {
     if (input.paidFrom !== undefined) requireKind(input.paidFrom, ['cash', 'cash_reservation'], 'purchase payment source');
     if (input.owedTo !== undefined) requireKind(input.owedTo, ['payable'], 'purchase liability');
 
-    return this.engine.post(
+    return this.engine.submit('inventory.recordPurchase', input, { ...input, quantity }, (meta) =>
       this.engine.draft(
         'inventory_buy',
-        input,
+        meta,
         'Buy ' + quantity.toString() + ' x ' + input.productId,
         [
           { account: accounts.inventory(input.productId), amount: total, quantity },
@@ -164,7 +165,7 @@ export class InventoryService {
       fromReserved?: boolean;
       opportunityId?: string;
     },
-  ): Promise<JournalEntry> {
+  ): Promise<AppendResult> {
     this.getProduct(input.productId);
     const productId = input.productId;
     const quantity = requirePositiveQuantity(input.quantity);
@@ -189,7 +190,7 @@ export class InventoryService {
     }
     const stockAccount = input.fromReserved ? accounts.inventoryReserved(productId) : accounts.inventory(productId);
 
-    return this.engine.post((current) => {
+    return this.engine.submit('inventory.recordSale', input, { ...input, quantity }, (meta) => (current) => {
       const holding = current.balance(stockAccount);
       if (holding.quantity.lt(quantity)) {
         throw new CapitalRuleError('cannot sell ' + quantity.toString() + ' x ' + productId + ', ' + holding.quantity.toString() + ' in ' + stockAccount);
@@ -197,7 +198,7 @@ export class InventoryService {
       const cogs = releasedCost(holding, quantity);
       return this.engine.draft(
         'inventory_sale',
-        input,
+        meta,
         'Sell ' + quantity.toString() + ' x ' + productId + ' via ' + input.channel,
         [
           { account: settlementAccount, amount: payout },
@@ -216,11 +217,11 @@ export class InventoryService {
   }
 
   /** Reserves units for a pending order: moves them (with their average cost) to the reserved stock account. */
-  async reserveUnits(input: CommandMeta & { productId: string; quantity: DecimalInput }): Promise<JournalEntry> {
+  async reserveUnits(input: CommandMeta & { productId: string; quantity: DecimalInput }): Promise<AppendResult> {
     return this.moveUnits(input, accounts.inventory(input.productId), accounts.inventoryReserved(input.productId), 'reserve');
   }
 
-  async releaseUnits(input: CommandMeta & { productId: string; quantity: DecimalInput }): Promise<JournalEntry> {
+  async releaseUnits(input: CommandMeta & { productId: string; quantity: DecimalInput }): Promise<AppendResult> {
     return this.moveUnits(input, accounts.inventoryReserved(input.productId), accounts.inventory(input.productId), 'release_reserve');
   }
 
@@ -309,10 +310,10 @@ export class InventoryService {
     from: AccountKey,
     to: AccountKey,
     type: 'reserve' | 'release_reserve',
-  ): Promise<JournalEntry> {
+  ): Promise<AppendResult> {
     this.getProduct(input.productId);
     const quantity = requirePositiveQuantity(input.quantity);
-    return this.engine.post((current) => {
+    return this.engine.submit('inventory.' + type, input, { ...input, quantity, from, to }, (meta) => (current) => {
       const holding = current.balance(from);
       if (holding.quantity.lt(quantity)) {
         throw new CapitalRuleError('only ' + holding.quantity.toString() + ' units of ' + input.productId + ' in ' + from);
@@ -320,7 +321,7 @@ export class InventoryService {
       const cost = releasedCost(holding, quantity);
       return this.engine.draft(
         type,
-        input,
+        meta,
         (type === 'reserve' ? 'Reserve ' : 'Release ') + quantity.toString() + ' x ' + input.productId,
         [
           { account: to, amount: cost, quantity },

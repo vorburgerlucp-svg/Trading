@@ -20,7 +20,7 @@ export class NexusMemory {
     if (available < occurred) throw new MemoryError('availableAt cannot be before occurredAt');
     if (input.subject.trim() === '' || input.source.trim() === '') throw new MemoryError('subject and source are required');
     if (input.supersedes !== undefined && !this.log.get(input.supersedes)) throw new MemoryError('cannot supersede unknown record "' + input.supersedes + '"');
-    const record = await this.log.append(input.id, { ...input, tags: [...input.tags] });
+    const { record } = await this.log.append(input.id, { ...input, tags: [...input.tags] });
     return { ...(record.payload as MemoryRecordInput<C>), recordedAt: record.recordedAt };
   }
 
@@ -41,6 +41,11 @@ export class NexusMemory {
   get<C = unknown>(id: string): MemoryRecord<C> | undefined {
     const record = this.log.get(id);
     return record ? { ...(record.payload as MemoryRecordInput<C>), recordedAt: record.recordedAt } : undefined;
+  }
+
+  /** Catches up with records written by other NEXUS processes (verified). */
+  sync(): Promise<void> {
+    return this.log.sync();
   }
 
   verifyIntegrity() {

@@ -10,7 +10,8 @@ import type { Recommendation } from '../ai/model-types.js';
 import type { NexusMemory } from '../memory/nexus-memory.js';
 import { Decimal } from '../money/decimal.js';
 import { ratioBp, rappen, subChf, type Rappen } from '../money/money.js';
-import type { AttemptRecord, DecisionRecord } from '../nexus/nexus-types.js';
+import type { AuditLog } from '../audit/audit-log.js';
+import type { AttemptRecord, DecisionTrace } from '../nexus/nexus-types.js';
 
 export interface TradeOutcome {
   kind: 'trade';
@@ -137,9 +138,10 @@ export class OutcomeEvaluator {
   constructor(
     private readonly memory: NexusMemory,
     private readonly performance: ModelPerformance,
+    private readonly audit?: AuditLog,
   ) {}
 
-  async evaluate(record: DecisionRecord, outcome: TradeOutcome | PhysicalOutcome): Promise<{ evaluation: TradeEvaluation | PhysicalEvaluation; observations: PerformanceObservation[] }> {
+  async evaluate(record: DecisionTrace, outcome: TradeOutcome | PhysicalOutcome): Promise<{ evaluation: TradeEvaluation | PhysicalEvaluation; observations: PerformanceObservation[] }> {
     const decision = record.decision;
     if (outcome.decisionId !== decision.decisionId) throw new EvaluationError('outcome belongs to another decision');
     if (Date.parse(outcome.knownAt) <= Date.parse(decision.asOf)) throw new EvaluationError('outcome must become known after the decision (look-ahead protection)');
@@ -154,6 +156,15 @@ export class OutcomeEvaluator {
       occurredAt: decision.asOf,
       availableAt: outcome.knownAt,
       source: 'outcome-evaluator',
+    });
+    await this.audit?.record({
+      eventId: decision.decisionId + ':outcome',
+      type: 'OUTCOME_RECORDED',
+      occurredAt: outcome.knownAt,
+      decisionId: decision.decisionId,
+      taskId: decision.taskId,
+      actor: { kind: 'system', id: 'outcome-evaluator' },
+      payload: { outcome, evaluation },
     });
 
     const observations: PerformanceObservation[] = [];

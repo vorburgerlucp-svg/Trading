@@ -6,7 +6,7 @@ import { evaluatePhysical, evaluateTrade, OutcomeEvaluator, scoreRecommendation,
 import { NexusMemory } from '../../src/memory/nexus-memory.js';
 import { Decimal } from '../../src/money/decimal.js';
 import { chf } from '../../src/money/money.js';
-import type { DecisionRecord } from '../../src/nexus/nexus-types.js';
+import type { DecisionTrace } from '../../src/nexus/nexus-types.js';
 import { T0 } from '../helpers.js';
 import { byRole, CLAUDE, decisionRequest, GEMINI, HUMAN, MODELS, OPENAI, opinion, ScriptedAdapter, setupBrain, SYSTEM, task } from './fakes.js';
 
@@ -15,10 +15,10 @@ const LATER = '2026-11-01T00:00:00.000Z';
 async function learningSetup() {
   const memory = await NexusMemory.open();
   const performance = new ModelPerformance(memory);
-  const registry = new ModelRegistry();
-  registry.registerActive(MODELS.openai, { at: T0, by: HUMAN, reason: 'initial council' });
-  registry.registerActive(MODELS.anthropic, { at: T0, by: HUMAN, reason: 'initial council' });
-  const champions = new ChampionBoard({ macro: OPENAI });
+  const registry = await ModelRegistry.open();
+  await registry.registerActive(MODELS.openai, { at: T0, by: HUMAN, reason: 'initial council' });
+  await registry.registerActive(MODELS.anthropic, { at: T0, by: HUMAN, reason: 'initial council' });
+  const champions = await ChampionBoard.open({ performance, initialChampions: { macro: OPENAI } });
   let n = 0;
   const observe = async (key: string, score: number, count: number, availableAt = '2026-10-15T00:00:00.000Z') => {
     for (let i = 0; i < count; i++) {
@@ -32,17 +32,17 @@ async function learningSetup() {
 describe('Model Registry Governance', () => {
   it('neue Modelle starten im Shadow Mode; nur ein Mensch erweitert Rechte, und nur nach Benchmark', async () => {
     const { registry, performance, observe } = await learningSetup();
-    const entry = registry.register(MODELS.google, { at: T0, by: SYSTEM, reason: 'new model available' });
+    const entry = await registry.register(MODELS.google, { at: T0, by: SYSTEM, reason: 'new model available' });
     expect(entry.shadowMode).toBe(true);
 
-    expect(() => registry.registerActive({ ...MODELS.google, model: 'other' }, { at: T0, by: SYSTEM, reason: 'self-promotion' })).toThrow(/only a human/);
-    expect(() => registry.activate(GEMINI, { at: T0, by: SYSTEM, reason: 'x' }, { passed: true, reasons: [] })).toThrow(/only a human/);
-    expect(() => registry.activate(GEMINI, { at: T0, by: HUMAN, reason: 'x' }, shadowExitGate(GEMINI, performance, LATER))).toThrow(/benchmark gate not passed/);
+    await expect(registry.registerActive({ ...MODELS.google, model: 'other' }, { at: T0, by: SYSTEM, reason: 'self-promotion' })).rejects.toThrow(/only a human/);
+    await expect(registry.activate(GEMINI, { at: T0, by: SYSTEM, reason: 'x' }, { passed: true, reasons: [] })).rejects.toThrow(/only a human/);
+    await expect(registry.activate(GEMINI, { at: T0, by: HUMAN, reason: 'x' }, shadowExitGate(GEMINI, performance, LATER))).rejects.toThrow(/benchmark gate not passed/);
 
     await observe(GEMINI, 0.8, 30);
     const gate = shadowExitGate(GEMINI, performance, LATER);
     expect(gate.passed).toBe(true);
-    expect(registry.activate(GEMINI, { at: LATER, by: HUMAN, reason: 'benchmark passed' }, gate).shadowMode).toBe(false);
+    expect((await registry.activate(GEMINI, { at: LATER, by: HUMAN, reason: 'benchmark passed' }, gate)).shadowMode).toBe(false);
     expect(registry.changes().map((c) => c.change)).toEqual(['registered_active', 'registered_active', 'registered_shadow', 'activated']);
   });
 
@@ -60,9 +60,9 @@ describe('Lernen: kontrolliert', () => {
     const { registry, performance, champions, observe } = await learningSetup();
     await observe(CLAUDE, 1, 1);
     expect(performance.published(CLAUDE, 'macro', undefined, LATER)).toBeNull();
-    performance.syncRegistry(registry, LATER);
+    await performance.syncRegistry(registry, LATER);
     expect(registry.get(CLAUDE)?.domainScores).toEqual([]);
-    const decision = champions.evaluate('macro', registry, performance, LATER);
+    const decision = champions.evaluate('macro', registry, LATER);
     expect(decision.promote).toBe(false);
     expect(decision.reasons.join(' ')).toMatch(/1 samples < 50 required/);
     expect(champions.champion('macro')).toBe(OPENAI);
@@ -72,16 +72,16 @@ describe('Lernen: kontrolliert', () => {
     const { registry, performance, champions, observe } = await learningSetup();
     await observe(OPENAI, 0.55, 60);
     await observe(CLAUDE, 0.75, 20);
-    performance.syncRegistry(registry, LATER);
+    await performance.syncRegistry(registry, LATER);
     const claudeScore = registry.get(CLAUDE)?.domainScores.find((s) => s.domain === 'macro' && s.subtask === undefined);
     expect(claudeScore?.sampleSize).toBe(20);
     expect(claudeScore?.score).toBeCloseTo((10 * 0.5 + 20 * 0.75) / 30, 10); // shrunk toward the prior
-    expect(champions.evaluate('macro', registry, performance, LATER).promote).toBe(false); // 20 < 50 samples
+    expect(champions.evaluate('macro', registry, LATER).promote).toBe(false); // 20 < 50 samples
 
     await observe(CLAUDE, 0.75, 40);
-    const decision = champions.evaluate('macro', registry, performance, LATER);
+    const decision = champions.evaluate('macro', registry, LATER);
     expect(decision).toMatchObject({ promote: true, currentChampion: OPENAI, candidate: CLAUDE });
-    champions.apply(decision, SYSTEM);
+    await champions.apply(decision, SYSTEM);
     expect(champions.champion('macro')).toBe(CLAUDE);
     expect(champions.history()[0]).toMatchObject({ from: OPENAI, to: CLAUDE });
   });
@@ -119,12 +119,12 @@ describe('OutcomeEvaluator', () => {
     const skeptic = new ScriptedAdapter('openai', 'test-gpt', byRole({ analyst: opinion({ stance: 'bearish', recommendation: 'no_trade', riskFlags: [{ check: 'liquidity', severity: 'major', statement: 'Thin order book', evidenceRefIds: [] }] }) }));
     const critic = new ScriptedAdapter('google', 'test-gemini', byRole({}));
     const ctx = await setupBrain({ adapters: [buyer, skeptic, critic] });
-    ctx.registry.setEnabled(GEMINI, false, { at: T0, by: SYSTEM, reason: 'two-model committee for this test' });
+    await ctx.registry.setEnabled(GEMINI, false, { at: T0, by: SYSTEM, reason: 'two-model committee for this test' });
     const d = await ctx.brain.decide(decisionRequest(task({ importance: 'high', domain: 'equities' })));
     expect(d.outcome).toBe('NO_ACTION');
 
     const evaluator = new OutcomeEvaluator(ctx.memory, ctx.performance);
-    const record = ctx.brain.record(d.decisionId) as DecisionRecord;
+    const record = ctx.brain.trace(d.decisionId) as DecisionTrace;
     const { evaluation, observations } = await evaluator.evaluate(record, tradeOutcome(d.decisionId));
 
     expect(evaluation).toMatchObject({ kind: 'trade', returnBp: -1200, maxAdverseExcursionBp: -1500, maxFavorableExcursionBp: 200, stop: 'hit', target: 'not_reached' });
@@ -139,7 +139,7 @@ describe('OutcomeEvaluator', () => {
     const ctx = await setupBrain({ adapters: [new ScriptedAdapter('google', 'test-gemini', byRole({}))], active: [MODELS.google] });
     const d = await ctx.brain.decide(decisionRequest(task()));
     const evaluator = new OutcomeEvaluator(ctx.memory, ctx.performance);
-    await expect(evaluator.evaluate(ctx.brain.record(d.decisionId) as DecisionRecord, tradeOutcome(d.decisionId, { knownAt: '2026-09-30T00:00:00.000Z' }))).rejects.toThrow(/look-ahead/);
+    await expect(evaluator.evaluate(ctx.brain.trace(d.decisionId) as DecisionTrace, tradeOutcome(d.decisionId, { knownAt: '2026-09-30T00:00:00.000Z' }))).rejects.toThrow(/look-ahead/);
   });
 
   it('Trading-Kennzahlen: Stop zu eng, wenn danach erholt', () => {

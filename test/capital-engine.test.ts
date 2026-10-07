@@ -43,7 +43,8 @@ describe('Beispiel aus der Spezifikation: 100 CHF Start, 20 Reserve, 10 Ware, 30
 describe('1. Einzahlung', () => {
   it('erhöht Cash, Vermögen und Einlagen; P&L bleibt 0', async () => {
     const { engine, ledger } = await newEngine();
-    const entry = await engine.deposit({ to: bank, amountChf: chf(500), id: 'bank-2026-10-01-001' });
+    const { status, entry } = await engine.deposit({ to: bank, amountChf: chf(500), id: 'bank-2026-10-01-001' });
+    expect(status).toBe('APPLIED');
 
     const s = engine.capitalState();
     expect(entry.type).toBe('deposit');
@@ -203,7 +204,7 @@ describe('5. Warenverkauf', () => {
     const { engine, inventory, ledger } = await newInventory();
     await engine.deposit({ to: bank, amountChf: chf(500) });
     await inventory.recordPurchase({ productId: 'kaugummi', quantity: 1, purchaseCostChf: chf(20), paidFrom: bank });
-    const sale = await inventory.recordSale({
+    const { entry: sale } = await inventory.recordSale({
       productId: 'kaugummi',
       quantity: 1,
       grossRevenueChf: chf(35),
@@ -508,7 +509,7 @@ describe('Korrekturen', () => {
   it('storniert einen Trade vollständig, ohne die Historie zu verändern', async () => {
     const { engine, ledger } = await newEngine();
     await engine.deposit({ to: ibkr, amountChf: chf(100) });
-    const buy = await engine.recordTradeBuy({ brokerId: 'ibkr', instrumentId: 'ACME', quantity: 1, grossAmountChf: chf(50), feeChf: chf(1) });
+    const { entry: buy } = await engine.recordTradeBuy({ brokerId: 'ibkr', instrumentId: 'ACME', quantity: 1, grossAmountChf: chf(50), feeChf: chf(1) });
     await engine.reverse({ entryId: buy.id, reason: 'duplicate fill from broker sync' });
 
     const s = engine.snapshot();
@@ -521,7 +522,7 @@ describe('Korrekturen', () => {
 
   it('kann keine Einzahlung stornieren, deren Geld schon ausgegeben ist', async () => {
     const { engine } = await newEngine();
-    const deposit = await engine.deposit({ to: ibkr, amountChf: chf(100) });
+    const { entry: deposit } = await engine.deposit({ to: ibkr, amountChf: chf(100) });
     await engine.recordTradeBuy({ brokerId: 'ibkr', instrumentId: 'ACME', quantity: 1, grossAmountChf: chf(80) });
     await expect(engine.reverse({ entryId: deposit.id, reason: 'test' })).rejects.toMatchObject({ code: 'guard_rejected' });
   });

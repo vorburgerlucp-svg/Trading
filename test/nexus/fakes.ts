@@ -7,6 +7,8 @@ import type { AdapterConnection, ModelAdapter, SpecialistRequest } from '../../s
 import { ModelPerformance } from '../../src/ai/model-performance.js';
 import { ModelRegistry, type ModelRegistration } from '../../src/ai/model-registry.js';
 import { modelKey, type Domain, type ModelKey } from '../../src/ai/model-types.js';
+import { AuditLog } from '../../src/audit/audit-log.js';
+import { DecisionRecordStore } from '../../src/audit/decision-records.js';
 import { SharedBlackboard } from '../../src/blackboard/shared-blackboard.js';
 import { accounts } from '../../src/capital/accounts.js';
 import type { AllocationPolicy } from '../../src/capital/capital-allocator.js';
@@ -133,13 +135,15 @@ export async function setupBrain(setup: BrainSetup = {}) {
 
   const clock = () => new Date(T0);
   const evidence = await EvidenceStore.open(undefined, { clock });
-  const blackboard = await SharedBlackboard.open(evidence, undefined, { clock });
+  const blackboard = await SharedBlackboard.open(evidence, undefined, { clock, newId: sequentialIds('bb') });
   const memory = await NexusMemory.open(undefined, { clock });
+  const audit = await AuditLog.open(undefined, { clock });
+  const decisions = await DecisionRecordStore.open(undefined, { clock });
   const performance = new ModelPerformance(memory);
-  const registry = new ModelRegistry();
-  for (const m of setup.active ?? Object.values(MODELS)) registry.registerActive(m, { at: T0, by: HUMAN, reason: 'initial council (test)' });
-  for (const m of setup.shadow ?? []) registry.register(m, { at: T0, by: SYSTEM, reason: 'new model (test)' });
-  const champions = new ChampionBoard(setup.champions ?? {});
+  const registry = await ModelRegistry.open(undefined, { clock, newId: sequentialIds('reg') });
+  for (const m of setup.active ?? Object.values(MODELS)) await registry.registerActive(m, { at: T0, by: HUMAN, reason: 'initial council (test)' });
+  for (const m of setup.shadow ?? []) await registry.register(m, { at: T0, by: SYSTEM, reason: 'new model (test)' });
+  const champions = await ChampionBoard.open({ performance, initialChampions: setup.champions ?? {} });
   const adapters = new Map((setup.adapters ?? []).map((a) => [modelKey(a.provider, a.model), a] as const));
 
   await evidence.register(evidenceRef({ id: 'price-aapl' }));
@@ -156,12 +160,14 @@ export async function setupBrain(setup: BrainSetup = {}) {
     evidence,
     blackboard,
     memory,
+    audit,
+    decisions,
     capital: readOnlyCapital(engine),
     allocationPolicy,
     safety: setup.safety ?? loadSafetyConfig({ TRADING_MODE: 'paper', ALLOW_LIVE_TRADING: 'false' }),
     modelTimeoutMs: setup.modelTimeoutMs ?? 1_000,
   });
-  return { brain, engine, evidence, blackboard, memory, performance, registry, champions, adapters, allocationPolicy };
+  return { brain, engine, evidence, blackboard, memory, audit, decisions, performance, registry, champions, adapters, allocationPolicy };
 }
 
 export const apple = () => createOpportunity(appleSwing);

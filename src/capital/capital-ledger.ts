@@ -1,69 +1,43 @@
 // Append-only, double-entry capital ledger.
 //
-// Guarantees (structural, checked on every append):
-//  - every entry balances: the sum of all posting amounts is exactly 0 Rappen
-//  - entry IDs are unique (idempotency: a re-sent broker/bank event is rejected, not double-booked)
-//  - entries are frozen after append and never updated or deleted; corrections are reversal entries
-//  - entries are hash-chained (SHA-256), so tampering with persisted history is detectable
+// Guarantees:
+//  - every entry balances: per currency, the sum of all posting amounts is exactly 0 minor units
+//  - one linear, hash-chained history (SHA-256): tamper-EVIDENT (see ledger-integrity.ts)
+//  - idempotency: an id is booked at most once. Replaying the same command (same fingerprint)
+//    returns ALREADY_APPLIED; reusing an id for different content is an idempotency_conflict
+//  - entries are frozen and never updated or deleted; corrections are reversal entries
+//  - CHF-only operation: other currencies are rejected explicitly, never converted
+//  - writes go through the store's cross-process critical section (PostgreSQL row lock): the ledger
+//    catches up with entries committed elsewhere, then validates and runs the business-rule guard
+//    against that true latest state. No double spend across servers.
+//  - fail closed: once corruption is detected, every read and write throws FINANCIAL_INTEGRITY_ERROR
 //
-// Business rules (no overdraft, no negative stock, ...) are enforced by the CapitalEngine through
-// the `guard` callback, which runs inside the same serialized append section as the write.
+// The in-memory state is a projection of the stored history (source events), rebuilt on open.
 
 import { Decimal } from '../money/decimal.js';
 import { rappen, ZERO_CHF } from '../money/money.js';
-import { hashOf } from '../persistence/canonical-json.js';
-import { parseAccountKey } from './accounts.js';
+import { GENESIS_HASH } from '../persistence/append-only-log.js';
+import type { AccountBalance, AccountKey, JournalEntry, JournalEntryDraft, Posting } from './capital-types.js';
+import { LedgerError } from './ledger-errors.js';
 import {
-  CAPITAL_TRANSACTION_TYPES,
-  type AccountBalance,
-  type AccountKey,
-  type EntryRefs,
-  type JournalEntry,
-  type JournalEntryDraft,
-  type Posting,
-} from './capital-types.js';
+  computeEntryHash,
+  draftFingerprint,
+  FinancialIntegrityError,
+  normalizePosting,
+  normalizeTimestamp,
+  stripUndefined,
+  structuralIssues,
+  verifyLedgerEntries,
+  type IntegrityIssue,
+  type LedgerCheckpoint,
+  type LedgerCheckpointStore,
+} from './ledger-integrity.js';
+import { InMemoryLedgerStore, type LedgerStore } from './ledger-store.js';
 
-export type LedgerErrorCode =
-  | 'invalid_entry'
-  | 'unbalanced'
-  | 'duplicate_id'
-  | 'unknown_entry'
-  | 'already_reversed'
-  | 'guard_rejected'
-  | 'store_conflict'
-  | 'integrity';
-
-export class LedgerError extends Error {
-  override readonly name = 'LedgerError';
-  constructor(
-    readonly code: LedgerErrorCode,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
-/** Persistence port. Implementations must be append-only and reject out-of-order sequences. */
-export interface LedgerStore {
-  loadAll(): Promise<readonly JournalEntry[]>;
-  /** Must reject unless entry.sequence === number of stored entries + 1 (optimistic concurrency). */
-  append(entry: JournalEntry): Promise<void>;
-}
-
-export class InMemoryLedgerStore implements LedgerStore {
-  private readonly entries: JournalEntry[] = [];
-
-  async loadAll(): Promise<readonly JournalEntry[]> {
-    return [...this.entries];
-  }
-
-  async append(entry: JournalEntry): Promise<void> {
-    if (entry.sequence !== this.entries.length + 1) {
-      throw new LedgerError('store_conflict', 'expected sequence ' + (this.entries.length + 1) + ', got ' + entry.sequence);
-    }
-    this.entries.push(entry);
-  }
-}
+export { LedgerError, type LedgerErrorCode } from './ledger-errors.js';
+export { InMemoryLedgerStore, type LedgerStore } from './ledger-store.js';
+export { GENESIS_HASH } from '../persistence/append-only-log.js';
+export { computeEntryHash } from './ledger-integrity.js';
 
 export interface LedgerView {
   readonly size: number;
@@ -79,17 +53,37 @@ export type AppendGuard = (draft: JournalEntryDraft, after: LedgerView) => void;
 /** Builds a draft from the current state, inside the serialized append section. Throws to reject. */
 export type DraftFactory = (current: LedgerView) => JournalEntryDraft;
 
+export type AppendStatus = 'APPLIED' | 'ALREADY_APPLIED';
+
+export interface AppendResult {
+  status: AppendStatus;
+  entry: JournalEntry;
+}
+
+export interface AppendOptions {
+  guard?: AppendGuard;
+  /** Stable id of the external/repeatable event (e.g. "broker-fill:ibkr:ORDER123:FILL4"). Must equal the draft id. */
+  idempotencyKey?: string;
+  /** Hash of the originating command. Defaults to the normalized draft content. */
+  requestFingerprint?: string;
+}
+
+export interface LedgerOpenOptions {
+  clock?: () => Date;
+  /** Latest trusted checkpoint is verified on open; a mismatch is a FINANCIAL_INTEGRITY_ERROR. */
+  checkpoints?: LedgerCheckpointStore;
+}
+
+const ZERO_BALANCE: AccountBalance = Object.freeze({ amount: ZERO_CHF, quantity: Decimal.ZERO });
+
 function rejectOnError<T>(fn: () => T): T {
   try {
     return fn();
   } catch (error) {
-    if (error instanceof LedgerError) throw error;
+    if (error instanceof LedgerError || error instanceof FinancialIntegrityError) throw error;
     throw new LedgerError('guard_rejected', error instanceof Error ? error.message : String(error));
   }
 }
-
-export const GENESIS_HASH = '0'.repeat(64);
-const ZERO_BALANCE: AccountBalance = Object.freeze({ amount: ZERO_CHF, quantity: Decimal.ZERO });
 
 export class CapitalLedger implements LedgerView {
   private readonly entries: JournalEntry[] = [];
@@ -97,30 +91,34 @@ export class CapitalLedger implements LedgerView {
   private readonly reversedIds = new Set<string>();
   private readonly current = new Map<AccountKey, AccountBalance>();
   private queue: Promise<unknown> = Promise.resolve();
+  private corruption: FinancialIntegrityError | null = null;
 
   private constructor(
     private readonly store: LedgerStore,
     private readonly clock: () => Date,
   ) {}
 
-  /** Loads and verifies the full history from the store. Refuses to open a tampered ledger. */
-  static async open(store: LedgerStore, options: { clock?: () => Date } = {}): Promise<CapitalLedger> {
+  /** Loads and fully verifies the stored history. Refuses (fails closed) on any integrity issue. */
+  static async open(store: LedgerStore, options: LedgerOpenOptions = {}): Promise<CapitalLedger> {
     const ledger = new CapitalLedger(store, options.clock ?? (() => new Date()));
     const history = await store.loadAll();
-    let prevHash = GENESIS_HASH;
-    for (const [index, entry] of history.entries()) {
-      if (entry.sequence !== index + 1) throw new LedgerError('integrity', 'sequence gap at position ' + (index + 1));
-      if (entry.prevHash !== prevHash) throw new LedgerError('integrity', 'broken hash chain at sequence ' + entry.sequence);
-      if (computeEntryHash(entry) !== entry.hash) throw new LedgerError('integrity', 'hash mismatch at sequence ' + entry.sequence);
-      ledger.validateStructure(entry);
-      ledger.apply(deepFreezeEntry(entry));
-      prevHash = entry.hash;
-    }
+    const checkpoint = options.checkpoints ? await options.checkpoints.getLatestCheckpoint(store.ledgerId) : null;
+    const report = verifyLedgerEntries(history, { allowedCurrencies: store.allowedCurrencies, checkpoint });
+    if (!report.ok) throw new FinancialIntegrityError(report.issues, 'ledger ' + store.ledgerId);
+    for (const entry of history) ledger.apply(deepFreezeEntry(entry));
     return ledger;
   }
 
-  static inMemory(options: { clock?: () => Date } = {}): Promise<CapitalLedger> {
+  static inMemory(options: LedgerOpenOptions = {}): Promise<CapitalLedger> {
     return CapitalLedger.open(new InMemoryLedgerStore(), options);
+  }
+
+  get ledgerId(): string {
+    return this.store.ledgerId;
+  }
+
+  get allowedCurrencies(): readonly string[] {
+    return this.store.allowedCurrencies;
   }
 
   get size(): number {
@@ -131,26 +129,37 @@ export class CapitalLedger implements LedgerView {
     return this.entries.at(-1)?.hash ?? GENESIS_HASH;
   }
 
+  /** Current head, e.g. to reference the exact capital state a decision was based on. */
+  head(): { ledgerId: string; sequence: number; hash: string } {
+    this.assertHealthy();
+    return { ledgerId: this.store.ledgerId, sequence: this.entries.length, hash: this.lastHash };
+  }
+
   all(): readonly JournalEntry[] {
+    this.assertHealthy();
     return [...this.entries];
   }
 
   get(entryId: string): JournalEntry | undefined {
+    this.assertHealthy();
     return this.byId.get(entryId);
   }
 
   isReversed(entryId: string): boolean {
+    this.assertHealthy();
     return this.reversedIds.has(entryId);
   }
 
   balance(account: AccountKey): AccountBalance {
+    this.assertHealthy();
     return this.current.get(account) ?? ZERO_BALANCE;
   }
 
   /** Current balances, or balances as of an economic point in time (entries with occurredAt <= asOf). */
   balances(options: { asOf?: string } = {}): ReadonlyMap<AccountKey, AccountBalance> {
+    this.assertHealthy();
     if (options.asOf === undefined) return new Map(this.current);
-    const asOf = normalizeTimestamp(options.asOf, 'asOf');
+    const asOf = toTimestamp(options.asOf, 'asOf');
     const result = new Map<AccountKey, AccountBalance>();
     for (const entry of this.entries) {
       if (entry.occurredAt <= asOf) applyPostings(result, entry.postings);
@@ -159,89 +168,123 @@ export class CapitalLedger implements LedgerView {
   }
 
   /**
-   * Validates, hashes, persists and applies an entry. Appends are serialized: a draft factory and the
-   * guard always see exactly the state the entry will be applied to (no check-then-write races).
+   * Validates, hashes, persists and applies an entry inside the store's critical section.
+   * A draft factory and the guard see exactly the state the entry will be applied to.
    */
-  append(draft: JournalEntryDraft | DraftFactory, guard?: AppendGuard): Promise<JournalEntry> {
-    const run = this.queue.then(() => this.appendNow(draft, guard));
+  append(input: JournalEntryDraft | DraftFactory, options: AppendOptions = {}): Promise<AppendResult> {
+    const run = this.queue.then(() => this.appendNow(input, options));
     this.queue = run.catch(() => undefined);
     return run;
   }
 
-  /** Re-verifies the in-memory chain (e.g. before a reconciliation run). */
-  verifyIntegrity(): { ok: true } | { ok: false; sequence: number; reason: string } {
-    let prevHash = GENESIS_HASH;
-    for (const entry of this.entries) {
-      if (entry.prevHash !== prevHash) return { ok: false, sequence: entry.sequence, reason: 'broken hash chain' };
-      if (computeEntryHash(entry) !== entry.hash) return { ok: false, sequence: entry.sequence, reason: 'hash mismatch' };
-      prevHash = entry.hash;
-    }
-    return { ok: true };
+  /** Catches up with entries committed by other processes (verified like everything else). */
+  sync(): Promise<void> {
+    const run = this.queue.then(async () => {
+      this.assertHealthy();
+      this.applyCommitted(await this.store.loadAfter(this.entries.length));
+    });
+    this.queue = run.catch(() => undefined);
+    return run;
   }
 
-  private async appendNow(input: JournalEntryDraft | DraftFactory, guard?: AppendGuard): Promise<JournalEntry> {
-    const draft = typeof input === 'function' ? rejectOnError(() => input(this.viewOf(this.current))) : input;
-    const unsigned = {
-      sequence: this.entries.length + 1,
-      id: draft.id,
-      occurredAt: normalizeTimestamp(draft.occurredAt, 'occurredAt'),
-      recordedAt: this.clock().toISOString(),
-      type: draft.type,
-      description: draft.description,
-      postings: draft.postings.map(normalizePosting),
-      refs: stripUndefined(draft.refs ?? {}),
-      source: draft.source ?? 'engine',
-      prevHash: this.lastHash,
-    };
-    const entry = deepFreezeEntry({ ...unsigned, hash: computeEntryHash(unsigned) });
-    this.validateStructure(entry);
-
-    if (guard) {
-      const after = new Map(this.current);
-      applyPostings(after, entry.postings);
-      rejectOnError(() => guard(draft, this.viewOf(after)));
-    }
-
-    await this.store.append(entry);
-    this.apply(entry);
-    return entry;
+  /** Re-verifies the in-memory projection. */
+  verifyIntegrity(): { ok: true } | { ok: false; issues: IntegrityIssue[] } {
+    const report = verifyLedgerEntries(this.entries, { allowedCurrencies: this.store.allowedCurrencies });
+    return report.ok ? { ok: true } : { ok: false, issues: report.issues };
   }
 
-  private validateStructure(entry: JournalEntry): void {
-    const fail = (message: string): never => {
-      throw new LedgerError('invalid_entry', 'entry "' + entry.id + '": ' + message);
-    };
-    if (typeof entry.id !== 'string' || entry.id.trim() === '') fail('id is required');
-    if (this.byId.has(entry.id)) throw new LedgerError('duplicate_id', 'entry id "' + entry.id + '" already exists');
-    if (!CAPITAL_TRANSACTION_TYPES.includes(entry.type)) fail('unknown type "' + entry.type + '"');
-    if (entry.description.trim() === '') fail('description is required');
-    if (entry.postings.length < 2) fail('needs at least two postings');
+  /** Creates a checkpoint of the current head (to be stored outside the ledger database). */
+  checkpoint(): LedgerCheckpoint {
+    const head = this.head();
+    return { ledgerId: head.ledgerId, sequence: head.sequence, hash: head.hash, createdAt: this.clock().toISOString(), signature: null };
+  }
 
-    let sum = 0n;
-    for (const posting of entry.postings) {
-      if (typeof posting.amount !== 'bigint') fail('amount must be bigint Rappen on ' + posting.account);
-      let info: ReturnType<typeof parseAccountKey>;
-      try {
-        info = parseAccountKey(posting.account);
-      } catch (error) {
-        return fail(error instanceof Error ? error.message : String(error));
+  private async appendNow(input: JournalEntryDraft | DraftFactory, options: AppendOptions): Promise<AppendResult> {
+    this.assertHealthy();
+    const result = await this.store.writeExclusive<AppendResult>(this.entries.length, (newer) => {
+      this.applyCommitted(newer);
+
+      // Idempotency first: a replayed event must not be re-evaluated against today's state.
+      const plain = typeof input === 'function' ? null : input;
+      const key = options.idempotencyKey ?? plain?.id;
+      const early = key !== undefined ? this.byId.get(key) : undefined;
+      if (early) {
+        const fingerprint = options.requestFingerprint ?? (plain ? draftFingerprint(plain) : undefined);
+        return { kind: 'none', result: this.replayResult(early, fingerprint) };
       }
-      const holdsQuantity = info.kind === 'position' || info.kind === 'inventory';
-      if (holdsQuantity && posting.quantity === undefined) fail('posting to ' + posting.account + ' needs a quantity');
-      if (!holdsQuantity && posting.quantity !== undefined) fail('posting to ' + posting.account + ' must not carry a quantity');
-      if (posting.amount === 0n && (posting.quantity === undefined || posting.quantity.isZero())) {
-        fail('empty posting to ' + posting.account);
+
+      const draft = typeof input === 'function' ? rejectOnError(() => input(this.viewOf(this.current))) : input;
+      if (options.idempotencyKey !== undefined && draft.id !== options.idempotencyKey) {
+        throw new LedgerError('invalid_entry', 'draft id "' + draft.id + '" differs from idempotency key "' + options.idempotencyKey + '"');
       }
-      sum += posting.amount;
+      const fingerprint = options.requestFingerprint ?? draftFingerprint(draft);
+      const late = this.byId.get(draft.id);
+      if (late) return { kind: 'none', result: this.replayResult(late, fingerprint) };
+
+      const unsigned = {
+        sequence: this.entries.length + 1,
+        id: draft.id,
+        occurredAt: toTimestamp(draft.occurredAt, 'occurredAt'),
+        recordedAt: this.clock().toISOString(),
+        type: draft.type,
+        description: draft.description,
+        postings: draft.postings.map(normalizePosting),
+        refs: stripUndefined(draft.refs ?? {}),
+        source: draft.source ?? 'engine',
+        requestFingerprint: fingerprint,
+        prevHash: this.lastHash,
+      };
+      const entry = deepFreezeEntry({ ...unsigned, hash: computeEntryHash(unsigned) });
+      this.validateNew(entry);
+
+      if (options.guard) {
+        const after = new Map(this.current);
+        applyPostings(after, entry.postings);
+        const guard = options.guard;
+        rejectOnError(() => guard(draft, this.viewOf(after)));
+      }
+      return { kind: 'append', entry, result: { status: 'APPLIED', entry } };
+    });
+    // Applied to the projection only after the store committed.
+    if (result.status === 'APPLIED') this.apply(result.entry);
+    return result;
+  }
+
+  private replayResult(existing: JournalEntry, fingerprint: string | undefined): AppendResult {
+    if (fingerprint !== undefined && fingerprint === existing.requestFingerprint) return { status: 'ALREADY_APPLIED', entry: existing };
+    throw new LedgerError('idempotency_conflict', 'id "' + existing.id + '" was already booked for a different request; refusing to book twice or overwrite');
+  }
+
+  private validateNew(entry: JournalEntry): void {
+    const issues = structuralIssues(entry, this.store.allowedCurrencies);
+    const first = issues[0];
+    if (first) {
+      const code = first.code === 'UNBALANCED' ? 'unbalanced' : first.code === 'UNSUPPORTED_CURRENCY' ? 'unsupported_currency' : 'invalid_entry';
+      throw new LedgerError(code, issues.map((i) => i.message).join('; '));
     }
-    if (sum !== 0n) throw new LedgerError('unbalanced', 'entry "' + entry.id + '" is unbalanced by ' + sum + ' Rappen');
-
     if (entry.type === 'reversal') {
       const targetId = entry.refs.reversesEntryId;
       const target = targetId === undefined ? undefined : this.byId.get(targetId);
       if (!target) throw new LedgerError('unknown_entry', 'reversal of unknown entry "' + targetId + '"');
-      if (target.type === 'reversal') fail('a reversal cannot be reversed; book a new entry instead');
+      if (target.type === 'reversal') throw new LedgerError('invalid_entry', 'a reversal cannot be reversed; book a new entry instead');
       if (this.reversedIds.has(target.id)) throw new LedgerError('already_reversed', 'entry "' + target.id + '" is already reversed');
+    }
+  }
+
+  /** Applies entries committed by others, verifying chain continuity and content first. */
+  private applyCommitted(newer: readonly JournalEntry[]): void {
+    for (const entry of newer) {
+      const issues: IntegrityIssue[] = [];
+      if (entry.sequence !== this.entries.length + 1) issues.push({ code: 'SEQUENCE_GAP', sequence: entry.sequence, message: 'expected ' + (this.entries.length + 1) });
+      if (entry.prevHash !== this.lastHash) issues.push({ code: 'BROKEN_CHAIN', sequence: entry.sequence, message: 'does not link to the local head' });
+      if (computeEntryHash(entry) !== entry.hash) issues.push({ code: 'HASH_MISMATCH', sequence: entry.sequence, message: 'content does not match its hash' });
+      if (this.byId.has(entry.id)) issues.push({ code: 'DUPLICATE_ID', sequence: entry.sequence, message: 'duplicate id ' + entry.id });
+      issues.push(...structuralIssues(entry, this.store.allowedCurrencies).map((i) => ({ ...i, sequence: entry.sequence })));
+      if (issues.length > 0) {
+        this.corruption = new FinancialIntegrityError(issues, 'ledger ' + this.store.ledgerId);
+        throw this.corruption;
+      }
+      this.apply(deepFreezeEntry(entry));
     }
   }
 
@@ -250,6 +293,10 @@ export class CapitalLedger implements LedgerView {
     this.byId.set(entry.id, entry);
     if (entry.type === 'reversal' && entry.refs.reversesEntryId !== undefined) this.reversedIds.add(entry.refs.reversesEntryId);
     applyPostings(this.current, entry.postings);
+  }
+
+  private assertHealthy(): void {
+    if (this.corruption) throw this.corruption;
   }
 
   private viewOf(balances: ReadonlyMap<AccountKey, AccountBalance>): LedgerView {
@@ -276,20 +323,12 @@ function applyPostings(target: Map<AccountKey, AccountBalance>, postings: readon
   }
 }
 
-function normalizePosting(posting: Posting): Posting {
-  return posting.quantity === undefined
-    ? { account: posting.account, amount: posting.amount }
-    : { account: posting.account, amount: posting.amount, quantity: Decimal.from(posting.quantity) };
-}
-
-function normalizeTimestamp(value: string, label: string): string {
-  const millis = Date.parse(value);
-  if (Number.isNaN(millis)) throw new LedgerError('invalid_entry', label + ' is not a valid ISO timestamp: "' + value + '"');
-  return new Date(millis).toISOString();
-}
-
-function stripUndefined(refs: EntryRefs): EntryRefs {
-  return Object.fromEntries(Object.entries(refs).filter(([, v]) => v !== undefined)) as EntryRefs;
+function toTimestamp(value: string, label: string): string {
+  try {
+    return normalizeTimestamp(value);
+  } catch {
+    throw new LedgerError('invalid_entry', label + ' is not a valid ISO timestamp: "' + value + '"');
+  }
 }
 
 function deepFreezeEntry(entry: JournalEntry): JournalEntry {
@@ -297,10 +336,4 @@ function deepFreezeEntry(entry: JournalEntry): JournalEntry {
   Object.freeze(entry.postings);
   Object.freeze(entry.refs);
   return Object.freeze(entry);
-}
-
-/** SHA-256 over a canonical JSON form (sorted keys, bigint/Decimal as strings) of everything except the hash. */
-export function computeEntryHash(entry: Omit<JournalEntry, 'hash'>): string {
-  const { sequence, id, occurredAt, recordedAt, type, description, postings, refs, source, prevHash } = entry;
-  return hashOf({ sequence, id, occurredAt, recordedAt, type, description, postings, refs, source, prevHash });
 }

@@ -9,11 +9,18 @@ import type { BlackboardCategory, EntryEvidenceStatus } from '../blackboard/blac
 import type { UntrustedBlock } from '../security/untrusted-input.js';
 import type { CouncilRole, Domain, ModelKey, Subtask } from './model-types.js';
 
+/**
+ * One context item handed to a model. Models only ever exchange STRUCTURED DATA: another model's
+ * statement arrives as `{ sourceType: 'model_claim', untrusted: true, claim }`, never as text that
+ * is spliced into instructions. Nothing in `claim` can become a system or developer instruction.
+ */
 export interface ContextEntry {
-  id: string;
+  entryId: string;
+  sourceType: 'model_claim' | 'system_fact' | 'quant_result' | 'human_input';
+  /** True for everything a model (or any non-NEXUS source) produced. */
+  untrusted: boolean;
   category: BlackboardCategory;
-  statement: string;
-  author: 'model' | 'quant' | 'system' | 'human';
+  claim: string;
   evidenceStatus: EntryEvidenceStatus;
   evidenceRefs: string[];
 }

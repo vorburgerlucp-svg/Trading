@@ -25,6 +25,10 @@ const RULES: readonly { rule: string; pattern: RegExp }[] = [
   { rule: 'privilege_request', pattern: /\b(grant|give|enable)\b.{0,30}\b(access|permission|permissions|live trading|broker)\b/i },
   { rule: 'imperative_trade', pattern: /\b(buy|sell|transfer|withdraw)\b.{0,20}\b(now|immediately|everything|all funds|all capital)\b/i },
   { rule: 'shouted_trade_command', pattern: /\b(AND|THEN) (BUY|SELL)\b/ },
+  // German phrasings (the scanner is a tripwire, never the primary boundary).
+  { rule: 'override_instructions_de', pattern: /(ignorier\w*|missacht\w*|vergiss|übergeh\w*).{0,40}(regeln|anweisung\w*|vorgaben|richtlinien|instruktion\w*)/i },
+  { rule: 'disable_controls_de', pattern: /(ignorier\w*|deaktivier\w*|umgeh\w*|abschalt\w*).{0,30}(risiko\w*|limit\w*|sperre\w*|freigabe\w*|sicherheit\w*|engine)/i },
+  { rule: 'approval_command_de', pattern: /(genehmig\w*|gib\w* frei|freigeben).{0,30}(trade|kauf|order|transaktion)/i },
 ];
 
 export function scanForInjection(text: string): InjectionFlag[] {

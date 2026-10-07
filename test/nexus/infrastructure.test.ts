@@ -19,11 +19,21 @@ describe('AppendOnlyLog', () => {
     const log = await AppendOnlyLog.open('test', store);
     const a = await log.append('a', { value: 1 });
     await log.append('b', { value: 2 });
-    await expect(log.append('a', { value: 3 })).rejects.toMatchObject({ code: 'duplicate_id' });
-    expect(Object.isFrozen(a.payload)).toBe(true);
+    expect(a.status).toBe('APPLIED');
+    expect((await log.append('a', { value: 1 })).status).toBe('ALREADY_APPLIED');
+    await expect(log.append('a', { value: 3 })).rejects.toMatchObject({ code: 'idempotency_conflict' });
+    expect(log.size).toBe(2);
+    expect(Object.isFrozen(a.record.payload)).toBe(true);
 
     const [first, second] = (await store.loadAll()) as [LogRecord<{ value: number }>, LogRecord<{ value: number }>];
-    const tampered: AppendOnlyStore<{ value: number }> = { loadAll: async () => [{ ...first, payload: { value: 99 } }, second], append: async () => undefined };
+    const tamperedRecords = [{ ...first, payload: { value: 99 } }, second];
+    const tampered: AppendOnlyStore<{ value: number }> = {
+      loadAll: async () => tamperedRecords,
+      loadAfter: async (n) => tamperedRecords.slice(n),
+      writeExclusive: async () => {
+        throw new Error('read-only');
+      },
+    };
     await expect(AppendOnlyLog.open('test', tampered)).rejects.toMatchObject({ code: 'integrity' });
   });
 });

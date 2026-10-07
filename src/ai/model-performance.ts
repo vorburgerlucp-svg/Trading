@@ -84,7 +84,7 @@ export class ModelPerformance {
   }
 
   /** Writes all publishable scores into the registry (the only path by which registry scores change). */
-  syncRegistry(registry: ModelRegistry, asOf: string): void {
+  async syncRegistry(registry: ModelRegistry, asOf: string): Promise<void> {
     for (const entry of registry.list()) {
       const key = entry.provider + '/' + entry.model;
       const seen = new Map<string, { domain: Domain; subtask?: Subtask }>();
@@ -95,7 +95,7 @@ export class ModelPerformance {
       const scores = [...seen.values()]
         .map((s) => this.published(key, s.domain, s.subtask, asOf))
         .filter((s): s is ModelCapabilityScore => s !== null);
-      if (scores.length > 0) registry.setDomainScores(key, scores, asOf);
+      if (scores.length > 0) await registry.setDomainScores(key, scores, asOf);
     }
   }
 }

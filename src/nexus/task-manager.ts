@@ -41,6 +41,11 @@ export interface ExecuteInput {
   timeoutMs: number;
 }
 
+export interface ExecuteHooks {
+  /** Called after routing and before any model of the step runs (audit: MODEL_SELECTED, CRITIC_STARTED). */
+  onStepRouted?: (step: PlanStep, routing: RoutingDecision) => Promise<void>;
+}
+
 const IMPORTANCE_ORDER: readonly Importance[] = ['low', 'medium', 'high', 'critical'];
 
 export class TaskManager {
@@ -48,7 +53,7 @@ export class TaskManager {
     private readonly deps: { router: AiRouter; council: AiCouncil; blackboard: SharedBlackboard; evidence: EvidenceStore },
   ) {}
 
-  async execute(input: ExecuteInput): Promise<TaskExecution> {
+  async execute(input: ExecuteInput, hooks: ExecuteHooks = {}): Promise<TaskExecution> {
     const { task, plan, asOf } = input;
     // Stakes = max(task importance, planned depth): drives router weights (cost matters less as stakes rise).
     const stakes = IMPORTANCE_ORDER[Math.max(IMPORTANCE_ORDER.indexOf(task.importance), DEPTH_ORDER.indexOf(plan.depth))] ?? 'critical';
@@ -67,6 +72,7 @@ export class TaskManager {
         ...(remainingBudgetMinor !== undefined ? { remainingBudgetMinor } : {}),
       });
       spent += routing.estimatedCostMinor;
+      await hooks.onStepRouted?.(step, routing);
 
       const visibleSteps = step.isolation === 'independent' ? [] : executed.map((e) => e.step.id);
       const context = this.deps.blackboard.visibleTo(task.id, visibleSteps).map(toContextEntry);
@@ -159,7 +165,23 @@ export class TaskManager {
   }
 }
 
+const SOURCE_TYPES: Record<BlackboardEntry['author']['type'], ContextEntry['sourceType']> = {
+  model: 'model_claim',
+  system: 'system_fact',
+  quant: 'quant_result',
+  human: 'human_input',
+};
+
+/** Structured, typed context item; model output is always marked untrusted data. */
 export function toContextEntry(entry: BlackboardEntry): ContextEntry {
-  return { id: entry.id, category: entry.category, statement: entry.statement, author: entry.author.type, evidenceStatus: entry.evidenceStatus, evidenceRefs: entry.evidenceRefs };
+  return {
+    entryId: entry.id,
+    sourceType: SOURCE_TYPES[entry.author.type],
+    untrusted: entry.author.type !== 'system' && entry.author.type !== 'quant',
+    category: entry.category,
+    claim: entry.statement,
+    evidenceStatus: entry.evidenceStatus,
+    evidenceRefs: [...entry.evidenceRefs],
+  };
 }
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { accounts } from '../../src/capital/accounts.js';
 import { IbkrBroker } from '../../src/broker-adapter.js';
 import { chf, formatChf } from '../../src/money/money.js';
-import type { DecisionRecord } from '../../src/nexus/nexus-types.js';
+import type { DecisionTrace } from '../../src/nexus/nexus-types.js';
 import { BUILD_LOCKS, loadSafetyConfig } from '../../src/nexus/safety.js';
 import { createOpportunity } from '../../src/opportunities/opportunity-engine.js';
 import { QUARANTINE_NOTICE } from '../../src/security/untrusted-input.js';
@@ -28,8 +28,8 @@ const council = (behaviour: Parameters<typeof byRole>[0] = {}) => ({
   gemini: new ScriptedAdapter('google', 'test-gemini', byRole(behaviour)),
 });
 const all = (c: ReturnType<typeof council>) => [c.openai, c.claude, c.gemini];
-const recordOf = (ctx: Awaited<ReturnType<typeof setupBrain>>, id: string) => ctx.brain.record(id) as DecisionRecord;
-const analystsOf = (r: DecisionRecord) => r.attempts.filter((a) => a.role === 'analyst' && !a.shadow && a.status === 'ok').map((a) => a.modelKey).sort();
+const recordOf = (ctx: Awaited<ReturnType<typeof setupBrain>>, id: string) => ctx.brain.trace(id) as DecisionTrace;
+const analystsOf = (r: DecisionTrace) => r.attempts.filter((a) => a.role === 'analyst' && !a.shadow && a.status === 'ok').map((a) => a.modelKey).sort();
 
 const mini = () =>
   createOpportunity({
@@ -55,11 +55,39 @@ describe('Router & Decision Depth', () => {
     expect(formatChf(d.capital!.recommendedChf)).toBe('5.00');
   });
 
-  it('deklariertes Kapital kann die Analysetiefe nicht drücken: zählt der allozierbare Betrag', async () => {
+  it('deklariertes Kapital kann die Analysetiefe nicht drücken: zählt der mögliche Kapitaleinfluss dieser Entscheidung', async () => {
     const ctx = await setupBrain({ adapters: all(council()) });
-    const d = await ctx.brain.decide(decisionRequest(task({ capitalAtRiskMinor: chf(5) }))); // allocatable: 1'000 CHF
+    const d = await ctx.brain.decide(decisionRequest(task({ capitalAtRiskMinor: chf(5) }))); // opportunity capacity: 1'000 CHF
     expect(d.depth).toBe('committee');
-    expect(recordOf(ctx, d.decisionId).plan.reasons[0]).toMatch(/raised from declared 5.00 to allocatable 1000.00 CHF/);
+    expect(formatChf(d.potentialCapitalImpactChf)).toBe('1000.00');
+    expect(recordOf(ctx, d.decisionId).plan.reasons[0]).toMatch(/raised from declared 5.00 to the potential impact of this decision 1000.00 CHF/);
+  });
+
+  it('potentialCapitalImpact gilt pro Entscheidung: 100\'000 CHF verfügbar, 20-CHF-Produkttest bleibt eine kleine Entscheidung', async () => {
+    const productTest = createOpportunity({
+      ...appleSwing,
+      id: 'product-test-20',
+      type: 'physical_product',
+      requiredCapitalChf: chf(20),
+      sizing: { kind: 'scalable', minTicketChf: chf(20), maxCapitalChf: chf(20), lotSizeChf: chf(20) },
+      expectedNetProfitChf: chf(10),
+      downsideChf: chf(10),
+      confidenceScore: 0.8,
+    });
+    const ctx = await setupBrain({ adapters: all(council()), capitalChf: '100000' });
+    const d = await ctx.brain.decide(decisionRequest(task({ capitalAtRiskMinor: chf(20) }), { opportunity: productTest, requiresQuant: false }));
+    expect(formatChf(ctx.engine.capitalState().availableCapitalChf)).toBe('100000.00');
+    expect(formatChf(d.potentialCapitalImpactChf)).toBe('20.00'); // the product's capacity, not NEXUS' total capital
+    expect(d.depth).toBe('single');
+    expect(d.depth).not.toBe('critical_committee');
+  });
+
+  it('eine grosse skalierbare Opportunity mit viel Kapital wird dagegen kritisch', async () => {
+    const big = createOpportunity({ ...appleSwing, id: 'big', sizing: { kind: 'scalable', minTicketChf: chf(10), maxCapitalChf: chf(80_000), lotSizeChf: chf('0.01') } });
+    const ctx = await setupBrain({ adapters: all(council()), capitalChf: '100000' });
+    const d = await ctx.brain.decide(decisionRequest(task({ capitalAtRiskMinor: chf(20) }), { opportunity: big }));
+    expect(formatChf(d.potentialCapitalImpactChf)).toBe('80000.00');
+    expect(d.depth).toBe('critical_committee');
   });
 
   it('wichtige Aufgabe → mehrere unabhängige Modelle verschiedener Anbieter, danach Critic', async () => {
@@ -74,9 +102,9 @@ describe('Router & Decision Depth', () => {
     expect(r.attempts.find((a) => a.role === 'critic')?.modelKey).toBe(CLAUDE); // critic is not one of the analysts
     // Independence: analysts saw no model output; the critic saw both analyses.
     for (const req of [...c.openai.requests, ...c.gemini.requests].filter((q) => q.role === 'analyst')) {
-      expect(req.context.every((e) => e.author !== 'model')).toBe(true);
+      expect(req.context.every((e) => e.sourceType !== 'model_claim')).toBe(true);
     }
-    expect(c.claude.requests[0]?.context.filter((e) => e.author === 'model').length).toBeGreaterThan(0);
+    expect(c.claude.requests[0]?.context.filter((e) => e.sourceType === 'model_claim').length).toBeGreaterThan(0);
   });
 
   it('kritische Kapitalentscheidung → Committee + Gegenanalyse + Critic + Human Approval', async () => {
@@ -93,7 +121,7 @@ describe('Router & Decision Depth', () => {
     expect(r.attempts.some((a) => a.role === 'counter_analyst' && a.status === 'ok')).toBe(true);
     expect(r.attempts.some((a) => a.role === 'critic' && a.status === 'ok')).toBe(true);
     const counterRequest = all(c).flatMap((a) => a.requests).find((q) => q.role === 'counter_analyst');
-    expect(counterRequest?.context.every((e) => e.author !== 'model')).toBe(true); // independent counter-analysis
+    expect(counterRequest?.context.every((e) => e.sourceType !== 'model_claim')).toBe(true); // independent counter-analysis
     expect(d.outcome).toBe('RECOMMEND');
     expect(d.requiresHumanApproval).toBe(true);
     expect(d.humanApprovalReasons).toContain('critical decision depth');
@@ -158,7 +186,7 @@ describe('Widerspruch', () => {
     const critic = new ScriptedAdapter('google', 'test-gemini', byRole({}));
     const ctx = await setupBrain({ adapters: [buy, sell, critic], active: [MODELS.openai, MODELS.anthropic, MODELS.google] });
     // Disable Gemini so the committee consists exactly of the two disagreeing models.
-    ctx.registry.setEnabled(GEMINI, false, { at: T0, by: { kind: 'system', id: 'test' }, reason: 'test setup' });
+    await ctx.registry.setEnabled(GEMINI, false, { at: T0, by: { kind: 'system', id: 'test' }, reason: 'test setup' });
     const d = await ctx.brain.decide(decisionRequest(task({ importance: 'high' })));
 
     expect(d.direction).toBe('contested');
@@ -257,7 +285,7 @@ describe('Security: externer Text', () => {
     const quarantined = ctx.blackboard.entries(t.id).filter((e) => e.downgradeReason === 'instruction-like text in model output');
     expect(quarantined.length).toBeGreaterThan(0);
     const criticRequest = all(c).flatMap((a) => a.requests).find((q) => q.role === 'critic');
-    expect(criticRequest?.context.some((e) => /ignore the risk limits/i.test(e.statement))).toBe(false);
+    expect(criticRequest?.context.some((e) => /ignore the risk limits/i.test(e.claim))).toBe(false);
   });
 
   it('auch unentdeckte Manipulation kann das Kapitallimit nicht sprengen', async () => {
@@ -367,7 +395,7 @@ describe('Audit Trail', () => {
     expect(r.inputs.capitalEvidenceId).toMatch(/^capital-state:/);
     expect(r.routing.map((s) => s.stepId)).toEqual(['analysts', 'critic']);
     for (const a of r.attempts.filter((x) => x.status === 'ok')) {
-      expect(a).toMatchObject({ promptId: expect.stringMatching(/^nexus\./), promptVersion: '1.0.0', modelVersion: 'test-double-1' });
+      expect(a).toMatchObject({ promptId: expect.stringMatching(/^nexus\./), promptVersion: '1.1.0', modelVersion: 'test-double-1' });
       expect(a.requestHash).toMatch(/^[0-9a-f]{64}$/);
       expect(a.responseHash).toMatch(/^[0-9a-f]{64}$/);
     }

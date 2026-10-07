@@ -89,8 +89,14 @@ export const CAPITAL_TRANSACTION_TYPES: readonly CapitalTransactionType[] = [
  */
 export interface Posting {
   readonly account: AccountKey;
+  /** Minor units of `currency` (Rappen for CHF). */
   readonly amount: Rappen;
   readonly quantity?: Decimal;
+  /**
+   * ISO 4217 code. Omitted = ledger base currency (CHF). The ledger currently runs CHF-only: any other
+   * currency is rejected explicitly, never converted. Balance is checked per currency.
+   */
+  readonly currency?: string;
 }
 
 export interface EntryRefs {
@@ -131,6 +137,8 @@ export interface JournalEntry {
   readonly postings: readonly Posting[];
   readonly refs: EntryRefs;
   readonly source: EntrySource;
+  /** Hash of the originating command/event; a replay with the same id must carry the same fingerprint. */
+  readonly requestFingerprint: string;
   readonly prevHash: string;
   readonly hash: string;
 }

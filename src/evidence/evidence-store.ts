@@ -30,7 +30,7 @@ export class EvidenceStore {
       contentKind: EXTERNAL_TEXT_TYPES.includes(ref.type) ? 'external_text' : ref.contentKind,
       ...(content !== undefined ? { contentHash: sha256Hex(content) } : {}),
     };
-    const record = await this.log.append(ref.id, content === undefined ? { ref: normalized } : { ref: normalized, content });
+    const { record } = await this.log.append(ref.id, content === undefined ? { ref: normalized } : { ref: normalized, content });
     return record.payload.ref;
   }
 
@@ -68,6 +68,11 @@ export class EvidenceStore {
   /** Version identifier of a reference (hash of the stored record) for the audit trail. */
   version(id: string): string | undefined {
     return this.log.get(id)?.hash;
+  }
+
+  /** Catches up with records written by other NEXUS processes (verified). */
+  sync(): Promise<void> {
+    return this.log.sync();
   }
 
   verifyIntegrity() {

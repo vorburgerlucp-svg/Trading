@@ -1,3 +1,4 @@
+import type { DecisionRecord, FinalAction } from '../audit/decision-records.js';
 import type { ModelCapability, CouncilRole, Domain, ModelKey, ModelOpinion, Recommendation, RiskFlag, Stance, Subtask } from '../ai/model-types.js';
 import type { Rappen } from '../money/money.js';
 
@@ -66,6 +67,8 @@ export interface QuantAssessment {
 }
 
 export interface AttemptRecord {
+  /** Audit event id of the MODEL_RESPONSE_RECEIVED event (set when the run is recorded). */
+  runId?: string;
   stepId: string;
   role: CouncilRole;
   modelKey: ModelKey;
@@ -83,6 +86,11 @@ export interface AttemptRecord {
   modelVersion?: string;
   latencyMs: number;
   opinion?: ModelOpinion;
+  /** The model's own 0..1 confidence SCORE (uncalibrated). */
+  confidenceScore?: number | null;
+  /** Only set with a documented calibration method and enough history; otherwise null. */
+  calibratedProbability?: number | null;
+  calibrationMethod?: string | null;
 }
 
 export interface AuthoredRiskFlag extends RiskFlag {
@@ -113,6 +121,8 @@ export interface ConsensusResult {
   findings: { blocking: AuthoredRiskFlag[]; major: AuthoredRiskFlag[]; minor: AuthoredRiskFlag[] };
   uncertainty: 'low' | 'medium' | 'high';
   blockingReasons: string[];
+  /** Machine-readable codes for the blocking reasons (UPPER_SNAKE_CASE, deduplicated). */
+  blockingCodes: string[];
 }
 
 export interface CapitalDecision {
@@ -134,12 +144,21 @@ export interface ExecutionGateResult {
 }
 
 export type DecisionOutcome = 'RECOMMEND' | 'NO_ACTION' | 'ANALYSIS_ONLY';
+export type { FinalAction };
 
 export interface NexusDecision {
   decisionId: string;
   taskId: string;
   asOf: string;
   outcome: DecisionOutcome;
+  /** Persisted action class (DecisionRecord.finalAction). */
+  finalAction: FinalAction;
+  /** Machine-readable reasons (UPPER_SNAKE_CASE). */
+  reasonCodes: string[];
+  /** Largest amount THIS decision could move: min(opportunity capacity, Capital Engine + policy limits); used for depth. */
+  potentialCapitalImpactChf: Rappen;
+  /** Exact ledger position the capital figures came from. */
+  capitalStateRef: string;
   direction: ConsensusResult['direction'];
   recommendation: Recommendation | null;
   depth: DecisionDepth;
@@ -152,8 +171,13 @@ export interface NexusDecision {
   consensus: ConsensusResult;
 }
 
-/** Full reconstruction of a decision: Task → Inputs → Models → Prompts → Responses → Blackboard → Critic → Consensus → Risk → Capital → Approval → Action (→ Outcome, linked later). */
-export interface DecisionRecord {
+/**
+ * Reconstruction of a decision from its audit events: Task → Inputs → Models → Prompts → Responses →
+ * Blackboard → Critic → Consensus → Risk → Capital → Approval → Action (→ Outcome, linked later).
+ * Not stored as one document: assembled from the normalized DecisionRecord + audit event payloads.
+ */
+export interface DecisionTrace {
+  record: DecisionRecord;
   decision: NexusDecision;
   task: AiTask;
   question: string;
@@ -162,6 +186,7 @@ export interface DecisionRecord {
     evidence: { id: string; type: string; source: string; observedAt: string; availableAt: string; status: string; version: string | null }[];
     excludedLookAhead: string[];
     capitalStateTimestamp: string;
+    capitalStateRef: string;
     capitalEvidenceId: string;
     quant: QuantAssessment | null;
   };

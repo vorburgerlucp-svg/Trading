@@ -1,11 +1,16 @@
 // Capital Engine: the only write path for capital movements, and the source of the CapitalState.
 //
 // Commands translate business events (deposit, trade fill, fee, reservation, ...) into balanced
-// journal entries. Business rules are enforced inside the ledger's serialized append section:
-//  - no cash, reservation or receivable account may go negative (no overdraft)
+// journal entries. Business rules are enforced inside the ledger's write critical section (which the
+// store makes cross-process), against the true latest state:
+//  - no cash, reservation or receivable account may go negative (no overdraft / double spend)
 //  - positions and inventory may not go below zero quantity (no shorting / overselling in v0.2)
 //  - an emptied position or stock item may not keep a residual cost basis
 //  - liabilities cannot be overpaid
+//
+// Idempotency: every command has an id (pass the external event id, e.g.
+// "broker-fill:ibkr:ORDER123:FILL4"; otherwise a random one is generated) and a fingerprint of its
+// input. Replaying the same command returns ALREADY_APPLIED and books nothing.
 //
 // Nothing here talks to a broker or supplier. Broker fills and marketplace sales are *recorded*
 // after they happened; execution lives behind BrokerAdapter and stays locked.
@@ -25,8 +30,9 @@ import {
   ZERO_CHF,
   type Rappen,
 } from '../money/money.js';
+import { hashOf } from '../persistence/canonical-json.js';
 import { accounts, isCashLike, parseAccountKey } from './accounts.js';
-import { LedgerError, type CapitalLedger, type DraftFactory, type LedgerView } from './capital-ledger.js';
+import { LedgerError, type AppendResult, type CapitalLedger, type DraftFactory, type LedgerView } from './capital-ledger.js';
 import {
   BASE_CURRENCY,
   type AccountBalance,
@@ -40,7 +46,6 @@ import {
   type FeeKind,
   type InstrumentInfo,
   type InventoryMarketQuote,
-  type JournalEntry,
   type JournalEntryDraft,
   type MarketDataSnapshot,
   type PortfolioSnapshot,
@@ -75,6 +80,8 @@ export interface SnapshotOptions {
   inventoryQuotes?: readonly InventoryMarketQuote[];
 }
 
+type ResolvedMeta = CommandMeta & { id: string };
+
 export class CapitalEngine {
   readonly policy: CapitalPolicy;
   private readonly clock: () => Date;
@@ -95,8 +102,17 @@ export class CapitalEngine {
   // -------------------------------------------------------------------------
 
   /** Appends a draft (or a draft built from the current state) after enforcing the capital rules. */
-  post(draft: JournalEntryDraft | DraftFactory): Promise<JournalEntry> {
-    return this.ledger.append(draft, enforceCapitalRules);
+  post(draft: JournalEntryDraft | DraftFactory, options: { idempotencyKey?: string; requestFingerprint?: string } = {}): Promise<AppendResult> {
+    return this.ledger.append(draft, { ...options, guard: enforceCapitalRules });
+  }
+
+  /**
+   * Runs a command idempotently: resolves its id, fingerprints its (normalized) input and posts the
+   * draft it builds. The fingerprint never contains defaults such as "now", so replays match.
+   */
+  submit(command: string, input: CommandMeta, fingerprintInput: unknown, build: (meta: ResolvedMeta) => JournalEntryDraft | DraftFactory): Promise<AppendResult> {
+    const id = input.id ?? this.newId();
+    return this.post(build({ ...input, id }), { idempotencyKey: id, requestFingerprint: commandFingerprint(command, fingerprintInput) });
   }
 
   /** Common draft fields for commands. */
@@ -118,26 +134,31 @@ export class CapitalEngine {
     };
   }
 
+  /** Brings the local projection up to date with entries committed by other NEXUS processes. */
+  refresh(): Promise<void> {
+    return this.ledger.sync();
+  }
+
   // -------------------------------------------------------------------------
   // Cash
   // -------------------------------------------------------------------------
 
-  async deposit(input: CommandMeta & { to: AccountKey; amountChf: Rappen }): Promise<JournalEntry> {
+  async deposit(input: CommandMeta & { to: AccountKey; amountChf: Rappen }): Promise<AppendResult> {
     requirePositive(input.amountChf, 'deposit amount');
     requireKind(input.to, ['cash'], 'deposit target');
-    return this.post(
-      this.draft('deposit', input, 'Deposit', [
+    return this.submit('deposit', input, input, (meta) =>
+      this.draft('deposit', meta, 'Deposit', [
         { account: input.to, amount: input.amountChf },
         { account: accounts.contributions, amount: negChf(input.amountChf) },
       ]),
     );
   }
 
-  async withdraw(input: CommandMeta & { from: AccountKey; amountChf: Rappen }): Promise<JournalEntry> {
+  async withdraw(input: CommandMeta & { from: AccountKey; amountChf: Rappen }): Promise<AppendResult> {
     requirePositive(input.amountChf, 'withdrawal amount');
     requireKind(input.from, ['cash'], 'withdrawal source');
-    return this.post(
-      this.draft('withdrawal', input, 'Withdrawal', [
+    return this.submit('withdraw', input, input, (meta) =>
+      this.draft('withdrawal', meta, 'Withdrawal', [
         { account: input.from, amount: negChf(input.amountChf) },
         { account: accounts.contributions, amount: input.amountChf },
       ]),
@@ -145,15 +166,15 @@ export class CapitalEngine {
   }
 
   /** Moves cash between own accounts (e.g. bank → broker). The fee is paid by the sender. */
-  async transfer(input: CommandMeta & { from: AccountKey; to: AccountKey; amountChf: Rappen; feeChf?: Rappen; feeKind?: FeeKind }): Promise<JournalEntry> {
+  async transfer(input: CommandMeta & { from: AccountKey; to: AccountKey; amountChf: Rappen; feeChf?: Rappen; feeKind?: FeeKind }): Promise<AppendResult> {
     const fee = input.feeChf ?? ZERO_CHF;
     requirePositive(input.amountChf, 'transfer amount');
     requireNonNegative(fee, 'transfer fee');
     requireKind(input.from, ['cash'], 'transfer source');
     requireKind(input.to, ['cash'], 'transfer target');
     if (input.from === input.to) throw new CapitalRuleError('transfer source and target are the same account');
-    return this.post(
-      this.draft('transfer', input, 'Transfer', [
+    return this.submit('transfer', input, input, (meta) =>
+      this.draft('transfer', meta, 'Transfer', [
         { account: input.from, amount: negChf(rappen(input.amountChf + fee)) },
         { account: input.to, amount: input.amountChf },
         { account: accounts.fee(input.feeKind ?? 'bank'), amount: fee },
@@ -178,17 +199,17 @@ export class CapitalEngine {
       tradeId?: string;
       opportunityId?: string;
     },
-  ): Promise<JournalEntry> {
+  ): Promise<AppendResult> {
     const quantity = requirePositiveQuantity(input.quantity);
     const fee = input.feeChf ?? ZERO_CHF;
     requirePositive(input.grossAmountChf, 'gross amount');
     requireNonNegative(fee, 'fee');
     const payFrom = input.payFrom ?? accounts.brokerCash(input.brokerId);
     requireKind(payFrom, ['cash', 'cash_reservation'], 'payment source');
-    return this.post(
+    return this.submit('recordTradeBuy', input, { ...input, quantity }, (meta) =>
       this.draft(
         'trade_buy',
-        input,
+        meta,
         'Buy ' + quantity.toString() + ' ' + input.instrumentId + ' @ ' + input.brokerId,
         [
           { account: accounts.position(input.brokerId, input.instrumentId), amount: input.grossAmountChf, quantity },
@@ -212,7 +233,7 @@ export class CapitalEngine {
       tradeId?: string;
       opportunityId?: string;
     },
-  ): Promise<JournalEntry> {
+  ): Promise<AppendResult> {
     const quantity = requirePositiveQuantity(input.quantity);
     const fee = input.feeChf ?? ZERO_CHF;
     requirePositive(input.grossProceedsChf, 'gross proceeds');
@@ -221,7 +242,7 @@ export class CapitalEngine {
     requireKind(receiveTo, ['cash'], 'proceeds target');
     const positionAccount = accounts.position(input.brokerId, input.instrumentId);
 
-    return this.post((current) => {
+    return this.submit('recordTradeSell', input, { ...input, quantity }, (meta) => (current) => {
       const holding = current.balance(positionAccount);
       if (holding.quantity.lt(quantity)) {
         throw new CapitalRuleError('cannot sell ' + quantity.toString() + ' ' + input.instrumentId + ', holding ' + holding.quantity.toString());
@@ -230,7 +251,7 @@ export class CapitalEngine {
       const realized = subChf(input.grossProceedsChf, costReleased);
       return this.draft(
         'trade_sell',
-        input,
+        meta,
         'Sell ' + quantity.toString() + ' ' + input.instrumentId + ' @ ' + input.brokerId,
         [
           { account: receiveTo, amount: subChf(input.grossProceedsChf, fee) },
@@ -258,7 +279,7 @@ export class CapitalEngine {
       paidFrom?: AccountKey;
       owedTo?: AccountKey;
     },
-  ): Promise<JournalEntry> {
+  ): Promise<AppendResult> {
     requirePositive(input.amountChf, 'expense amount');
     if ((input.paidFrom === undefined) === (input.owedTo === undefined)) {
       throw new CapitalRuleError('expense needs exactly one of paidFrom or owedTo');
@@ -270,20 +291,20 @@ export class CapitalEngine {
     const counterAccount = input.paidFrom ?? input.owedTo ?? '';
     const type: CapitalTransactionType =
       input.category === 'fee' ? 'fee' : input.category === 'shipping' ? 'shipping' : input.category === 'tax' ? 'tax' : 'expense';
-    return this.post(
-      this.draft(type, input, 'Expense: ' + input.category, [
+    return this.submit('recordExpense', input, input, (meta) =>
+      this.draft(type, meta, 'Expense: ' + input.category, [
         { account: expenseAccount, amount: input.amountChf },
         { account: counterAccount, amount: negChf(input.amountChf) },
       ]),
     );
   }
 
-  async payLiability(input: CommandMeta & { liability: AccountKey; from: AccountKey; amountChf: Rappen }): Promise<JournalEntry> {
+  async payLiability(input: CommandMeta & { liability: AccountKey; from: AccountKey; amountChf: Rappen }): Promise<AppendResult> {
     requirePositive(input.amountChf, 'payment amount');
     requireKind(input.liability, ['payable', 'tax_payable'], 'liability');
     requireKind(input.from, ['cash', 'cash_reservation'], 'payment source');
-    return this.post(
-      this.draft('liability_payment', input, 'Pay liability', [
+    return this.submit('payLiability', input, input, (meta) =>
+      this.draft('liability_payment', meta, 'Pay liability', [
         { account: input.liability, amount: input.amountChf },
         { account: input.from, amount: negChf(input.amountChf) },
       ]),
@@ -293,14 +314,14 @@ export class CapitalEngine {
   /** Payout of a receivable (e.g. marketplace payout) into a cash account, optionally minus a payout fee. */
   async settleReceivable(
     input: CommandMeta & { receivable: AccountKey; to: AccountKey; amountChf: Rappen; feeChf?: Rappen; feeKind?: FeeKind },
-  ): Promise<JournalEntry> {
+  ): Promise<AppendResult> {
     const fee = input.feeChf ?? ZERO_CHF;
     requirePositive(input.amountChf, 'settlement amount');
     requireNonNegative(fee, 'settlement fee');
     requireKind(input.receivable, ['receivable'], 'receivable');
     requireKind(input.to, ['cash'], 'settlement target');
-    return this.post(
-      this.draft('transfer', input, 'Receivable settlement', [
+    return this.submit('settleReceivable', input, input, (meta) =>
+      this.draft('transfer', meta, 'Receivable settlement', [
         { account: input.to, amount: subChf(input.amountChf, fee) },
         { account: accounts.fee(input.feeKind ?? 'payment'), amount: fee },
         { account: input.receivable, amount: negChf(input.amountChf) },
@@ -315,17 +336,17 @@ export class CapitalEngine {
   /** Moves cash into a reservation sub-account. Net worth is unchanged; available capital drops. */
   async reserveCash(
     input: CommandMeta & { reservationId: string; from: AccountKey; amountChf: Rappen; purpose: ReservationPurpose; opportunityId?: string },
-  ): Promise<JournalEntry> {
+  ): Promise<AppendResult> {
     requirePositive(input.amountChf, 'reservation amount');
     requireKind(input.from, ['cash'], 'reservation source');
     const reservationAccount = accounts.reservation(input.from, input.purpose, input.reservationId);
-    return this.post((current) => {
+    return this.submit('reserveCash', input, input, (meta) => (current) => {
       if (findReservation(current, input.reservationId)) {
         throw new CapitalRuleError('reservation id "' + input.reservationId + '" is already in use');
       }
       return this.draft(
         'reserve',
-        input,
+        meta,
         'Reserve (' + input.purpose + ')',
         [
           { account: reservationAccount, amount: input.amountChf },
@@ -337,16 +358,16 @@ export class CapitalEngine {
   }
 
   /** Releases a reservation back to its cash account (fully, or the given amount). */
-  async releaseReservation(input: CommandMeta & { reservationId: string; amountChf?: Rappen }): Promise<JournalEntry> {
+  async releaseReservation(input: CommandMeta & { reservationId: string; amountChf?: Rappen }): Promise<AppendResult> {
     if (input.amountChf !== undefined) requirePositive(input.amountChf, 'release amount');
-    return this.post((current) => {
+    return this.submit('releaseReservation', input, input, (meta) => (current) => {
       const reservation = findReservation(current, input.reservationId);
       if (!reservation) throw new CapitalRuleError('unknown reservation "' + input.reservationId + '"');
       const amount = input.amountChf ?? current.balance(reservation.key).amount;
       if (amount <= 0n) throw new CapitalRuleError('reservation "' + input.reservationId + '" has nothing left to release');
       return this.draft(
         'release_reserve',
-        input,
+        meta,
         'Release reservation',
         [
           { account: reservation.parent, amount },
@@ -362,14 +383,14 @@ export class CapitalEngine {
   // -------------------------------------------------------------------------
 
   /** Books the exact inverse of an entry. The original stays in the ledger (immutable history). */
-  async reverse(input: { entryId: string; reason: string; id?: string; occurredAt?: string }): Promise<JournalEntry> {
+  async reverse(input: { entryId: string; reason: string; id?: string; occurredAt?: string }): Promise<AppendResult> {
     if (input.reason.trim() === '') throw new CapitalRuleError('a reversal needs a reason');
-    return this.post((current) => {
+    return this.submit('reverse', { id: input.id, occurredAt: input.occurredAt }, input, (meta) => (current) => {
       const original = current.get(input.entryId);
       if (!original) throw new LedgerError('unknown_entry', 'unknown entry "' + input.entryId + '"');
       return this.draft(
         'reversal',
-        { id: input.id, occurredAt: input.occurredAt, description: 'Reversal of ' + original.id + ': ' + input.reason },
+        { ...meta, description: 'Reversal of ' + original.id + ': ' + input.reason },
         '',
         original.postings.map((p) => ({ account: p.account, amount: negChf(p.amount), ...(p.quantity ? { quantity: p.quantity.negated() } : {}) })),
         { ...original.refs, reversesEntryId: original.id },
@@ -390,6 +411,11 @@ export class CapitalEngine {
   capitalState(options: SnapshotOptions = {}): CapitalState {
     return this.snapshot(options).capital;
   }
+}
+
+/** Fingerprint of a command and its (normalized) input. */
+export function commandFingerprint(command: string, input: unknown): string {
+  return hashOf({ command, input });
 }
 
 // ---------------------------------------------------------------------------

@@ -17,8 +17,8 @@ const analystStep = (models = 1, minDistinctProviders = 1): PlanStep => ({ id: '
 async function routerSetup(options: { champions?: Record<string, string>; connected?: string[] } = {}) {
   const memory = await NexusMemory.open();
   const performance = new ModelPerformance(memory);
-  const registry = new ModelRegistry();
-  for (const m of Object.values(MODELS)) registry.registerActive(m, { at: T0, by: HUMAN, reason: 'test' });
+  const registry = await ModelRegistry.open();
+  for (const m of Object.values(MODELS)) await registry.registerActive(m, { at: T0, by: HUMAN, reason: 'test' });
   const connected = options.connected ?? [OPENAI, CLAUDE, GEMINI];
   const adapters = new Map(
     Object.values(MODELS).map((m) => {
@@ -26,7 +26,7 @@ async function routerSetup(options: { champions?: Record<string, string>; connec
       return [key, connected.includes(key) ? new ScriptedAdapter(m.provider, m.model, () => opinion()) : new NotConnectedAdapter(m.provider, m.model)] as const;
     }),
   );
-  const champions = new ChampionBoard(options.champions ?? {});
+  const champions = await ChampionBoard.open({ performance, initialChampions: options.champions ?? {} });
   return { router: new AiRouter(registry, performance, champions, adapters), registry, performance, memory, adapters };
 }
 
@@ -93,7 +93,7 @@ describe('AiRouter', () => {
     expect(fast.primaries.map((p) => p.modelKey)).toEqual([GEMINI]);
     expect(fast.rejected.find((r) => r.modelKey === CLAUDE)?.reasons[0]).toMatch(/latency 1200 ms above limit 800 ms/);
 
-    for (let i = 0; i < 3; i++) registry.recordFailure(GEMINI, { at: T0, kind: 'failed' });
+    for (let i = 0; i < 3; i++) await registry.recordFailure(GEMINI, { at: T0, kind: 'failed' });
     const afterOutage = router.route({ task: task(), step: analystStep(), asOf: T0, stakes: 'low' });
     expect(afterOutage.primaries.map((p) => p.modelKey)).toEqual([OPENAI]);
     expect(afterOutage.rejected.find((r) => r.modelKey === GEMINI)?.reasons.join(' ')).toMatch(/circuit open/);

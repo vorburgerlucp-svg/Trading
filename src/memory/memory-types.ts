@@ -8,8 +8,8 @@ export type MemoryKind =
   | 'business' // physical commerce / business outcomes
   | 'strategy' // strategy notes and benchmarks
   | 'model_performance' // per-model evaluation observations
-  | 'failure' // model/system failures (timeouts, invalid output, outages)
-  | 'decision'; // full decision audit records
+  | 'failure'; // model/system failures (timeouts, invalid output, outages)
+// Decisions are not memory records: they live in the DecisionRecordStore + audit events (src/audit).
 
 export interface MemoryRecordInput<C = unknown> {
   id: string;

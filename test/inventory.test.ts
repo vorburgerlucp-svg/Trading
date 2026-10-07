@@ -90,7 +90,7 @@ describe('InventoryService', () => {
     const { engine, inventory } = await newInventory();
     await engine.deposit({ to: bank, amountChf: chf(100) });
     await inventory.recordPurchase({ productId: 'kaugummi', quantity: 2, purchaseCostChf: chf(40), paidFrom: bank });
-    const sale = await inventory.recordSale({ productId: 'kaugummi', quantity: 1, grossRevenueChf: chf(35), channel: 'ricardo', settlement: { kind: 'cash', account: bank } });
+    const { entry: sale } = await inventory.recordSale({ productId: 'kaugummi', quantity: 1, grossRevenueChf: chf(35), channel: 'ricardo', settlement: { kind: 'cash', account: bank } });
     await engine.reverse({ entryId: sale.id, reason: 'buyer cancelled' });
     const stock = inventory.stock('kaugummi');
     expect(stock.soldTotal.toString()).toBe('0');

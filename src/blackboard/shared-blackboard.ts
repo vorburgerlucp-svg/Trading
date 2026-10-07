@@ -5,6 +5,7 @@
 //  - citing evidence that was not yet available at decision time is rejected (look-ahead)
 //  - instruction-like text in model output is withheld before any other model can read it
 
+import { randomUUID } from 'node:crypto';
 import type { EvidenceStore } from '../evidence/evidence-store.js';
 import { AppendOnlyLog, InMemoryAppendOnlyStore, type AppendOnlyStore } from '../persistence/append-only-log.js';
 import { scanForInjection } from '../security/untrusted-input.js';
@@ -15,21 +16,20 @@ export class BlackboardError extends Error {
 }
 
 export class SharedBlackboard {
-  private counter = 0;
-
   private constructor(
     private readonly log: AppendOnlyLog<BlackboardEntry>,
     private readonly evidence: EvidenceStore,
-  ) {
-    this.counter = log.size;
-  }
+    private readonly newId: () => string,
+  ) {}
 
   static async open(
     evidence: EvidenceStore,
     store: AppendOnlyStore<BlackboardEntry> = new InMemoryAppendOnlyStore(),
-    options: { clock?: () => Date } = {},
+    options: { clock?: () => Date; newId?: () => string } = {},
   ): Promise<SharedBlackboard> {
-    return new SharedBlackboard(await AppendOnlyLog.open('blackboard', store, options), evidence);
+    const log = await AppendOnlyLog.open<BlackboardEntry>('blackboard', store, options.clock ? { clock: options.clock } : {});
+    // IDs come from a globally unique source, never a per-process counter (several NEXUS servers share the log).
+    return new SharedBlackboard(log, evidence, options.newId ?? randomUUID);
   }
 
   /** Posts an entry as of decision time `asOf` and returns it with the category NEXUS accepted. */
@@ -65,7 +65,7 @@ export class SharedBlackboard {
       downgradeReason = 'claimed as ' + input.category + ' but evidence is ' + evidenceStatus;
     }
 
-    const id = input.taskId + ':bb:' + String(++this.counter).padStart(5, '0');
+    const id = input.taskId + ':bb:' + this.newId();
     const entry: BlackboardEntry = {
       ...input,
       statement,
@@ -77,7 +77,7 @@ export class SharedBlackboard {
       evidenceStatus,
       ...(downgradeReason !== undefined ? { downgradeReason } : {}),
     };
-    return (await this.log.append(id, entry)).payload;
+    return (await this.log.append(id, entry)).record.payload;
   }
 
   entries(taskId: string): BlackboardEntry[] {
@@ -96,6 +96,11 @@ export class SharedBlackboard {
       if (e.author.type !== 'model') return true;
       return !e.author.shadow && e.author.stepId !== undefined && visibleSteps.includes(e.author.stepId);
     });
+  }
+
+  /** Catches up with records written by other NEXUS processes (verified). */
+  sync(): Promise<void> {
+    return this.log.sync();
   }
 
   verifyIntegrity() {

@@ -31,7 +31,13 @@ export interface ConsensusInput {
 }
 
 export function buildConsensus(input: ConsensusInput): ConsensusResult {
-  const blocking: string[] = [...input.insufficientAnalysis];
+  const blocking: string[] = [];
+  const codes = new Set<string>();
+  const block = (code: string, reason: string) => {
+    codes.add(code);
+    blocking.push(reason);
+  };
+  for (const reason of input.insufficientAnalysis) block('INSUFFICIENT_ANALYSIS', reason);
   const contradictions: Contradiction[] = [];
   const voting = input.analysts.filter((a) => a.opinion.stance !== 'insufficient_data');
   const votes = voting.map((a) => ({ modelKey: a.modelKey, stance: a.opinion.stance, recommendation: a.opinion.recommendation, confidence: a.opinion.confidence }));
@@ -39,7 +45,7 @@ export function buildConsensus(input: ConsensusInput): ConsensusResult {
   let direction: ConsensusResult['direction'];
   if (voting.length < input.plan.minIndependentOpinions) {
     direction = 'insufficient';
-    blocking.push('insufficient analysis: ' + voting.length + ' valid independent opinions, ' + input.plan.minIndependentOpinions + ' required');
+    block('INSUFFICIENT_ANALYSIS', 'insufficient analysis: ' + voting.length + ' valid independent opinions, ' + input.plan.minIndependentOpinions + ' required');
   } else {
     const bulls = voting.filter((v) => v.opinion.stance === 'bullish');
     const bears = voting.filter((v) => v.opinion.stance === 'bearish');
@@ -50,7 +56,7 @@ export function buildConsensus(input: ConsensusInput): ConsensusResult {
         about: 'direction',
         statements: [...bulls, ...bears].map((v) => v.modelKey + ': ' + v.opinion.stance + ' / ' + v.opinion.recommendation),
       });
-      blocking.push('contradiction: analysts disagree on direction');
+      block('CONTRADICTION_DIRECTION', 'contradiction: analysts disagree on direction');
     } else {
       direction = bulls.length > 0 ? 'bullish' : bears.length > 0 ? 'bearish' : 'neutral';
     }
@@ -63,31 +69,31 @@ export function buildConsensus(input: ConsensusInput): ConsensusResult {
     if (!contradictions.some((c) => c.about === 'direction')) {
       contradictions.push({ between: voting.map((v) => v.modelKey), about: 'action', statements: voting.map((v) => v.modelKey + ': ' + v.opinion.recommendation) });
     }
-    if (input.plan.requireUnanimity) blocking.push('no unanimous action: ' + [...actions].join(' vs '));
+    if (input.plan.requireUnanimity) block('NO_UNANIMOUS_ACTION', 'no unanimous action: ' + [...actions].join(' vs '));
   }
 
   if (input.requiresQuant) {
     if (input.quant === null || input.quant.status === 'not_available') {
-      blocking.push('quant verification not available (Quant Engine not connected)');
+      block('QUANT_NOT_AVAILABLE', 'quant verification not available (Quant Engine not connected)');
     } else if (input.quant.status === 'contradicts' || (input.quant.direction && (direction === 'bullish' || direction === 'bearish') && input.quant.direction !== direction)) {
       contradictions.push({ between: ['quant', ...votes.map((v) => v.modelKey)], about: 'quant_vs_ai', statements: ['quant: ' + (input.quant.direction ?? input.quant.status), 'council: ' + direction] });
-      blocking.push('quant does not confirm the council');
+      block('QUANT_DISAGREES', 'quant does not confirm the council');
     }
   }
 
-  if (input.staleKeyEvidence.length > 0) blocking.push('stale market data (' + input.staleKeyEvidence.join(', ') + '): not releasable as a current trading decision');
-  if (input.missingKeyEvidence.length > 0) blocking.push('key evidence missing or not available at decision time: ' + input.missingKeyEvidence.join(', '));
-  if (input.quarantinedEvidence.length > 0) blocking.push('suspected prompt injection in external input (' + input.quarantinedEvidence.join(', ') + '): human review required');
+  if (input.staleKeyEvidence.length > 0) block('STALE_KEY_EVIDENCE', 'stale market data (' + input.staleKeyEvidence.join(', ') + '): not releasable as a current trading decision');
+  if (input.missingKeyEvidence.length > 0) block('MISSING_KEY_EVIDENCE', 'key evidence missing or not available at decision time: ' + input.missingKeyEvidence.join(', '));
+  if (input.quarantinedEvidence.length > 0) block('PROMPT_INJECTION_SUSPECTED', 'suspected prompt injection in external input (' + input.quarantinedEvidence.join(', ') + '): human review required');
 
   const findings = {
     blocking: input.findings.filter((f) => f.effectiveSeverity === 'blocking'),
     major: input.findings.filter((f) => f.effectiveSeverity === 'major'),
     minor: input.findings.filter((f) => f.effectiveSeverity === 'minor'),
   };
-  for (const f of findings.blocking) blocking.push(f.check + ' (' + f.role + ' ' + f.modelKey + '): ' + f.statement);
-  if (input.plan.strictRisk) for (const f of findings.major) blocking.push('strict mode, unresolved ' + f.check + ' (' + f.modelKey + '): ' + f.statement);
+  for (const f of findings.blocking) block('BLOCKING_FINDING_' + f.check.toUpperCase(), f.check + ' (' + f.role + ' ' + f.modelKey + '): ' + f.statement);
+  if (input.plan.strictRisk) for (const f of findings.major) block('STRICT_MODE_MAJOR_FINDING', 'strict mode, unresolved ' + f.check + ' (' + f.modelKey + '): ' + f.statement);
 
-  if (blocking.length === 0 && (recommendation === 'hold' || recommendation === 'no_trade')) blocking.push('council recommends ' + recommendation);
+  if (blocking.length === 0 && (recommendation === 'hold' || recommendation === 'no_trade')) block('COUNCIL_RECOMMENDS_' + recommendation.toUpperCase(), 'council recommends ' + recommendation);
 
   const confidences = votes.map((v) => v.confidence);
   const confidenceRange = confidences.length === 0 ? null : { min: Math.min(...confidences), max: Math.max(...confidences) };
@@ -119,5 +125,6 @@ export function buildConsensus(input: ConsensusInput): ConsensusResult {
     findings,
     uncertainty,
     blockingReasons: blocking,
+    blockingCodes: [...codes],
   };
 }

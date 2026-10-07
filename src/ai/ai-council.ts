@@ -93,17 +93,19 @@ export class AiCouncil {
     };
     const at = () => this.options.clock().toISOString();
     if (!adapter || adapter.connection() !== 'connected') {
-      if (!shadow) this.registry.recordFailure(key, { at: at(), kind: 'not_connected' });
+      if (!shadow) await this.registry.recordFailure(key, { at: at(), kind: 'not_connected' });
       return { ...base, status: 'not_connected', error: 'adapter not connected', latencyMs: 0 };
     }
 
+    // Model call and telemetry are separate: a telemetry/persistence failure must surface as such,
+    // never be misread as a model failure.
     const started = Date.now();
+    let attempt: AttemptRecord;
     try {
       const raw = await withTimeout(adapter.run(request), input.timeoutMs);
       const latencyMs = Date.now() - started;
       const opinion = parseModelOpinion(raw);
-      this.registry.recordSuccess(key, { at: at(), latencyMs });
-      return { ...base, status: 'ok', latencyMs, responseHash: hashOf(raw), modelVersion: opinion.modelVersion, opinion };
+      attempt = { ...base, status: 'ok', latencyMs, responseHash: hashOf(raw), modelVersion: opinion.modelVersion, opinion };
     } catch (error) {
       const latencyMs = Date.now() - started;
       const status: AttemptRecord['status'] =
@@ -114,9 +116,11 @@ export class AiCouncil {
             : error instanceof ProviderNotConnectedError
               ? 'not_connected'
               : 'failed';
-      this.registry.recordFailure(key, { at: at(), kind: status });
-      return { ...base, status, error: error instanceof Error ? error.message : String(error), latencyMs };
+      attempt = { ...base, status, error: error instanceof Error ? error.message : String(error), latencyMs };
     }
+    if (attempt.status === 'ok') await this.registry.recordSuccess(key, { at: at(), latencyMs: attempt.latencyMs });
+    else await this.registry.recordFailure(key, { at: at(), kind: attempt.status });
+    return attempt;
   }
 
   private providerOf(key: ModelKey): string {
