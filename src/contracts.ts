@@ -14,6 +14,7 @@ export interface TradePlan {
   stopLoss:number;
   takeProfits:number[];
   riskReward:number;
+  /** Confidence score 0..1, NOT a probability until calibrated by the Learning Engine. */
   confidence:number;
   maxPositionChf:number;
   rationale:string[];
