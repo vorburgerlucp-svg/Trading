@@ -225,8 +225,8 @@ eine erforderliche menschliche Freigabe.
 
 ## 12. Offene Punkte
 
-1. **Persistenz**: `LedgerStore` für Postgres oder Firestore (append-only auf DB-Ebene, Sequenz-Constraint). Auf `main` liegt ein Firebase-Stand, diese Entscheidung ist offen.
-2. **Mehrwährung**: Ledger ist CHF-only. IBKR hält USD-Cash. Vorschlag: Postings mit Originalwährung + CHF-Gegenwert, FX-Gewinne/-Verluste auf eigenen Konten.
+1. **Persistenz**: Entschieden: **PostgreSQL** (siehe NEXUS_MASTER_SPEC.md). Offen ist der `LedgerStore`-Adapter (append-only auf DB-Ebene, Sequenz-Constraint). Firebase wird nicht der kanonische Finanz-Ledger.
+2. **Mehrwährung**: Ledger ist CHF-only. IBKR hält USD-Cash. Basis vorhanden: `src/money/currency.ts` (`Money { currency, minor }`, explizite, frische FX-Kurse). Offen: Postings mit Originalwährung + CHF-Gegenwert, FX-Gewinne/-Verluste auf eigenen Konten.
 3. **Settlement**: Trade-Erlöse sind sofort Broker-Cash; settled vs. unsettled Cash (T+n) fehlt.
 4. **Today's P&L / zeitgewichtete Rendite**: braucht historische Bewertungs-Snapshots (Kurse zum Tagesbeginn). Heute: einfache Rendite auf Nettoeinlagen.
 5. **Wertberichtigung Ware** (Niederstwertprinzip) als explizite Ledger-Buchung; heute nur Warnsignal über Marktwert-Daten.

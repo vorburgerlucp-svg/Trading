@@ -16,12 +16,7 @@ export interface AiAnalyst {
   analyze(packet:AnalysisPacket):Promise<AiAnalysis>;
 }
 
-export interface ModelRegistryEntry {
-  provider:string;
-  model:string;
-  enabled:boolean;
-  shadowMode:boolean;
-  financeBenchmark?:number;
-  latencyMs?:number;
-  costScore?:number;
-}
+// v0.1 registry entry superseded by the measured ModelRegistry (src/ai/model-registry.ts).
+export type { ModelRegistryEntry, ModelCapabilityScore } from './ai/model-registry.js';
+// General specialist port used by the NEXUS Brain (AiAnalyst remains the v0.1 trading-only interface).
+export type { ModelAdapter, SpecialistRequest } from './ai/model-adapter.js';

@@ -1,48 +1,75 @@
-# NEXUS Architecture v0.2
+# NEXUS Architecture v0.3
+
+Verfassung und Regeln: [NEXUS_MASTER_SPEC.md](NEXUS_MASTER_SPEC.md).
 
 ## Leitprinzip
 
-**AI proposes. Quant verifies. Risk decides. Human approves critical capital movements.**
+**AI proposes. Quant verifies. Risk controls. NEXUS learns and decides. Human approves critical capital movements.**
 
 Die KI bekommt niemals unkontrollierten Broker-Zugriff. Jede ausführbare Order und jede Kapitalbewegung muss durch ein deterministisches Risk-Gate; grössere Bewegungen zusätzlich durch eine explizite Freigabe des Menschen.
 
-## Pipeline
-
-1. Market/Data Ingestion
-2. Quant Engine
-3. News/Fundamental/Macro Enrichment
-4. AI Committee (OpenAI + Claude; später weitere)
-5. Consensus Engine
-6. Opportunity Engine: alle Kapitalverwendungen (Trades, Ware, Business) im gleichen Schema, deterministischer Score
-7. Capital Allocator / Reallocation: Vorschläge aus verfügbarem bzw. gebundenem Kapital
-8. Risk Engine: Trade-Risk (`assessRisk`) + Capital Risk Gate (`assessAllocationProposal`, `assessReallocationProposal`)
-9. Human Approval (kritische Kapitalbewegungen)
-10. Broker Adapter / manuelle Beschaffung (Ausführung, in v0.2 gesperrt)
-11. Capital Ledger: unveränderliche, doppelte Buchführung aller Kapitalbewegungen
-12. Capital State + Journal + Post-Trade Evaluation (Learning Engine)
-
-## Capital Layer (v0.2)
-
-Die Capital Engine kennt das gesamte Kapital: Cash (Bank, Broker, Stablecoins, Bargeld), Finanzanlagen, physische Ware, Forderungen, Verbindlichkeiten und Reservationen. Alle Werte sind aus dem Ledger rekonstruierbar; Marktwerte entstehen nur aus echten, frischen Kursen, sonst `DATA NOT CONNECTED`.
-
-Details, Formeln, Entscheidungen und offene Punkte: [CAPITAL_ENGINE.md](CAPITAL_ENGINE.md).
+## Zielarchitektur
 
 ```text
-src/money/          exakte Geld- und Dezimalarithmetik (bigint)
+                        NEXUS BRAIN
+         Planner ── Memory ── Router ── Model Registry (Champion/Challenger)
+                           │
+                     TASK MANAGER
+                 ┌─────────┴─────────┐
+           PARALLEL MODE       SEQUENTIAL MODE
+        OpenAI · Claude · Gemini (Spezialisten, austauschbar, Shadow-fähig)
+                           │
+                  SHARED BLACKBOARD  ◄── Evidence (point-in-time, Provenance)
+                           │
+               CRITIC / COUNTER-ANALYSIS
+                           │
+                    CONSENSUS ENGINE   (Marktmeinung ≠ Handlung)
+                           │
+                     QUANT ENGINE      (nicht gebaut: QuantAssessment als Eingabe)
+                           │
+                     RISK ENGINE       (Trade-Risk + Capital Risk Gate)
+                           │
+                    CAPITAL ENGINE     (finanzielle Source of Truth, nur lesend fürs Brain)
+                           │
+                RECOMMEND / NO_ACTION  → Execution Gate (gesperrt)
+                           │
+                        MEMORY  → Outcome Evaluator → Model Performance → nächster Zyklus
+```
+
+Details: [NEXUS_BRAIN.md](NEXUS_BRAIN.md) (Brain) · [CAPITAL_ENGINE.md](CAPITAL_ENGINE.md) (Kapital).
+
+## Module
+
+```text
+src/money/          exakte Geld- und Dezimalarithmetik; currency.ts: Money { currency, minor } + explizite FX
+src/persistence/    kanonisches JSON, generisches hash-verkettetes Append-only-Log (Store-Port)
 src/capital/        Ledger, Engine, Bewertung, Allocator, Reallocation
 src/inventory/      Produkte, Unit Economics, Lagerbuchungen
 src/opportunities/  Opportunity-Schema, Score, Lebenszyklus
+src/evidence/       EvidenceRef, Evidence Store (point-in-time)
+src/blackboard/     Shared Blackboard mit Evidenzregel
+src/memory/         NEXUS Memory (strukturiert, point-in-time)
+src/security/       Untrusted-Input-Behandlung (Quarantäne, Tripwire)
+src/ai/             Modell-Taxonomie und -Schema, Adapter-Port, Prompts, Registry, Performance, Champion/Challenger, Council
+src/nexus/          Planner, Router, Task Manager, Critic, Consensus, Safety (Locks), NexusBrain
+src/evaluation/     Outcome Evaluator
+src/broker/         Read-only Broker Sync (Port + Reconciliation), nicht verbunden
 src/risk-engine.ts  Trade-Risk + Capital Risk Gate
+src/broker-adapter.ts, src/ai-adapter.ts, src/contracts.ts   v0.1-Schnittstellen (unverändert bzw. erweitert)
 ```
 
 ## Broker-Strategie
 
-Broker-spezifische Details bleiben hinter BrokerAdapter. IBKR ist unser bevorzugtes langfristiges Execution-Backend. eToro bleibt als zusätzlicher Adapter. Strategien dürfen keine broker-spezifischen IDs kennen. Die Capital Engine *bucht* Fills, die ein Broker gemeldet hat; sie platziert keine Orders.
+Broker-spezifische Details bleiben hinter Adaptern. Orders (`BrokerAdapter`) und Lesezugriff (`BrokerSyncAdapter`, nur `read_only`) sind getrennte Schnittstellen. IBKR ist bevorzugt, eToro der zweite Adapter. Der erste echte Sync wird read-only sein und Abweichungen über `reconcileBrokerSnapshot` melden, bevor etwas gebucht wird.
 
 ## AI-Strategie
 
-Jedes Modell liefert dasselbe AiAnalysis-Schema. Neue Modelle laufen zuerst im Shadow Mode und werden gegen historische und Paper-Trading-Fälle benchmarked, bevor sie Entscheidungen beeinflussen. KI-Modelle liefern Thesen und Schätzungen für Opportunities, aber nie deren Score.
+Alle Modelle erhalten dasselbe Anfrage-Schema und müssen dasselbe Antwort-Schema liefern (`nexus.opinion.v1`). Es gibt keine festen Rollen pro Anbieter; Zuständigkeiten entstehen aus gemessener Leistung. Neue Modelle laufen im Shadow Mode und werden erst nach Benchmark und menschlicher Aktivierung wirksam.
+
+## Persistenz
+
+Ziel ist **PostgreSQL** für den finanziellen Kern (Ledger, Audit, Memory, Evidence, Reconciliation). Firebase ist kein kanonischer Finanz-Ledger. Alle Speicher laufen über Ports; aktuell gibt es In-Memory-Implementierungen.
 
 ## Live-Safety
 
-V0.2 führt keine Netzwerk-Order und keine Warenbestellung aus. Später brauchen Live-Orders zusätzlich: Strategy Approval, Daten-Frischeprüfung, Spread-Check, Positions-/Tagesverlustlimit, Duplicate-Order-Schutz (Ledger-IDs sind bereits idempotent), Audit Log (Ledger-Hash-Kette) und Kill Switch.
+V0.3 führt keine Netzwerk-Order und keine Warenbestellung aus. `BUILD_LOCKS` sperren Live Trading, Brokerorders und physische Einkäufe unabhängig von der Umgebung. Vor Live-Betrieb nötig: Freigabe-Workflow, Daten-Frischeprüfung (vorhanden), Spread-Check, Positions- und Tagesverlustlimit, Duplicate-Order-Schutz (Ledger-IDs idempotent), Audit (vorhanden) und Kill Switch.

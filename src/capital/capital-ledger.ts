@@ -9,9 +9,9 @@
 // Business rules (no overdraft, no negative stock, ...) are enforced by the CapitalEngine through
 // the `guard` callback, which runs inside the same serialized append section as the write.
 
-import { createHash } from 'node:crypto';
 import { Decimal } from '../money/decimal.js';
 import { rappen, ZERO_CHF } from '../money/money.js';
+import { hashOf } from '../persistence/canonical-json.js';
 import { parseAccountKey } from './accounts.js';
 import {
   CAPITAL_TRANSACTION_TYPES,
@@ -302,21 +302,5 @@ function deepFreezeEntry(entry: JournalEntry): JournalEntry {
 /** SHA-256 over a canonical JSON form (sorted keys, bigint/Decimal as strings) of everything except the hash. */
 export function computeEntryHash(entry: Omit<JournalEntry, 'hash'>): string {
   const { sequence, id, occurredAt, recordedAt, type, description, postings, refs, source, prevHash } = entry;
-  const canonical = canonicalJson({ sequence, id, occurredAt, recordedAt, type, description, postings, refs, source, prevHash });
-  return createHash('sha256').update(canonical).digest('hex');
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null) return 'null';
-  if (typeof value === 'bigint') return JSON.stringify(value.toString());
-  if (value instanceof Decimal) return JSON.stringify(value.toString());
-  if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']';
-  if (typeof value === 'object') {
-    const fields = Object.entries(value as Record<string, unknown>)
-      .filter(([, v]) => v !== undefined)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([k, v]) => JSON.stringify(k) + ':' + canonicalJson(v));
-    return '{' + fields.join(',') + '}';
-  }
-  return JSON.stringify(value);
+  return hashOf({ sequence, id, occurredAt, recordedAt, type, description, postings, refs, source, prevHash });
 }
