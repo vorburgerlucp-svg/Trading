@@ -1,51 +1,29 @@
-# 🚀 Pro Trading Signal Engine - MIT AI ANALYSE
+# NEXUS Capital Engine
 
-## 📊 Features
+Trading- und Opportunity-Intelligence-Plattform.
 
-- **65+ Indikatoren** (Trend, Momentum, Volume, Volatility)
-- **35 Chartmuster** (Bullish, Bearish, Indecision)
-- **🤖 AI Analyse Button** - Auto-Scanning aller Märkte
-- **8 Indikatoren pro Analyse** - Live Detection
-- **3 Patterns pro Markt** - Automatische Erkennung
-- **34 Märkte** (BTC, ETH, GOLD, DAX, etc.)
-- **Live Charts** - SVG Candlestick-Visualisierung
-- **News Feed** - 59+ Trading News
-- **Dark Mode** - Professional Design
-- **Responsive** - Mobile & Desktop
+**Prinzip: AI proposes. Quant verifies. Risk decides.**
 
----
+## V0.1
 
-## 🎯 Verwendung
+Die erste Basis ist absichtlich broker- und modellunabhängig. Live-Trading ist noch gesperrt. Wir bauen zuerst reproduzierbare Analyse, Risk-Gates und saubere Adapter.
 
-1. **index.html öffnen** im Browser
-2. **"ANALYSIEREN" Button klicken** → Findet beste Märkte
-3. **Indikatoren/Muster wählen** → Charts aktualisieren sich
-4. **Markets scannen** → Live Data anschauen
+### Ziel-Broker
+- IBKR: bevorzugtes langfristiges Execution-Backend wegen breiter Markt-/Instrumentabdeckung und reifer API.
+- eToro: zusätzlicher Adapter für Demo/Live und kleine Testgrössen.
+- Krypto-Börsen: später als eigene Adapter.
 
----
+### Ziel-KI
+- OpenAI
+- Anthropic Claude
+- später Gemini und weitere Modelle über dieselbe Schnittstelle
 
-## 📁 Struktur---
+### Struktur
+- src/contracts.ts — gemeinsames Datenmodell
+- src/risk-engine.ts — deterministische Freigabe/Blockierung
+- src/broker-adapter.ts — Broker-Schnittstelle
+- src/ai-adapter.ts — KI-Schnittstelle
+- docs/ARCHITECTURE.md — Zielarchitektur
+- docs/ROADMAP.md — Bauplan
 
-## 🛠️ Tech Stack
-
-- **React 18** (CDN)
-- **Babel Standalone** (für JSX)
-- **Pure CSS** (Dark Mode)
-- **SVG Charts** (keine Dependencies!)
-
----
-
-## 🚀 LIVE LINK---
-
-## ✨ Nächste Steps
-
-- Backend APIs integrieren (real market data)
-- Echte Pattern Recognition (ML)
-- User Authentication
-- Database für User-Data
-
----
-
-## 📄 Lizenz
-
-MIT License - Frei verwendbar!
+**Keine API-Keys in GitHub committen.**
