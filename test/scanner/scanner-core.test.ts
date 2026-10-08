@@ -114,6 +114,14 @@ describe('market scanner core', () => {
     expect(run.rejected).toContainEqual({ instrumentId: 'SECOND', reasons: ['missing scanner snapshot'] });
   });
 
+  it('rejects a quant result from a different interval than the scanner definition', () => {
+    const { q, asOf } = quant();
+    const wrongInterval = { ...q, interval: '5m' as const };
+    const run = runMarketScanner(definition(), scannerUniverse(asOf), [scannerSnapshot(wrongInterval, asOf)], asOf);
+    expect(run.candidates).toHaveLength(0);
+    expect(run.rejected[0]?.reasons).toContain('quant interval does not match scanner interval');
+  });
+
   it('rejects recycled quant state whose asOf no longer matches the scanner time', () => {
     const { q, asOf } = quant();
     const later = toUtcIso(parseUtc(asOf) + 60_000);
