@@ -38,5 +38,10 @@ export function protectiveExitForLong(bar: MarketBar, stopLoss: Decimal | null, 
 
 /** A decision made from a final bar may never fill at that same bar's open/close. */
 export function isEligibleNextBar(decisionBar: MarketBar, candidateBar: MarketBar): boolean {
-  return candidateBar.instrumentId === decisionBar.instrumentId && parseUtc(candidateBar.startTime) > parseUtc(decisionBar.startTime);
+  if (candidateBar.instrumentId !== decisionBar.instrumentId) return false;
+  const candidateOpen = parseUtc(candidateBar.startTime);
+  const decisionKnown = parseUtc(decisionBar.availableAt);
+  // The next bar's open is executable only if it occurs at or after the decision became knowable.
+  // A delayed final bar must never cause a retroactive fill at an already-passed bar open.
+  return candidateOpen >= decisionKnown;
 }
