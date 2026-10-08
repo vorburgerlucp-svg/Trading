@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { runBacktest } from '../../src/backtest/backtest-engine.js';
+import { verifyBacktestRun } from '../../src/backtest/backtest-store.js';
 import type { BacktestStrategy } from '../../src/backtest/strategy.js';
 import type { MarketBar } from '../../src/market-data/market-data-types.js';
 import { Decimal } from '../../src/money/decimal.js';
@@ -192,6 +193,19 @@ describe('Backtest Engine point-in-time execution', () => {
     expect(a.strategyVersion).toBe(b.strategyVersion);
     expect(a.strategyFingerprint).not.toBe(b.strategyFingerprint);
     expect(a.backtestRunId).not.toBe(b.backtestRunId);
+  });
+
+  it('detects strategy metadata tampering even when the stored strategy fingerprint is left unchanged', () => {
+    const result = runBacktest({
+      bars: [bar(0, '100', '101', '99', '100'), bar(1, '101', '102', '100', '101'), bar(2, '102', '103', '101', '102')],
+      strategy: enterThenExit(1, 99),
+      initialCapital: Decimal.from(1000),
+      sizing: { type: 'fixed_cash', amount: '500' },
+      costModel: zeroCost,
+      quality,
+    });
+    const changed = { ...result, strategyDefinition: { ...result.strategyDefinition, entryHistoryLength: 2 } };
+    expect(() => verifyBacktestRun(changed)).toThrow(/strategy metadata checksum mismatch/);
   });
 
   it('rejects per-instrument availability inversion instead of retroactively trading delayed bars', () => {
