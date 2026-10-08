@@ -68,6 +68,7 @@ function backtestRun() {
   const strategy: BacktestStrategy = {
     id: 'persist-fixture',
     version: '1',
+    definition: { entryHistoryLength: 1, exitHistoryLength: 3 },
     evaluate(ctx) {
       if (!ctx.position && ctx.history.length === 1) return { action: 'ENTER_LONG', reasons: ['fixture'] };
       if (ctx.position && ctx.history.length === 3) return { action: 'EXIT_LONG', reasons: ['fixture'] };
