@@ -30,7 +30,9 @@ export interface ScannerSnapshot {
   instrumentId: string;
   asOf: string;
   lastPrice: Decimal;
+  lastPriceAvailableAt: string;
   averageVolume?: Decimal;
+  averageVolumeAvailableAt?: string;
   quant: QuantResult;
 }
 
@@ -46,6 +48,15 @@ export interface ScannerCandidate {
   dataQualityStatus: string;
 }
 
+export interface ScannerCoverage {
+  universeMembers: number;
+  snapshotsProvided: number;
+  evaluatedInstruments: number;
+  missingInstruments: string[];
+  duplicateInstruments: string[];
+  complete: boolean;
+}
+
 export interface ScannerRun {
   scannerRunId: string;
   inputFingerprint: string;
@@ -56,6 +67,8 @@ export interface ScannerRun {
   universeFingerprint: string;
   universePointInTimeSafe: boolean;
   asOf: string;
+  coverage: ScannerCoverage;
+  rankingComplete: boolean;
   candidates: ScannerCandidate[];
   rejected: Array<{ instrumentId: string; reasons: string[] }>;
 }
