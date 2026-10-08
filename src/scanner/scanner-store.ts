@@ -14,6 +14,14 @@ export function verifyScannerRun(run: ScannerRun): ScannerRun {
   if (run.definition.id !== run.definitionId || run.definition.version !== run.definitionVersion || run.definition.universeId !== run.universeId) {
     throw new ScannerRunIntegrityError('scanner definition metadata mismatch');
   }
+  if (run.rankingComplete !== run.coverage.complete) throw new ScannerRunIntegrityError('scanner ranking completeness does not match coverage');
+  if (run.coverage.universeMembers < 0 || run.coverage.snapshotsProvided < 0 || run.coverage.evaluatedInstruments < 0) {
+    throw new ScannerRunIntegrityError('scanner coverage counts must not be negative');
+  }
+  if (run.coverage.evaluatedInstruments > run.coverage.universeMembers) throw new ScannerRunIntegrityError('scanner evaluated more instruments than the universe contains');
+  if (run.coverage.complete && (run.coverage.missingInstruments.length > 0 || run.coverage.duplicateInstruments.length > 0)) {
+    throw new ScannerRunIntegrityError('scanner coverage marked complete despite missing/duplicate instruments');
+  }
   const ranks = new Set<number>();
   const instruments = new Set<string>();
   for (const candidate of run.candidates) {
