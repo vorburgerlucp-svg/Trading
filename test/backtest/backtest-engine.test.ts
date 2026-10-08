@@ -27,7 +27,7 @@ function bar(index: number, o: string, h: string, l: string, c: string): MarketB
   };
 }
 
-const quality = { pointInTimeUniverse: true, dataComplete: true, corporateActions: 'modeled' as const, providerProduction: true, minimumTrades: 1 };
+const quality = { pointInTimeUniverse: true, dataComplete: true, corporateActions: 'not_modeled' as const, providerProduction: true, minimumTrades: 1 };
 const zeroCost = { commissionBps: 0, spreadBps: 0, slippageBps: 0, minCommission: '0' };
 
 function enterThenExit(entryHistoryLength: number, exitHistoryLength: number, stops?: { stop: string; tp: string }): BacktestStrategy {
@@ -128,6 +128,47 @@ describe('Backtest Engine point-in-time execution', () => {
     const costly = runBacktest({ ...base, costModel: { commissionBps: 30, spreadBps: 30, slippageBps: 20, minCommission: '1' } });
     expect(free.trades[0]?.pnl.isPositive()).toBe(true);
     expect(costly.trades[0]?.pnl.isNegative()).toBe(true);
+  });
+
+  it('waits for the first bar whose open occurs after a delayed decision became available', () => {
+    const first = bar(0, '100', '101', '99', '100');
+    const second = bar(1, '102', '103', '101', '102');
+    const third = bar(2, '104', '105', '103', '104');
+    const delayedFirst = { ...first, availableAt: new Date(Date.parse(second.startTime) + 60_000).toISOString(), retrievedAt: new Date(Date.parse(second.startTime) + 60_000).toISOString() };
+    const result = runBacktest({
+      bars: [delayedFirst, second, third],
+      strategy: enterThenExit(1, 99),
+      initialCapital: Decimal.from(1000),
+      sizing: { type: 'fixed_cash', amount: '500' },
+      costModel: zeroCost,
+      quality,
+    });
+    expect(result.fills[0]?.at).toBe(third.startTime);
+    expect(result.fills[0]?.rawPrice.toString()).toBe('104');
+  });
+
+  it('refuses to claim corporate actions are modeled before the engine can apply them to open positions', () => {
+    expect(() => runBacktest({
+      bars: [bar(0, '100', '101', '99', '100'), bar(1, '101', '102', '100', '101')],
+      strategy: enterThenExit(1, 99),
+      initialCapital: Decimal.from(1000),
+      sizing: { type: 'fixed_cash', amount: '500' },
+      costModel: zeroCost,
+      quality: { ...quality, corporateActions: 'modeled' },
+    })).toThrow(/cannot claim corporate actions are modeled/);
+  });
+
+  it('rejects mixed series instead of silently combining different adjustments or sources', () => {
+    const a = bar(0, '100', '101', '99', '100');
+    const b = { ...bar(1, '101', '102', '100', '101'), adjustment: 'split_adjusted' as const };
+    expect(() => runBacktest({
+      bars: [a, b],
+      strategy: enterThenExit(1, 99),
+      initialCapital: Decimal.from(1000),
+      sizing: { type: 'fixed_cash', amount: '500' },
+      costModel: zeroCost,
+      quality,
+    })).toThrow(/uniform interval\/session\/adjustment\/source/);
   });
 
   it('rejects per-instrument availability inversion instead of retroactively trading delayed bars', () => {
