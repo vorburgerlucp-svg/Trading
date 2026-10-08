@@ -76,6 +76,7 @@ export interface BacktestRunResult {
   instrumentId: string;
   strategyId: string;
   strategyVersion: string;
+  strategyFingerprint: string;
   inputFingerprint: string;
   initialCapital: Decimal;
   costModel: Readonly<CostModelConfig>;
