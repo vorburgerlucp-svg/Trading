@@ -66,6 +66,10 @@ export interface QuantAssessment {
   summary?: string;
   /** Stored quant run (src/quant) this assessment is based on: exact bars, versions and point in time. */
   quantRunId?: string;
+  /** Deterministic scanner run that surfaced this instrument/opportunity. */
+  scannerRunId?: string;
+  /** Backtests used as empirical evidence for this assessment. Never probabilities by themselves. */
+  backtestRunIds?: string[];
 }
 
 export interface AttemptRecord {

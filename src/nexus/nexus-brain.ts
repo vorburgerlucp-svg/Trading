@@ -468,6 +468,13 @@ export class NexusBrain {
     if (request.question.trim() === '') throw new NexusBrainError('question is required');
     if (Number.isNaN(Date.parse(request.asOf))) throw new NexusBrainError('asOf must be an ISO timestamp');
     if (task.capitalAtRiskMinor !== undefined && task.capitalAtRiskMinor < 0n) throw new NexusBrainError('capitalAtRiskMinor must not be negative');
+    const quant = request.quant;
+    if (quant?.quantRunId !== undefined && !/^qr_[0-9a-f]{40}$/.test(quant.quantRunId)) throw new NexusBrainError('invalid quantRunId');
+    if (quant?.scannerRunId !== undefined && !/^scan_[0-9a-f]{40}$/.test(quant.scannerRunId)) throw new NexusBrainError('invalid scannerRunId');
+    if (quant?.backtestRunIds !== undefined) {
+      if (quant.backtestRunIds.some((id) => !/^bt_[0-9a-f]{40}$/.test(id))) throw new NexusBrainError('invalid backtestRunId');
+      if (new Set(quant.backtestRunIds).size !== quant.backtestRunIds.length) throw new NexusBrainError('duplicate backtestRunId');
+    }
     if (this.deps.blackboard.entries(task.id).length > 0) throw new NexusBrainError('task ' + task.id + ' already ran a decision cycle; use a new task id');
   }
 }
