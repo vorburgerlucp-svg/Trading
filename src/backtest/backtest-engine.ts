@@ -185,6 +185,7 @@ export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy 
     instrumentId,
     strategyId: input.strategy.id,
     strategyVersion: input.strategy.version,
+    strategyDefinition: structuredClone(input.strategy.definition),
     strategyFingerprint,
     inputFingerprint,
     initialCapital: input.initialCapital,
