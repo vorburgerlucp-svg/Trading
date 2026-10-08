@@ -4,7 +4,7 @@ import { parseUtc, toUtcIso } from '../../src/market-data/time.js';
 import { Decimal } from '../../src/money/decimal.js';
 import { computeQuant } from '../../src/quant/quant-engine.js';
 import { runMarketScanner } from '../../src/scanner/market-scanner.js';
-import type { ScannerDefinition } from '../../src/scanner/scanner-types.js';
+import type { ScannerDefinition, ScannerSnapshot } from '../../src/scanner/scanner-types.js';
 import { InMemoryInstrumentUniverseStore } from '../../src/scanner/universe.js';
 import { AAPL, PRODUCTION_LIKE_SOURCE, dailyBars, randomOhlcv } from '../market-data/fixtures.js';
 
@@ -42,6 +42,29 @@ function definition(): ScannerDefinition {
   };
 }
 
+function scannerSnapshot(q: ReturnType<typeof quant>['q'], asOf: string, overrides: Partial<ScannerSnapshot> = {}): ScannerSnapshot {
+  return {
+    instrumentId: AAPL.instrumentId,
+    asOf,
+    lastPrice: q.supportResistance.nearestSupport?.priceLevel ?? Decimal.from(100),
+    lastPriceAvailableAt: asOf,
+    averageVolume: Decimal.from(1_000_000),
+    averageVolumeAvailableAt: asOf,
+    quant: q,
+    ...overrides,
+  };
+}
+
+function scannerUniverse(asOf: string, extraMembers: string[] = []) {
+  const store = new InMemoryInstrumentUniverseStore();
+  store.register({ universeId: 'U', version: '1', source: 'fixture', pointInTimeSafe: true });
+  store.addMembership({ universeId: 'U', instrumentId: AAPL.instrumentId, validFrom: '2020-01-01T00:00:00.000Z', availableAt: '2020-01-01T00:00:00.000Z', source: 'fixture' });
+  for (const instrumentId of extraMembers) {
+    store.addMembership({ universeId: 'U', instrumentId, validFrom: '2020-01-01T00:00:00.000Z', availableAt: '2020-01-01T00:00:00.000Z', source: 'fixture' });
+  }
+  return store.snapshot('U', asOf);
+}
+
 describe('point-in-time universe', () => {
   it('membership is invisible before its availableAt and historical delisting is respected', () => {
     const store = new InMemoryInstrumentUniverseStore();
@@ -59,29 +82,61 @@ describe('market scanner core', () => {
   it('accepts only universe members with trading-usable final quant data', () => {
     const { q, asOf } = quant();
     expect(q.dataQuality.usableForTrading).toBe(true);
-    const universeStore = new InMemoryInstrumentUniverseStore();
-    universeStore.register({ universeId: 'U', version: '1', source: 'fixture', pointInTimeSafe: true });
-    universeStore.addMembership({ universeId: 'U', instrumentId: AAPL.instrumentId, validFrom: '2020-01-01T00:00:00.000Z', availableAt: '2020-01-01T00:00:00.000Z', source: 'fixture' });
-    const universe = universeStore.snapshot('U', asOf);
-    const run = runMarketScanner(definition(), universe, [{ instrumentId: AAPL.instrumentId, asOf, lastPrice: q.supportResistance.nearestSupport?.priceLevel ?? Decimal.from(100), averageVolume: Decimal.from(1_000_000), quant: q }], asOf);
+    const universe = scannerUniverse(asOf);
+    const run = runMarketScanner(definition(), universe, [scannerSnapshot(q, asOf)], asOf);
     expect(run.candidates).toHaveLength(1);
     expect(run.candidates[0]).toMatchObject({ instrumentId: AAPL.instrumentId, rank: 1, quantRunId: q.quantRunId });
     expect(run.universePointInTimeSafe).toBe(true);
+    expect(run.coverage.complete).toBe(true);
+    expect(run.rankingComplete).toBe(true);
   });
 
   it('rejects a quant result that is not usable for trading and fingerprints the rejection', () => {
     const { q, asOf } = quant();
     expect(q.dataQuality.usableForTrading).toBe(true);
     const unsafe = { ...q, dataQuality: { ...q.dataQuality, usableForTrading: false } };
-    const universeStore = new InMemoryInstrumentUniverseStore();
-    universeStore.register({ universeId: 'U', version: '1', source: 'fixture', pointInTimeSafe: true });
-    universeStore.addMembership({ universeId: 'U', instrumentId: AAPL.instrumentId, validFrom: '2020-01-01T00:00:00.000Z', availableAt: '2020-01-01T00:00:00.000Z', source: 'fixture' });
-    const universe = universeStore.snapshot('U', asOf);
-    const rejected = runMarketScanner(definition(), universe, [{ instrumentId: AAPL.instrumentId, asOf, lastPrice: Decimal.from(100), quant: unsafe }], asOf);
-    const accepted = runMarketScanner(definition(), universe, [{ instrumentId: AAPL.instrumentId, asOf, lastPrice: Decimal.from(100), quant: q }], asOf);
+    const universe = scannerUniverse(asOf);
+    const rejected = runMarketScanner(definition(), universe, [scannerSnapshot(unsafe, asOf, { lastPrice: Decimal.from(100) })], asOf);
+    const accepted = runMarketScanner(definition(), universe, [scannerSnapshot(q, asOf, { lastPrice: Decimal.from(100) })], asOf);
     expect(rejected.candidates).toHaveLength(0);
     expect(accepted.candidates).toHaveLength(1);
     expect(rejected.rejected[0]?.reasons).toContain('market data not usable for trading');
     expect(rejected.scannerRunId).not.toBe(accepted.scannerRunId);
+  });
+
+  it('marks ranking incomplete when universe members are missing', () => {
+    const { q, asOf } = quant();
+    const run = runMarketScanner(definition(), scannerUniverse(asOf, ['SECOND']), [scannerSnapshot(q, asOf)], asOf);
+    expect(run.candidates).toHaveLength(1);
+    expect(run.coverage.missingInstruments).toEqual(['SECOND']);
+    expect(run.coverage.complete).toBe(false);
+    expect(run.rankingComplete).toBe(false);
+    expect(run.rejected).toContainEqual({ instrumentId: 'SECOND', reasons: ['missing scanner snapshot'] });
+  });
+
+  it('rejects recycled quant state whose asOf no longer matches the scanner time', () => {
+    const { q, asOf } = quant();
+    const later = toUtcIso(parseUtc(asOf) + 60_000);
+    const run = runMarketScanner(definition(), scannerUniverse(later), [scannerSnapshot(q, later)], later);
+    expect(run.candidates).toHaveLength(0);
+    expect(run.rejected[0]?.reasons).toContain('snapshot/quant asOf does not match scanner asOf');
+  });
+
+  it('rejects market values that were not yet available at scanner asOf', () => {
+    const { q, asOf } = quant();
+    const run = runMarketScanner(definition(), scannerUniverse(asOf), [
+      scannerSnapshot(q, asOf, { lastPriceAvailableAt: toUtcIso(parseUtc(asOf) + 1) }),
+    ], asOf);
+    expect(run.candidates).toHaveLength(0);
+    expect(run.rejected[0]?.reasons).toContain('last price not yet available at scanner asOf');
+  });
+
+  it('rejects duplicate snapshots instead of double-ranking one instrument', () => {
+    const { q, asOf } = quant();
+    const snap = scannerSnapshot(q, asOf);
+    const run = runMarketScanner(definition(), scannerUniverse(asOf), [snap, { ...snap }], asOf);
+    expect(run.candidates).toHaveLength(0);
+    expect(run.coverage.duplicateInstruments).toEqual([AAPL.instrumentId]);
+    expect(run.rankingComplete).toBe(false);
   });
 });
