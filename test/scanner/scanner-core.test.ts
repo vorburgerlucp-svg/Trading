@@ -59,7 +59,7 @@ describe('market scanner core', () => {
     universeStore.register({ universeId: 'U', version: '1', source: 'fixture', pointInTimeSafe: true });
     universeStore.addMembership({ universeId: 'U', instrumentId: AAPL.instrumentId, validFrom: '2020-01-01T00:00:00.000Z', availableAt: '2020-01-01T00:00:00.000Z', source: 'fixture' });
     const universe = universeStore.snapshot('U', AS_OF);
-    const run = runMarketScanner(definition(), universe, [{ instrumentId: AAPL.instrumentId, asOf: AS_OF, lastPrice: q.supportResistance.nearestSupport?.price ?? Decimal.from(100), averageVolume: Decimal.from(1_000_000), quant: q }], AS_OF);
+    const run = runMarketScanner(definition(), universe, [{ instrumentId: AAPL.instrumentId, asOf: AS_OF, lastPrice: q.supportResistance.nearestSupport?.priceLevel ?? Decimal.from(100), averageVolume: Decimal.from(1_000_000), quant: q }], AS_OF);
     expect(run.candidates).toHaveLength(1);
     expect(run.candidates[0]).toMatchObject({ instrumentId: AAPL.instrumentId, rank: 1, quantRunId: q.quantRunId });
     expect(run.universePointInTimeSafe).toBe(true);
