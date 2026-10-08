@@ -47,6 +47,8 @@ function scannerRun(): ScannerRun {
     universeFingerprint: hashOf({ members: ['TEST'] }),
     universePointInTimeSafe: true,
     asOf: '2026-10-08T20:00:00.000Z',
+    coverage: { universeMembers: 1, snapshotsProvided: 1, evaluatedInstruments: 1, missingInstruments: [], duplicateInstruments: [], complete: true },
+    rankingComplete: true,
     candidates: [{
       scannerRunId,
       instrumentId: 'TEST',
@@ -78,7 +80,7 @@ function backtestRun() {
     initialCapital: Decimal.from(1000),
     sizing: { type: 'fixed_cash', amount: '500' },
     costModel: { commissionBps: 5, spreadBps: 10, slippageBps: 5, minCommission: '1' },
-    quality: { pointInTimeUniverse: true, dataComplete: true, corporateActions: 'modeled', providerProduction: true, minimumTrades: 1 },
+    quality: { pointInTimeUniverse: true, dataComplete: true, corporateActions: 'not_modeled', providerProduction: true, minimumTrades: 1 },
   });
 }
 
