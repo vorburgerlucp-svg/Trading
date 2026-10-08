@@ -115,6 +115,47 @@ describe('DecisionRecord und Audit Trail', () => {
     expect(await run()).toBe(await run());
   });
 
+
+  it('Scanner-/Backtest-Referenzen fliessen in Audit und Decision-Fingerprint ein', async () => {
+    const quant = {
+      status: 'confirmed' as const,
+      direction: 'bullish' as const,
+      evidenceRefId: 'quant-aapl',
+      summary: 'fixture',
+      quantRunId: 'qr_' + 'a'.repeat(40),
+      scannerRunId: 'scan_' + 'b'.repeat(40),
+      backtestRunIds: ['bt_' + 'c'.repeat(40), 'bt_' + 'd'.repeat(40)],
+    };
+
+    const first = await setupBrain({ adapters: council() });
+    const d1 = await first.brain.decide(decisionRequest(task({ id: 'task-evidence-links' }), { quant }));
+    const trace = first.brain.trace(d1.decisionId)!;
+    expect(trace.inputs.quant).toMatchObject({
+      quantRunId: quant.quantRunId,
+      scannerRunId: quant.scannerRunId,
+      backtestRunIds: quant.backtestRunIds,
+    });
+    const fp1 = first.brain.record(d1.decisionId)!.inputFingerprint;
+
+    const second = await setupBrain({ adapters: council() });
+    const changed = { ...quant, backtestRunIds: ['bt_' + 'e'.repeat(40)] };
+    const d2 = await second.brain.decide(decisionRequest(task({ id: 'task-evidence-links' }), { quant: changed }));
+    expect(second.brain.record(d2.decisionId)!.inputFingerprint).not.toBe(fp1);
+  });
+
+  it('verweigert ungueltige oder doppelte Scanner-/Backtest-Referenzen', async () => {
+    const ctx = await setupBrain({ adapters: council() });
+    await expect(ctx.brain.decide(decisionRequest(task(), {
+      quant: { status: 'confirmed', scannerRunId: 'scan_not-a-hash', backtestRunIds: [] },
+    }))).rejects.toThrow(/invalid scannerRunId/);
+
+    const ctx2 = await setupBrain({ adapters: council() });
+    const same = 'bt_' + 'f'.repeat(40);
+    await expect(ctx2.brain.decide(decisionRequest(task(), {
+      quant: { status: 'confirmed', backtestRunIds: [same, same] },
+    }))).rejects.toThrow(/duplicate backtestRunId/);
+  });
+
   it('Reason Codes und finale Aktion: WATCH bei klarer Sicht und Zeitrisiko, REJECT bei Risk-Ablehnung', async () => {
     const stale = await setupBrain({ adapters: council() });
     await stale.evidence.register({ id: 'price-old', type: 'market_price', source: 'feed', observedAt: '2026-10-01T06:00:00.000Z', availableAt: '2026-10-01T06:00:00.000Z', retrievedAt: '2026-10-01T06:00:00.000Z', freshnessMs: 60_000, trusted: true, contentKind: 'structured' });
