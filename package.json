@@ -9,9 +9,11 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --project unit --project pg",
     "test:unit": "vitest run --project unit",
     "test:pg": "vitest run --project pg",
+    "test:live": "vitest run --project live",
+    "bench": "vitest run --project bench",
     "test:watch": "vitest --project unit",
     "check": "npm run typecheck && npm run test"
   },

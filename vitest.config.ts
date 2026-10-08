@@ -7,7 +7,7 @@ export default defineConfig({
         test: {
           name: 'unit',
           include: ['test/**/*.test.ts'],
-          exclude: ['test/pg/**'],
+          exclude: ['test/pg/**', 'test/bench/**', 'test/live/**'],
         },
       },
       {
@@ -18,6 +18,20 @@ export default defineConfig({
           testTimeout: 60_000,
           hookTimeout: 120_000,
           fileParallelism: false,
+        },
+      },
+      {
+        // Measurement only (npm run bench); not part of npm run check.
+        test: {
+          name: 'bench',
+          include: ['test/bench/**/*.bench.test.ts'],
+        },
+      },
+      {
+        // Real network calls (npm run test:live); skipped with a reason unless explicitly enabled.
+        test: {
+          name: 'live',
+          include: ['test/live/**/*.live.test.ts'],
         },
       },
     ],

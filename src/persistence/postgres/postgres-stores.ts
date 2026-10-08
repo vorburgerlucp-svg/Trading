@@ -9,7 +9,11 @@ import type { DecisionRecord } from '../../audit/decision-records.js';
 import type { BlackboardEntry } from '../../blackboard/blackboard-types.js';
 import type { LedgerSnapshot, LedgerSnapshotStore } from '../../capital/ledger-reconciliation.js';
 import type { EvidenceRecord } from '../../evidence/evidence-store.js';
+import type { InstrumentEvent } from '../../market-data/instrument-registry.js';
 import type { MemoryRecordInput } from '../../memory/memory-types.js';
+import { instrumentProjector } from './market-data-projectors.js';
+import { PostgresMarketDataStore } from './postgres-market-data-store.js';
+import { PostgresQuantRunStore } from './postgres-quant-run-store.js';
 import { PostgresAppendOnlyStore } from './postgres-append-only-store.js';
 import { PostgresLedgerStore, type PostgresLedgerStoreOptions } from './postgres-ledger-store.js';
 import type { PgPool } from './pool.js';
@@ -51,6 +55,20 @@ export interface PostgresNexusStores {
   registry: PostgresAppendOnlyStore<RegistryEvent>;
   champions: PostgresAppendOnlyStore<ChampionEvent>;
   snapshots: PostgresLedgerSnapshotStore;
+}
+
+export interface PostgresMarketDataStores {
+  instruments: PostgresAppendOnlyStore<InstrumentEvent>;
+  marketData: PostgresMarketDataStore;
+  quantRuns: PostgresQuantRunStore;
+}
+
+export async function openPostgresMarketDataStores(pool: PgPool): Promise<PostgresMarketDataStores> {
+  return {
+    instruments: await PostgresAppendOnlyStore.open(pool, 'instruments', { projector: instrumentProjector }),
+    marketData: new PostgresMarketDataStore(pool),
+    quantRuns: new PostgresQuantRunStore(pool),
+  };
 }
 
 export async function openPostgresStores(pool: PgPool, options: PostgresLedgerStoreOptions): Promise<PostgresNexusStores> {

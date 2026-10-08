@@ -11,19 +11,28 @@
 
 - ✅ v0.4 Persistenz: PostgreSQL ist die Source of Truth für Ledger, Idempotenz, Audit Events, Decision Records, Evidence, Registry, Performance, Memory und Snapshots. Dazu Migrationen, Integritätsprüfung beim Start (fail closed), Reconciliation sowie Contract-, Integrations- und adversariale Tests gegen echtes PostgreSQL (siehe docs/PERSISTENCE.md)
 
+- ✅ v0.5 Market Intelligence Foundation V1 (siehe docs/MARKET_DATA_QUANT.md):
+  - Twelve Data Adapter
+  - Instrument Registry mit Ticker-Historie
+  - Kalender (Börse, 24/7, 24/5)
+  - Datenqualität und Freshness
+  - Corporate Actions mit point-in-time Split-Adjustierung
+  - revisionierte, reproduzierbare Marktdaten-Persistenz
+  - Quant Engine V1 (SMA, EMA, RSI, MACD, ATR, ADX, Bollinger, VWAP, Pivots, Swings, Support/Resistance, Market Structure) mit auditierbaren Quant-Runs
+  - Golden-, Property- und Look-ahead-Tests
+
 ## Phase 1b — Echte Anbindung, weiterhin ohne Kapitalbewegung
-- **Nächster Schritt: Real Market Data + Quant Engine V1**: Instrument Registry, OHLCV/Quotes als Evidence mit Provenance, Datenfrische, point-in-time und backtest-fähig; SMA, EMA, RSI, MACD, ATR, ADX, Bollinger, VWAP, Pivot Points, Support/Resistance, Market Structure
-- Danach: erster echter AI-Provider im Shadow Mode (Keys nur serverseitig, Timeouts, Kostenmessung), dann die weiteren Provider-Adapter für OpenAI, Anthropic und Gemini
+- **Nächster Schritt: Market Scanner V1 + Backtest Engine V1**, beide auf derselben Quant-Mathematik (`QuantService`, `asOf` + `storedThrough`); dazu ein point-in-time Instrument-Universum (gegen Survivorship Bias)
+- Danach: erster echter AI-Provider im Shadow Mode (Keys nur serverseitig, Timeouts, Kostenmessung), dann die weiteren Provider-Adapter für OpenAI, Anthropic und Gemini. Erst dann bewerten AI Council und Quant gemeinsam echte Opportunities.
+- Twelve Data Produktionsschlüssel konfigurieren und Lizenzbedingungen klassifizieren; weitere Börsenkalender (z. B. SIX) aus offiziellen Quellen
 - Externe, signierte Ledger-Checkpoints; DB-Rollen ohne UPDATE/DELETE-Rechte für die Anwendung
 - Serverseitige API + Dashboard-Kopfzeile mit echten Ledger-Zahlen und `DATA NOT CONNECTED`
 - Validierter Config-Loader für alle Policies
 - Freigabe-Workflow (Approval-Objekte mit Audit)
 
 ## Phase 2 — Echte Daten + Paper
-- Instrument Registry
-- OHLCV/Quotes (als Evidence mit Provenance)
-- Quant Engine: EMA, SMA, RSI, MACD, ATR, ADX, VWAP, Bollinger, OBV, Stochastic, ROC, Volatilität
-- Pivot Points, Fibonacci, Support/Resistance, Market Structure, Swing High/Low
+- weitere Indikatoren nach Bedarf (OBV, Stochastic, ROC, Volatilität), BOS/CHOCH, Liquidity Sweeps
+- Cross-Provider-Validierung und Source Priority (Massive, Broker-Quotes)
 - eToro Demo + IBKR What-If/Paper
 - IBKR read-only Sync (Positionen, Cash, Fills) in den Ledger + Reconciliation
 - Mehrwährungs-Ledger auf Basis `Money { currency, minor }` (USD-Cash bei IBKR, FX-Gewinne/-Verluste)

@@ -74,6 +74,7 @@ Wird zur Laufzeit beim Nachholen eine ungültige Buchung entdeckt, sperrt sich d
 | `001_ledger.sql` | `ledgers`, `ledger_transactions`, `ledger_lines`, Trigger (Verkettung, Kopf, Vollständigkeit/Nullsumme/Währung, append-only), Views `ledger_reservations`, `ledger_account_balances` |
 | `002_append_only_logs.sql` | `append_only_logs`, `append_only_records` (JSONB, verlustfreier Codec für bigint/Decimal), gleiche Ketten- und Schutzregeln |
 | `003_domain_projections.sql` | `evidence`, `audit_events`, `model_runs`, `decision_records`, `decision_evidence`, `decision_model_runs`, `memory_records`, `blackboard_entries`, `model_registry_events`, `models` (Cache), `model_domain_scores` (Cache), `champion_changes`, `ledger_snapshots` |
+| `004_market_data.sql` | `market_data_sources`, `instruments` und `provider_instrument_mappings` (Projektionen des Logs `instruments`), `instrument_events`, `market_data_heads` (lückenlose Ingest-Sequenz), `market_bars`, `market_quotes`, `corporate_actions` (eine Zeile pro Revision), `market_data_quarantine`, `quant_runs`. Details: [MARKET_DATA_QUANT.md](MARKET_DATA_QUANT.md) |
 
 - Geld: `BIGINT` Minor Units plus `CHAR(3)` Währung. Mengen: `NUMERIC`. Kein Float für Geld; Werte jenseits von 2^53 Rappen sind getestet.
 - Reservationen sind Ledger-Unterkonten (Quell-Ereignisse) und werden über eine View abgefragt; es gibt keine zweite, abweichende Kopie.

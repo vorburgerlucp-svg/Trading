@@ -60,7 +60,10 @@ Statusbegriffe: **GEBAUT & GETESTET** (Logik implementiert, Tests grün) · **IN
 | Persistenz PostgreSQL (Ledger, Idempotenz, Audit, Decision Records, Evidence, Registry, Performance, Memory, Snapshots, Migrationen) | GEBAUT & GETESTET gegen echtes PostgreSQL 17 (Contract-, Integrations- und adversariale Tests) |
 | NEXUS Brain: Planner, Router, Council, Task Manager, Blackboard, Evidence, Critic, Consensus, Memory, Evaluator, Model Registry, Champion/Challenger | GEBAUT & GETESTET (mit Test-Doubles statt echter Modelle) |
 | OpenAI-, Claude-, Gemini-Adapter | NICHT VERBUNDEN (Port `ModelAdapter` vorhanden, kein HTTP-Adapter) |
-| Quant Engine (Indikatoren, Muster) | NICHT GEBAUT: Brain verlangt `QuantAssessment` als Eingabe, sonst NO_ACTION |
+| Marktdaten: Provider-Port, Instrument Registry, Kalender, Datenqualität, Freshness, Corporate Actions, Persistenz (Migration 004) | GEBAUT & GETESTET (inkl. PostgreSQL) |
+| Twelve Data Adapter | GEBAUT & GETESTET; echter Smoke-Test mit dem öffentlichen Demo-Schlüssel bestanden; **Produktionsschlüssel nicht konfiguriert** |
+| Massive, IBKR-/eToro-Marktdaten | GEPLANT (nur Rollen definiert) |
+| Quant Engine V1 (SMA, EMA, RSI, MACD, ATR, ADX, Bollinger, VWAP, Pivots, Swings, Support/Resistance, Market Structure) | GEBAUT & GETESTET (Golden-, Property-, Look-ahead-Tests). Liefert Beschreibungen, **keine** Handelsempfehlung; das Brain nimmt `QuantAssessment` weiterhin als Eingabe (mit optionaler `quantRunId`) |
 | Broker Sync IBKR / eToro | INTERFACE, read-only, NICHT VERBUNDEN; Reconciliation-Logik getestet |
 | Externe, signierte Ledger-Checkpoints | INTERFACE (`LedgerCheckpointStore`, In-Memory-Implementierung) |
 | DB-Rollen ohne UPDATE/DELETE-Rechte | NICHT GEBAUT (Empfehlung in PERSISTENCE.md; Trigger blockieren Mutationen bereits) |
@@ -72,6 +75,19 @@ Statusbegriffe: **GEBAUT & GETESTET** (Logik implementiert, Tests grün) · **IN
 
 Alle Speicher sind über Ports abstrahiert (`LedgerStore`, `AppendOnlyStore<T>`). PostgreSQL-Adapter und In-Memory-Adapter bestehen dieselben Contract-Tests. Details stehen in [PERSISTENCE.md](PERSISTENCE.md). Die Hash-Kette ist **manipulationsevident, nicht manipulationssicher**: Wer die ganze Historie neu schreibt, fällt erst über Checkpoints in getrenntem Speicher auf. Erkannte Korruption führt beim Start und im Betrieb zu `FINANCIAL_INTEGRITY_ERROR` (fail closed).
 
+### Marktdaten: Point-in-Time, Survivorship Bias, Lizenzen
+
+- **Point-in-Time:**
+  - Eine Berechnung zum Zeitpunkt T sieht nur Daten mit `availableAt ≤ T` und standardmässig nur finale Bars.
+  - Sie ist über `storedThrough` (Ingest-Sequenz) exakt reproduzierbar, auch nach späteren Backfills oder Provider-Korrekturen.
+  - Splits werden nur angewendet, wenn sie bei T bekannt und wirksam waren.
+  - Details: [MARKET_DATA_QUANT.md](MARKET_DATA_QUANT.md).
+- **Survivorship Bias:**
+  - Ein historischer Markt-Scanner oder Backtest darf **nicht** das heutige Aktienuniversum rückwirkend verwenden. Sonst fehlen dekotierte, fusionierte oder umbenannte Titel, und die Ergebnisse werden systematisch zu gut.
+  - Das Instrument-Universum muss später point-in-time rekonstruiert werden: welche Instrumente zum Zeitpunkt T handelbar und gelistet waren, mit Gültigkeitszeiträumen, wie es die Provider-Zuordnungen heute schon tun.
+  - Bis dahin gilt jeder Universums-Backtest als verzerrt und ist entsprechend zu kennzeichnen.
+- **Lizenzen und Herkunft:** Die Herkunft eines Datensatzes (Provider, Dataset, Umgebung) geht nie verloren. Jede Quelle trägt eine Lizenzklasse (`internal_use | display_allowed | redistributable | not_redistributable | unreviewed`). Ungeprüfte Quellen sind nur intern zu verwenden. Demo- und Testdaten sind nie Produktionsquelle und nie handelbar. Eine juristische Lizenz-Engine gibt es noch nicht.
+
 ## 8. Geld und Währungen
 
 CHF intern als Rappen (`bigint`). Mengen, Kurse und FX als exakte Dezimalzahlen. Mehrwährung ist geplant über `Money { currency, minor }`. Jede Umrechnung braucht einen expliziten FX-Kurs mit Quelle und Zeitstempel; veraltete Kurse werden abgelehnt. Es gibt keinen stillen Wechselkurs.
@@ -80,4 +96,4 @@ CHF intern als Rappen (`bigint`). Mengen, Kurse und FX als exakte Dezimalzahlen.
 
 Änderungen an Regeln, Limits, Locks und Policies erfolgen nur durch Menschen über Code-Review und Deployment. Kein Modell, kein Dokument und keine Datenquelle kann sie zur Laufzeit ändern.
 
-Detaildokumente: [ARCHITECTURE.md](ARCHITECTURE.md) · [CAPITAL_ENGINE.md](CAPITAL_ENGINE.md) · [NEXUS_BRAIN.md](NEXUS_BRAIN.md) · [PERSISTENCE.md](PERSISTENCE.md) · [ROADMAP.md](ROADMAP.md)
+Detaildokumente: [ARCHITECTURE.md](ARCHITECTURE.md) · [CAPITAL_ENGINE.md](CAPITAL_ENGINE.md) · [NEXUS_BRAIN.md](NEXUS_BRAIN.md) · [PERSISTENCE.md](PERSISTENCE.md) · [MARKET_DATA_QUANT.md](MARKET_DATA_QUANT.md) · [ROADMAP.md](ROADMAP.md)

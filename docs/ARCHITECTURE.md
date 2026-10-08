@@ -25,7 +25,7 @@ Die KI bekommt niemals unkontrollierten Broker-Zugriff. Jede ausführbare Order 
                            │
                     CONSENSUS ENGINE   (Marktmeinung ≠ Handlung)
                            │
-                     QUANT ENGINE      (nicht gebaut: QuantAssessment als Eingabe)
+                     QUANT ENGINE      (V1: deterministisch, point-in-time; Marktdaten via Provider-Port)
                            │
                      RISK ENGINE       (Trade-Risk + Capital Risk Gate)
                            │
@@ -36,7 +36,7 @@ Die KI bekommt niemals unkontrollierten Broker-Zugriff. Jede ausführbare Order 
                         MEMORY  → Outcome Evaluator → Model Performance → nächster Zyklus
 ```
 
-Details: [NEXUS_BRAIN.md](NEXUS_BRAIN.md) (Brain) · [CAPITAL_ENGINE.md](CAPITAL_ENGINE.md) (Kapital) · [PERSISTENCE.md](PERSISTENCE.md) (PostgreSQL, Audit).
+Details: [NEXUS_BRAIN.md](NEXUS_BRAIN.md) (Brain) · [CAPITAL_ENGINE.md](CAPITAL_ENGINE.md) (Kapital) · [PERSISTENCE.md](PERSISTENCE.md) (PostgreSQL, Audit) · [MARKET_DATA_QUANT.md](MARKET_DATA_QUANT.md) (Marktdaten, Quant).
 
 ## Module
 
@@ -45,7 +45,13 @@ src/money/          exakte Geld- und Dezimalarithmetik; currency.ts: Money { cur
 src/persistence/    kanonisches JSON, verlustfreier JSON-Codec, generisches hash-verkettetes Append-only-Log (Store-Port)
 src/persistence/postgres/  Pool (nur DATABASE_URL), Migrationsrunner, PostgresLedgerStore, PostgresAppendOnlyStore, Projektoren
 src/audit/          Audit Event Store, normalisierter DecisionRecord
-db/migrations/      versionierte SQL-Migrationen (001 Ledger, 002 Append-only-Logs, 003 Domänen-Projektionen)
+db/migrations/      versionierte SQL-Migrationen (001 Ledger, 002 Append-only-Logs, 003 Domänen-Projektionen, 004 Marktdaten)
+src/market-data/    kanonisches Marktdatenmodell, Zeit/DST, Kalender, Validierung, Datenqualität, Freshness,
+                    Instrument Registry, Corporate Actions, Store (Port + In-Memory), MarketDataService
+src/market-data/providers/  Resilienz (Timeout, Retry, Circuit Breaker), Twelve Data Adapter + Schema
+src/quant/          Quant Engine V1, QuantResult, Quant-Run-Store, QuantService (Live = Backtest)
+src/quant/indicators/  SMA, EMA, RSI, MACD, ATR, ADX, Bollinger, VWAP, Pivots
+src/quant/structure/   Swings, Support/Resistance, Market Structure
 src/capital/        Ledger, Engine, Bewertung, Allocator, Reallocation
 src/inventory/      Produkte, Unit Economics, Lagerbuchungen
 src/opportunities/  Opportunity-Schema, Score, Lebenszyklus

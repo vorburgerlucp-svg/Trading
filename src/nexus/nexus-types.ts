@@ -64,6 +64,8 @@ export interface QuantAssessment {
   direction?: 'bullish' | 'bearish' | 'neutral';
   evidenceRefId?: string;
   summary?: string;
+  /** Stored quant run (src/quant) this assessment is based on: exact bars, versions and point in time. */
+  quantRunId?: string;
 }
 
 export interface AttemptRecord {
