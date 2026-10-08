@@ -167,9 +167,10 @@ export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy 
   const endingEquity = equityCurve.at(-1)?.equity ?? cash;
   const metrics = backtestMetrics({ startingCapital: input.initialCapital, endingEquity, trades, equityCurve, totalFees, exposedPoints });
   const quality = assessBacktestQuality(input.quality, trades.length, ambiguousBars, costModel.isZeroCost());
+  const strategyFingerprint = hashOf({ id: input.strategy.id, version: input.strategy.version, definition: input.strategy.definition });
   const inputFingerprint = hashOf({
     engine: BACKTEST_ENGINE_VERSION,
-    strategy: { id: input.strategy.id, version: input.strategy.version },
+    strategyFingerprint,
     initialCapital: input.initialCapital,
     sizing: input.sizing,
     costModel: costModel.config,
@@ -184,6 +185,7 @@ export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy 
     instrumentId,
     strategyId: input.strategy.id,
     strategyVersion: input.strategy.version,
+    strategyFingerprint,
     inputFingerprint,
     initialCapital: input.initialCapital,
     costModel: costModel.config,
