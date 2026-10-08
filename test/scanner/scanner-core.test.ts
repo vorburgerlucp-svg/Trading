@@ -116,7 +116,7 @@ describe('market scanner core', () => {
 
   it('rejects a quant result from a different interval than the scanner definition', () => {
     const { q, asOf } = quant();
-    const wrongInterval = { ...q, interval: '5m' as const };
+    const wrongInterval = { ...q, series: { ...q.series, interval: '5m' as const } };
     const run = runMarketScanner(definition(), scannerUniverse(asOf), [scannerSnapshot(wrongInterval, asOf)], asOf);
     expect(run.candidates).toHaveLength(0);
     expect(run.rejected[0]?.reasons).toContain('quant interval does not match scanner interval');
