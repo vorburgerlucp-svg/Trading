@@ -20,18 +20,18 @@ export interface ProtectiveExit {
  * If both stop and TP are touched within one OHLC bar and the ordering is unknowable,
  * conservative policy chooses the adverse stop; mark_ambiguous refuses to invent an order.
  */
-export function protectiveExitForLong(bar: MarketBar, stopLoss: Decimal, takeProfit: Decimal | null, policy: IntrabarFillPolicy): ProtectiveExit | null {
-  if (bar.open.lte(stopLoss)) return { kind: 'stop', rawFillPrice: bar.open, reason: 'gap through stop' };
+export function protectiveExitForLong(bar: MarketBar, stopLoss: Decimal | null, takeProfit: Decimal | null, policy: IntrabarFillPolicy): ProtectiveExit | null {
+  if (stopLoss && bar.open.lte(stopLoss)) return { kind: 'stop', rawFillPrice: bar.open, reason: 'gap through stop' };
   if (takeProfit && bar.open.gte(takeProfit)) return { kind: 'take_profit', rawFillPrice: bar.open, reason: 'gap through take profit' };
 
-  const stopTouched = bar.low.lte(stopLoss);
+  const stopTouched = stopLoss !== null && bar.low.lte(stopLoss);
   const takeTouched = takeProfit !== null && bar.high.gte(takeProfit);
 
   if (stopTouched && takeTouched) {
     if (policy === 'conservative') return { kind: 'stop', rawFillPrice: stopLoss, reason: 'stop and take profit touched in same OHLC bar; conservative policy chooses adverse fill' };
     return { kind: 'ambiguous', rawFillPrice: null, reason: 'stop and take profit touched in same OHLC bar; ordering is unknown' };
   }
-  if (stopTouched) return { kind: 'stop', rawFillPrice: stopLoss, reason: 'stop touched' };
+  if (stopTouched && stopLoss) return { kind: 'stop', rawFillPrice: stopLoss, reason: 'stop touched' };
   if (takeTouched && takeProfit) return { kind: 'take_profit', rawFillPrice: takeProfit, reason: 'take profit touched' };
   return null;
 }

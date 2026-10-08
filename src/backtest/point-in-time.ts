@@ -42,8 +42,12 @@ export class PointInTimeBarState {
     if (parseUtc(event.bar.availableAt) !== eventTime) throw new Error('event availability does not match bar availability');
     this.currentTime = eventTime;
     const history = this.historyByInstrument.get(event.instrumentId);
-    if (history) history.push(event.bar);
-    else this.historyByInstrument.set(event.instrumentId, [event.bar]);
+    if (history) {
+      history.push(event.bar);
+      history.sort((a, b) => parseUtc(a.startTime) - parseUtc(b.startTime));
+    } else {
+      this.historyByInstrument.set(event.instrumentId, [event.bar]);
+    }
     this.latestByInstrument.set(event.instrumentId, event.bar);
   }
 
@@ -54,8 +58,8 @@ export class PointInTimeBarState {
   latest(instrumentId: string, asOf: string): MarketBar | null {
     const t = parseUtc(asOf);
     if (t > this.currentTime) throw new Error('cannot query point-in-time state beyond the processed event time');
-    const bar = this.latestByInstrument.get(instrumentId);
-    return bar && parseUtc(bar.availableAt) <= t ? bar : this.historyAt(instrumentId, asOf).at(-1) ?? null;
+    const history = this.historyAt(instrumentId, asOf);
+    return history.at(-1) ?? null;
   }
 
   historyAt(instrumentId: string, asOf: string): readonly MarketBar[] {

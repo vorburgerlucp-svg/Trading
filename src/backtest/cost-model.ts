@@ -23,6 +23,10 @@ function bpFraction(bps: number): Decimal {
   return Decimal.from(bps).dividedBy(10_000, 12, 'half_even');
 }
 
+function minDecimal(a: Decimal, b: Decimal): Decimal {
+  return a.lte(b) ? a : b;
+}
+
 export class DeterministicCostModel {
   readonly config: Readonly<CostModelConfig>;
 
@@ -60,6 +64,25 @@ export class DeterministicCostModel {
       spreadBps: this.config.spreadBps,
       slippageBps: this.config.slippageBps,
     };
+  }
+
+  /**
+   * Conservative affordability cap for buys. It satisfies both the proportional-commission and
+   * minimum-commission cases, so quote(price, 'buy', result) can never intentionally overspend cash.
+   */
+  maxAffordableQuantity(cash: Decimal, rawPrice: Decimal, scale = 12): Decimal {
+    if (!cash.isPositive()) return Decimal.ZERO;
+    const price = this.executionPrice(rawPrice, 'buy');
+    const minimum = Decimal.from(this.config.minCommission);
+    if (cash.lte(minimum)) return Decimal.ZERO;
+    const byMinimum = cash.minus(minimum).dividedBy(price, scale, 'down');
+    const proportionalFactor = Decimal.ONE.plus(bpFraction(this.config.commissionBps));
+    const byProportional = cash.dividedBy(price.times(proportionalFactor), scale, 'down');
+    return minDecimal(byMinimum, byProportional);
+  }
+
+  isZeroCost(): boolean {
+    return this.config.commissionBps === 0 && this.config.spreadBps === 0 && this.config.slippageBps === 0 && Decimal.from(this.config.minCommission).isZero();
   }
 }
 
