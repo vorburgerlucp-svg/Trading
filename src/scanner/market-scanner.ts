@@ -39,7 +39,7 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
     ]);
     const reasons: string[] = [];
     if (snapshot.quant.instrumentId !== snapshot.instrumentId) reasons.push('quant instrument mismatch');
-    if (snapshot.quant.interval !== definition.interval) reasons.push('quant interval does not match scanner interval');
+    if (snapshot.quant.series.interval !== definition.interval) reasons.push('quant interval does not match scanner interval');
     if (parseUtc(snapshot.asOf) !== asOfMs || parseUtc(snapshot.quant.asOf) !== asOfMs) reasons.push('snapshot/quant asOf does not match scanner asOf');
     if (parseUtc(snapshot.lastPriceAvailableAt) > asOfMs) reasons.push('last price not yet available at scanner asOf');
     if (snapshot.averageVolume !== undefined) {
