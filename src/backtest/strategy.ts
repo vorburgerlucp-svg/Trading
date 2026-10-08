@@ -17,6 +17,9 @@ export interface StrategyContext {
 
 export interface BacktestStrategy {
   readonly id: string;
+  /** Must change whenever evaluate() semantics change. */
   readonly version: string;
+  /** Canonical declarative parameters/config. Changing these changes the backtest fingerprint. */
+  readonly definition: Readonly<Record<string, unknown>>;
   evaluate(context: StrategyContext): StrategyDecision;
 }
