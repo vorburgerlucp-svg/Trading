@@ -34,6 +34,7 @@ function enterThenExit(entryHistoryLength: number, exitHistoryLength: number, st
   return {
     id: 'enter-exit',
     version: '1',
+    definition: { entryHistoryLength, exitHistoryLength, stops: stops ?? null },
     evaluate(ctx) {
       if (!ctx.position && ctx.history.length === entryHistoryLength) {
         return {
@@ -169,6 +170,28 @@ describe('Backtest Engine point-in-time execution', () => {
       costModel: zeroCost,
       quality,
     })).toThrow(/uniform interval\/session\/adjustment\/source/);
+  });
+
+  it('changes the backtest identity when strategy parameters change even if id/version stay the same', () => {
+    const bars = [
+      bar(0, '100', '101', '99', '100'),
+      bar(1, '101', '102', '100', '101'),
+      bar(2, '102', '103', '101', '102'),
+      bar(3, '103', '104', '102', '103'),
+    ];
+    const common = {
+      bars,
+      initialCapital: Decimal.from(1000),
+      sizing: { type: 'fixed_cash' as const, amount: '500' },
+      costModel: zeroCost,
+      quality,
+    };
+    const a = runBacktest({ ...common, strategy: enterThenExit(1, 3) });
+    const b = runBacktest({ ...common, strategy: enterThenExit(2, 3) });
+    expect(a.strategyId).toBe(b.strategyId);
+    expect(a.strategyVersion).toBe(b.strategyVersion);
+    expect(a.strategyFingerprint).not.toBe(b.strategyFingerprint);
+    expect(a.backtestRunId).not.toBe(b.backtestRunId);
   });
 
   it('rejects per-instrument availability inversion instead of retroactively trading delayed bars', () => {
