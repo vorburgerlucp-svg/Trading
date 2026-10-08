@@ -13,8 +13,8 @@ GitHub Actions runs the repository's strict TypeScript check plus the complete u
 Latest verified result at this handoff:
 
 - Typecheck: PASS
-- Test files: 36/36 PASS
-- Tests: 386/386 PASS
+- Test files: 37/37 PASS
+- Tests: 391/391 PASS
 - PostgreSQL integration: real PostgreSQL 17.10
 - Live trading: still locked
 - Physical purchases: still locked
@@ -143,24 +143,37 @@ Among other cases:
 - deterministic warm-up
 - backtest quality does not depend on headline return
 
+## Persistence and NEXUS audit linkage
+
+Migration `005_scanner_backtest_core.sql` adds immutable audit persistence for:
+
+- scanner runs
+- normalized scanner candidates
+- backtest runs
+- normalized fills
+- normalized completed trades
+
+The lossless run payload is stored in JSONB and protected with a canonical SHA-256 hash. Stores are idempotent by run id; same-id/different-content is rejected. Run + normalized children are written atomically in one PostgreSQL transaction. Ordinary UPDATE/DELETE/TRUNCATE is rejected by database triggers, while the read path detects privileged payload tampering through the stored hash.
+
+Scanner and backtest run ids are now optional fields on `QuantAssessment`. They therefore flow through the existing `QUANT_RESULT` audit event and the NEXUS DecisionRecord input fingerprint. Invalid or duplicate reference ids fail validation.
+
 ## Important limitations / next work
 
 This branch is deliberately a core, not the final Scanner + Backtest V1.
 
 Still needed:
 
-1. PostgreSQL persistence for universe/scanner/backtest runs, candidates, orders, fills and metrics.
+1. Persistent point-in-time universe source/membership ingestion (run persistence is done; universe truth is not).
 2. Multi-instrument portfolio/world event loop.
 3. Corporate-action application to open positions (splits/dividends/mergers).
 4. Historical point-in-time universe ingestion from real sources.
 5. Full warm-up integration with QuantService instead of only the policy.
 6. Scanner historical replay service.
 7. Benchmark for 100 / 1,000 scanner instruments and multi-instrument backtests.
-8. Link scanner/backtest run IDs into NEXUS DecisionRecord / QuantAssessment.
-9. Buy-and-hold benchmark.
-10. More complete fill lifecycle (partial fills, limit expiry, trading halts).
-11. SIX and additional exchange calendars.
-12. Provider/bid-ask execution data when available.
+8. Buy-and-hold benchmark.
+9. More complete fill lifecycle (partial fills, limit expiry, trading halts).
+10. SIX and additional exchange calendars.
+11. Provider/bid-ask execution data when available.
 
 ## Tomorrow's Haiku workflow
 
