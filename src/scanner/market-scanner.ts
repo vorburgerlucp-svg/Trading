@@ -13,9 +13,17 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
   const allowed = new Set(universe.members);
   const rejected: Array<{ instrumentId: string; reasons: string[] }> = [];
   const accepted: Array<{ snapshot: ScannerSnapshot; passed: string[]; failed: string[]; score: number }> = [];
+  const auditInputs: Array<[string, string, string, string, string | null]> = [];
 
   for (const snapshot of snapshots) {
     if (!allowed.has(snapshot.instrumentId)) continue;
+    auditInputs.push([
+      snapshot.instrumentId,
+      snapshot.quant.quantRunId,
+      snapshot.quant.inputFingerprint,
+      snapshot.lastPrice.toString(),
+      snapshot.averageVolume?.toString() ?? null,
+    ]);
     const reasons: string[] = [];
     if (snapshot.quant.instrumentId !== snapshot.instrumentId) reasons.push('quant instrument mismatch');
     if (parseUtc(snapshot.asOf) > asOfMs || parseUtc(snapshot.quant.asOf) > asOfMs) reasons.push('future snapshot');
@@ -34,14 +42,22 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
     accepted.push({ snapshot, passed, failed, score: scannerRankingScore(snapshot, definition.ranking) });
   }
 
-  accepted.sort((a, b) => b.score - a.score || (a.snapshot.instrumentId < b.snapshot.instrumentId ? -1 : 1));
+  accepted.sort((a, b) => {
+    const byScore = b.score - a.score;
+    if (byScore !== 0) return byScore;
+    return a.snapshot.instrumentId < b.snapshot.instrumentId ? -1 : a.snapshot.instrumentId > b.snapshot.instrumentId ? 1 : 0;
+  });
+  auditInputs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   const selected = accepted.slice(0, Math.max(0, definition.maxCandidates));
   const runFingerprint = hashOf({
     engine: MARKET_SCANNER_VERSION,
     definition,
     universeFingerprint: universe.fingerprint,
+    universePointInTimeSafe: universe.pointInTimeSafe,
     asOf,
-    inputs: selected.map((x) => [x.snapshot.instrumentId, x.snapshot.quant.quantRunId, x.snapshot.quant.inputFingerprint, x.snapshot.lastPrice.toString(), x.snapshot.averageVolume?.toString() ?? null, x.score]),
+    inputs: auditInputs,
+    rejected,
+    ranking: accepted.map((x) => [x.snapshot.instrumentId, x.score]),
   });
   const scannerRunId = 'scan_' + runFingerprint.slice(0, 40);
   const candidates: ScannerCandidate[] = selected.map((x, index) => ({
@@ -62,6 +78,7 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
     definitionVersion: definition.version,
     universeId: universe.universeId,
     universeFingerprint: universe.fingerprint,
+    universePointInTimeSafe: universe.pointInTimeSafe,
     asOf,
     candidates,
     rejected,

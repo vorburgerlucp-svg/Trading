@@ -1,4 +1,5 @@
 import type { MarketBar } from '../market-data/market-data-types.js';
+import { parseUtc } from '../market-data/time.js';
 import type { Decimal } from '../money/decimal.js';
 
 export type IntrabarFillPolicy = 'conservative' | 'mark_ambiguous';
@@ -37,5 +38,5 @@ export function protectiveExitForLong(bar: MarketBar, stopLoss: Decimal, takePro
 
 /** A decision made from a final bar may never fill at that same bar's open/close. */
 export function isEligibleNextBar(decisionBar: MarketBar, candidateBar: MarketBar): boolean {
-  return candidateBar.instrumentId === decisionBar.instrumentId && candidateBar.startTime > decisionBar.startTime;
+  return candidateBar.instrumentId === decisionBar.instrumentId && parseUtc(candidateBar.startTime) > parseUtc(decisionBar.startTime);
 }

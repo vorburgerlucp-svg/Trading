@@ -52,6 +52,7 @@ export interface ScannerRun {
   definitionVersion: string;
   universeId: string;
   universeFingerprint: string;
+  universePointInTimeSafe: boolean;
   asOf: string;
   candidates: ScannerCandidate[];
   rejected: Array<{ instrumentId: string; reasons: string[] }>;

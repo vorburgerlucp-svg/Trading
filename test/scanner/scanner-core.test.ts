@@ -5,22 +5,22 @@ import { computeQuant } from '../../src/quant/quant-engine.js';
 import { runMarketScanner } from '../../src/scanner/market-scanner.js';
 import type { ScannerDefinition } from '../../src/scanner/scanner-types.js';
 import { InMemoryInstrumentUniverseStore } from '../../src/scanner/universe.js';
-import { AAPL, FIXTURE_SOURCE, dailyBars, randomOhlcv } from '../market-data/fixtures.js';
+import { AAPL, PRODUCTION_LIKE_SOURCE, dailyBars, randomOhlcv } from '../market-data/fixtures.js';
 
 const XNAS = getCalendar('XNAS')!;
 const AS_OF = '2026-11-20T00:00:00.000Z';
 
 function quant() {
-  const bars = dailyBars(XNAS, '2026-01-05', randomOhlcv(220, 77));
+  const bars = dailyBars(XNAS, '2026-01-05', randomOhlcv(220, 77), { source: PRODUCTION_LIKE_SOURCE.sourceId });
   return computeQuant(
     {
       instrument: AAPL,
       calendar: XNAS,
-      series: { source: FIXTURE_SOURCE.sourceId, interval: '1d', session: 'regular', adjustment: 'raw' },
+      series: { source: PRODUCTION_LIKE_SOURCE.sourceId, interval: '1d', session: 'regular', adjustment: 'raw' },
       bars,
       asOf: AS_OF,
-      sourceInfo: FIXTURE_SOURCE,
-      useCase: 'backtest',
+      sourceInfo: PRODUCTION_LIKE_SOURCE,
+      useCase: 'analysis',
     },
     { createdAt: '2026-12-31T00:00:00.000Z' },
   );
@@ -59,19 +59,23 @@ describe('market scanner core', () => {
     universeStore.register({ universeId: 'U', version: '1', source: 'fixture', pointInTimeSafe: true });
     universeStore.addMembership({ universeId: 'U', instrumentId: AAPL.instrumentId, validFrom: '2020-01-01T00:00:00.000Z', availableAt: '2020-01-01T00:00:00.000Z', source: 'fixture' });
     const universe = universeStore.snapshot('U', AS_OF);
-    const run = runMarketScanner(definition(), universe, [{ instrumentId: AAPL.instrumentId, asOf: AS_OF, lastPrice: Decimal.from(100), averageVolume: Decimal.from(1_000_000), quant: q }], AS_OF);
+    const run = runMarketScanner(definition(), universe, [{ instrumentId: AAPL.instrumentId, asOf: AS_OF, lastPrice: q.supportResistance.nearestSupport?.price ?? Decimal.from(100), averageVolume: Decimal.from(1_000_000), quant: q }], AS_OF);
     expect(run.candidates).toHaveLength(1);
     expect(run.candidates[0]).toMatchObject({ instrumentId: AAPL.instrumentId, rank: 1, quantRunId: q.quantRunId });
+    expect(run.universePointInTimeSafe).toBe(true);
   });
 
-  it('rejects a quant result that is not usable for trading', () => {
+  it('rejects a quant result that is not usable for trading and fingerprints the rejection', () => {
     const q = quant();
     const unsafe = { ...q, dataQuality: { ...q.dataQuality, usableForTrading: false } };
     const universeStore = new InMemoryInstrumentUniverseStore();
     universeStore.register({ universeId: 'U', version: '1', source: 'fixture', pointInTimeSafe: true });
     universeStore.addMembership({ universeId: 'U', instrumentId: AAPL.instrumentId, validFrom: '2020-01-01T00:00:00.000Z', availableAt: '2020-01-01T00:00:00.000Z', source: 'fixture' });
-    const run = runMarketScanner(definition(), universeStore.snapshot('U', AS_OF), [{ instrumentId: AAPL.instrumentId, asOf: AS_OF, lastPrice: Decimal.from(100), quant: unsafe }], AS_OF);
-    expect(run.candidates).toHaveLength(0);
-    expect(run.rejected[0]?.reasons).toContain('market data not usable for trading');
+    const universe = universeStore.snapshot('U', AS_OF);
+    const rejected = runMarketScanner(definition(), universe, [{ instrumentId: AAPL.instrumentId, asOf: AS_OF, lastPrice: Decimal.from(100), quant: unsafe }], AS_OF);
+    const accepted = runMarketScanner(definition(), universe, [{ instrumentId: AAPL.instrumentId, asOf: AS_OF, lastPrice: Decimal.from(100), quant: q }], AS_OF);
+    expect(rejected.candidates).toHaveLength(0);
+    expect(rejected.rejected[0]?.reasons).toContain('market data not usable for trading');
+    expect(rejected.scannerRunId).not.toBe(accepted.scannerRunId);
   });
 });
