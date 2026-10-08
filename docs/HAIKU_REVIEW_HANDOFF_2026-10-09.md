@@ -17,11 +17,10 @@ Repository: `vorburgerlucp-svg/Trading`
 Branch:
 `feature/scanner-backtest-core-openai`
 
-Current branch head after adding this handoff document:
-`87959d33fcd956104481c41cf6a0eaefe2bbd399`
-
-Code-review baseline before this documentation-only handoff commit:
+Code-review baseline before the documentation-only Haiku handoff commits:
 `a81f35ef4583e05437a8dec81bdc3d24d7191295`
+
+The branch may have newer documentation-only descendants. Haiku must record the actual HEAD it checks out and compare it to this code baseline.
 
 Draft PR:
 `#2 Scanner + Backtest core: point-in-time safety and deterministic execution`
@@ -51,7 +50,7 @@ Do not trust this blindly. Reproduce it yourself.
 ## Required first steps
 
 1. Fresh checkout of `feature/scanner-backtest-core-openai`.
-2. Verify HEAD is `87959d33fcd956104481c41cf6a0eaefe2bbd399` or a documented descendant. If it differs, report the exact commits before continuing.
+2. Record the exact HEAD. Verify it is the code baseline `a81f35ef4583e05437a8dec81bdc3d24d7191295` or a documented descendant. Report any code changes after that baseline before continuing.
 3. Run:
    - `npm ci`
    - `npm run check`
