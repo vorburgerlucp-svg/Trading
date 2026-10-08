@@ -67,6 +67,18 @@ export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy 
   const instrumentId = input.bars[0]!.instrumentId;
   if (input.bars.some((b) => b.instrumentId !== instrumentId)) throw new Error('V1 backtest is single-instrument');
   if (input.bars.some((b) => !b.isFinal)) throw new Error('backtest accepts final bars only');
+  if (input.quality.corporateActions === 'modeled') {
+    throw new Error('Backtest Engine V1 cannot claim corporate actions are modeled; open-position split/dividend handling is not implemented yet');
+  }
+  const first = input.bars[0]!;
+  const starts = new Set<string>();
+  for (const bar of input.bars) {
+    if (bar.interval !== first.interval || bar.session !== first.session || bar.adjustment !== first.adjustment || bar.source !== first.source) {
+      throw new Error('backtest bars must be one uniform interval/session/adjustment/source series');
+    }
+    if (starts.has(bar.startTime)) throw new Error('backtest bars contain a duplicate startTime');
+    starts.add(bar.startTime);
+  }
   assertChronologicalAvailability(input.bars);
 
   const events = buildBarAvailabilityQueue({ [instrumentId]: input.bars });
