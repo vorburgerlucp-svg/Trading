@@ -47,9 +47,10 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
     if (byScore !== 0) return byScore;
     return a.snapshot.instrumentId < b.snapshot.instrumentId ? -1 : a.snapshot.instrumentId > b.snapshot.instrumentId ? 1 : 0;
   });
+  rejected.sort((a, b) => (a.instrumentId < b.instrumentId ? -1 : a.instrumentId > b.instrumentId ? 1 : 0));
   auditInputs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   const selected = accepted.slice(0, Math.max(0, definition.maxCandidates));
-  const runFingerprint = hashOf({
+  const inputFingerprint = hashOf({
     engine: MARKET_SCANNER_VERSION,
     definition,
     universeFingerprint: universe.fingerprint,
@@ -59,7 +60,7 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
     rejected,
     ranking: accepted.map((x) => [x.snapshot.instrumentId, x.score]),
   });
-  const scannerRunId = 'scan_' + runFingerprint.slice(0, 40);
+  const scannerRunId = 'scan_' + inputFingerprint.slice(0, 40);
   const candidates: ScannerCandidate[] = selected.map((x, index) => ({
     scannerRunId,
     instrumentId: x.snapshot.instrumentId,
@@ -74,6 +75,8 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
 
   return {
     scannerRunId,
+    inputFingerprint,
+    definition: structuredClone(definition),
     definitionId: definition.id,
     definitionVersion: definition.version,
     universeId: universe.universeId,

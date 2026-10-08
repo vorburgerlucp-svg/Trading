@@ -48,6 +48,8 @@ export interface ScannerCandidate {
 
 export interface ScannerRun {
   scannerRunId: string;
+  inputFingerprint: string;
+  definition: ScannerDefinition;
   definitionId: string;
   definitionVersion: string;
   universeId: string;
