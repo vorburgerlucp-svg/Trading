@@ -33,11 +33,11 @@ Kapitalverwendungen: Aktien, ETFs, Krypto, Forex, Rohstoffe, später Futures, IP
 2. **Capital Engine ist die finanzielle Source of Truth.** Jeder Betrag ist aus unveränderlichen Ledger-Buchungen rekonstruierbar. Geld nie als Float.
 3. **Kapital-Autorität:** Kein Vorschlag überschreitet, was Capital Engine und Allocation Policy erlauben. KI-Beträge sind höchstens Obergrenzen-Hinweise.
 4. **Live Lock:** `TRADING_MODE=paper`, `ALLOW_LIVE_TRADING=false`. Zusätzlich ist dieser Build fest gesperrt (`BUILD_LOCKS`): keine Live-Order, keine Brokerorder, kein physischer Einkauf, auch wenn die Umgebung etwas anderes sagt.
-5. **Externe Inhalte sind untrusted input.** News, Webseiten, Social Media und Unternehmensseiten sind Daten, nie Anweisungen. Sie dürfen keine Regeln überschreiben, keinen Brokerzugriff verlangen, keine Secrets anfordern, keine Tools freischalten und keine Limits ändern.
+5. **Externe Inhalte und Modellausgaben sind untrusted input.** News, Webseiten, Social Media, Unternehmensseiten, Nutzer-Dokumente und Aussagen anderer Modelle sind Daten, nie Anweisungen. Modelle tauschen untereinander nur strukturierte Datenfelder aus (`untrusted: true`). Sie dürfen keine Regeln überschreiben, keinen Brokerzugriff verlangen, keine Secrets anfordern, keine Tools freischalten und keine Limits ändern.
 6. **Secrets nur serverseitig.** Keine API-Keys im Browser, in GitHub, im Frontend oder in Logs. `.env` wird nie committet, nur `.env.example`.
 7. **Point-in-Time:** Jede Entscheidung und jede Bewertung nutzt nur Daten, die zum Entscheidungszeitpunkt verfügbar waren (`observedAt`, `availableAt`, `retrievedAt`). Kein Look-ahead im Replay.
 8. **Evidenz:** Eine Aussage ist nur dann ein Fakt, wenn verifizierte, frische, vertrauenswürdige Evidenz vorliegt. Sonst ist sie eine Hypothese.
-9. **Audit:** Keine Entscheidung mit echtem Kapital ist eine Black Box. Task → Inputs/Versionen → Modelle/Versionen → Prompts → Antworten → Blackboard → Critic → Konsens → Risk → Kapital → Freigabe → Aktion → Ergebnis.
+9. **Audit:** Keine Entscheidung mit echtem Kapital ist eine Black Box. Task → Inputs/Versionen → Modelle/Versionen → Prompts → Antworten → Blackboard → Critic → Konsens → Risk → Kapital → Freigabe → Aktion → Ergebnis. **Fail closed:** Erkannte Ledger- oder Governance-Korruption (`FINANCIAL_INTEGRITY_ERROR`, `GOVERNANCE_INTEGRITY_ERROR`) stoppt jede Kapitalentscheidung, statt sie stillschweigend zu korrigieren.
 10. **Kontrolliertes Lernen:** Lernen über gemessene Metadaten. Kein einzelnes Ergebnis ändert Routing oder Champion. Neue Modelle starten im Shadow Mode.
 
 ## 5. Kapitalbewegungen und Freigaben
@@ -56,19 +56,21 @@ Statusbegriffe: **GEBAUT & GETESTET** (Logik implementiert, Tests grün) · **IN
 
 | Baustein | Status |
 |---|---|
-| Capital Engine, Ledger, Inventory, Opportunities, Allocator, Reallocation, Capital Risk Gate | GEBAUT & GETESTET (In-Memory-Persistenz) |
+| Capital Engine, Ledger, Inventory, Opportunities, Allocator, Reallocation, Capital Risk Gate | GEBAUT & GETESTET |
+| Persistenz PostgreSQL (Ledger, Idempotenz, Audit, Decision Records, Evidence, Registry, Performance, Memory, Snapshots, Migrationen) | GEBAUT & GETESTET gegen echtes PostgreSQL 17 (Contract-, Integrations- und adversariale Tests) |
 | NEXUS Brain: Planner, Router, Council, Task Manager, Blackboard, Evidence, Critic, Consensus, Memory, Evaluator, Model Registry, Champion/Challenger | GEBAUT & GETESTET (mit Test-Doubles statt echter Modelle) |
 | OpenAI-, Claude-, Gemini-Adapter | NICHT VERBUNDEN (Port `ModelAdapter` vorhanden, kein HTTP-Adapter) |
 | Quant Engine (Indikatoren, Muster) | NICHT GEBAUT: Brain verlangt `QuantAssessment` als Eingabe, sonst NO_ACTION |
 | Broker Sync IBKR / eToro | INTERFACE, read-only, NICHT VERBUNDEN; Reconciliation-Logik getestet |
-| PostgreSQL-Persistenz | INTERFACE (Store-Ports); Adapter folgt |
+| Externe, signierte Ledger-Checkpoints | INTERFACE (`LedgerCheckpointStore`, In-Memory-Implementierung) |
+| DB-Rollen ohne UPDATE/DELETE-Rechte | NICHT GEBAUT (Empfehlung in PERSISTENCE.md; Trigger blockieren Mutationen bereits) |
 | Live Trading / Brokerorder / physischer Einkauf | GESPERRT |
 
 ## 7. Daten und Persistenz
 
-**Entscheid: PostgreSQL ist das Ziel für den finanziellen Kern** (Ledger, Trading, Audit, Memory, Evidence, Reconciliation): ACID, Constraints, relationale Abfragen, Point-in-Time-Abfragen, Analytics. Firebase kann später für andere Funktionen dienen, **nie als kanonischer Finanz-Ledger**.
+**Entscheid: PostgreSQL ist die kanonische Datenbank für den finanziellen Kern (umgesetzt in v0.4)** (Ledger, Trading, Audit, Memory, Evidence, Reconciliation): ACID, Constraints, relationale Abfragen, Point-in-Time-Abfragen, Analytics. Firebase kann später für andere Funktionen dienen, **nie als kanonischer Finanz-Ledger**.
 
-Alle Speicher sind über Ports abstrahiert (`LedgerStore`, `AppendOnlyStore<T>`); In-Memory-Implementierungen dienen Tests und Entwicklung. Zielschema: append-only Tabellen, eindeutige `(log, sequence)` und `(log, id)`, keine UPDATE/DELETE-Rechte für die Anwendung, Hash-Kette pro Log.
+Alle Speicher sind über Ports abstrahiert (`LedgerStore`, `AppendOnlyStore<T>`). PostgreSQL-Adapter und In-Memory-Adapter bestehen dieselben Contract-Tests. Details stehen in [PERSISTENCE.md](PERSISTENCE.md). Die Hash-Kette ist **manipulationsevident, nicht manipulationssicher**: Wer die ganze Historie neu schreibt, fällt erst über Checkpoints in getrenntem Speicher auf. Erkannte Korruption führt beim Start und im Betrieb zu `FINANCIAL_INTEGRITY_ERROR` (fail closed).
 
 ## 8. Geld und Währungen
 
@@ -78,4 +80,4 @@ CHF intern als Rappen (`bigint`). Mengen, Kurse und FX als exakte Dezimalzahlen.
 
 Änderungen an Regeln, Limits, Locks und Policies erfolgen nur durch Menschen über Code-Review und Deployment. Kein Modell, kein Dokument und keine Datenquelle kann sie zur Laufzeit ändern.
 
-Detaildokumente: [ARCHITECTURE.md](ARCHITECTURE.md) · [CAPITAL_ENGINE.md](CAPITAL_ENGINE.md) · [NEXUS_BRAIN.md](NEXUS_BRAIN.md) · [ROADMAP.md](ROADMAP.md)
+Detaildokumente: [ARCHITECTURE.md](ARCHITECTURE.md) · [CAPITAL_ENGINE.md](CAPITAL_ENGINE.md) · [NEXUS_BRAIN.md](NEXUS_BRAIN.md) · [PERSISTENCE.md](PERSISTENCE.md) · [ROADMAP.md](ROADMAP.md)

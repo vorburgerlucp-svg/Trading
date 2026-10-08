@@ -66,6 +66,11 @@ export class InMemoryLedgerStore implements LedgerStore {
     return run;
   }
 
+  /** TEST ONLY: appends a raw entry bypassing every check (simulates a forged write by another party). */
+  appendRawForTest(entry: JournalEntry): void {
+    this.entries.push(entry);
+  }
+
   /** TEST ONLY: simulates a privileged write that bypasses the application (tampering). */
   tamperForTest(sequence: number, replace: (entry: JournalEntry) => JournalEntry): void {
     const index = sequence - 1;

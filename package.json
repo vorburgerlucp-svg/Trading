@@ -10,7 +10,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest",
+    "test:unit": "vitest run --project unit",
+    "test:pg": "vitest run --project pg",
+    "test:watch": "vitest --project unit",
     "check": "npm run typecheck && npm run test"
   },
   "devDependencies": {

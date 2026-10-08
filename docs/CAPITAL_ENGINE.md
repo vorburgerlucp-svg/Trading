@@ -88,11 +88,13 @@ expense:fee:<art>[:scope…] | expense:<shipping|advertising|returns|tax|other>[
 | Garantie | Umsetzung |
 |---|---|
 | Ausgeglichen | Σ Postings = 0, sonst `unbalanced` |
-| Idempotent | `id` ist eindeutig, eine erneut gesendete Broker-/Bankbuchung wird abgelehnt (`duplicate_id`) |
+| Idempotent | `id` ist eindeutig (DB-UNIQUE). Ein erneut gesendetes Ereignis mit gleichem Request-Fingerprint ergibt `ALREADY_APPLIED` und gibt die bestehende Buchung zurück. Gleiche ID mit anderem Inhalt ergibt `idempotency_conflict`. Nie doppelt gebucht, nie überschrieben |
+| Atomar | Eine Buchung wird mit allen Zeilen gespeichert oder gar nicht. Die DB prüft Vollständigkeit und Nullsumme beim COMMIT (deferred Constraint Trigger) |
+| Nur erlaubte Währungen | Zurzeit nur CHF. Fremdwährung wird vom Ledger und von der DB abgelehnt, ohne stille Umrechnung |
 | Unveränderlich | Einträge werden eingefroren; keine Update-/Delete-API; Korrektur nur per `reversal` |
-| Manipulationserkennung | SHA-256-Hash-Kette über kanonisches JSON; `open()` verweigert manipulierte Historie |
+| Manipulationserkennung | SHA-256-Hash-Kette über kanonisches JSON, manipulationsevident (nicht -sicher), optional gegen Checkpoints geprüft. `open()` und jedes Nachladen verweigern manipulierte Historie mit `FINANCIAL_INTEGRITY_ERROR` (fail closed) |
 | Mengen nur wo sinnvoll | Menge Pflicht auf Positions-/Lagerkonten, verboten auf allen anderen |
-| Keine Race Conditions | Appends sind serialisiert; Draft-Factory und Guard sehen exakt den Zustand, auf den gebucht wird |
+| Keine Race Conditions | Der Store serialisiert alle Schreiber clusterweit (PostgreSQL-Zeilensperre auf dem Ledger-Kopf). Der Ledger lädt fremde Buchungen nach, bevor Draft-Factory und Guard laufen; beide sehen exakt den Zustand, auf den gebucht wird (getestet mit mehreren Instanzen) |
 | Zeitreise | `balances({ asOf })` rekonstruiert jeden historischen Stand (`occurredAt` ≠ `recordedAt`) |
 
 **Geschäftsregeln** (CapitalEngine, im selben serialisierten Abschnitt): kein Cash-, Reservations- oder
@@ -218,14 +220,14 @@ eine erforderliche menschliche Freigabe.
 | 4 | Bewertung ist eine Sicht, keine Buchung | Ledger enthält nur Fakten; Mark-to-Market hängt von (evtl. fehlenden) Marktdaten ab |
 | 5 | Finanzanlagen zum Marktwert nur mit frischem Kurs, Ware immer zu Kosten | Börsenkurse sind beobachtbar; Wiederverkaufspreise sind Schätzungen |
 | 6 | Durchschnittskostenmethode | Einfach, deterministisch; Leeren einer Position löst exakt die Restkosten (kein Rundungsrest) |
-| 7 | Asynchrone Schreib-API mit `LedgerStore`-Port | Persistenz (Postgres/Firestore) später ohne API-Bruch; optimistische Sequenzprüfung |
+| 7 | Asynchrone Schreib-API mit `LedgerStore`-Port | Persistenz ohne API-Bruch. Seit v0.4 besitzt der Store den kritischen Abschnitt (`writeExclusive`, PostgreSQL-Zeilensperre) statt einer optimistischen Sequenzprüfung |
 | 8 | Scores deterministisch im Code, nicht von der KI | „Quant verifies“: erklärbar, reproduzierbar, später durch Learning Engine kalibrierbar |
 | 9 | Allocator/Reallocator geben nur Vorschläge zurück | Keine Ausführungspfade in v0.2; Risk Gate + Mensch vor jeder Kapitalbewegung |
 | 10 | `TradePlan` in `contracts.ts` unverändert | KI-Schnittstelle bleibt stabil; Umrechnung in Rappen an der Grenze zur Capital Engine |
 
 ## 12. Offene Punkte
 
-1. **Persistenz**: Entschieden: **PostgreSQL** (siehe NEXUS_MASTER_SPEC.md). Offen ist der `LedgerStore`-Adapter (append-only auf DB-Ebene, Sequenz-Constraint). Firebase wird nicht der kanonische Finanz-Ledger.
+1. ~~**Persistenz**~~: erledigt in v0.4 mit PostgreSQL ([PERSISTENCE.md](PERSISTENCE.md)). Die DB erzwingt die Ledger-Invarianten, die Schreiber sind clusterweit serialisiert, die Idempotenz läuft über den Request-Fingerprint, und eine erkannte Korruption stoppt den Betrieb (fail closed). Noch offen: externe, signierte Checkpoints und DB-Rollen ohne UPDATE/DELETE-Rechte.
 2. **Mehrwährung**: Ledger ist CHF-only. IBKR hält USD-Cash. Basis vorhanden: `src/money/currency.ts` (`Money { currency, minor }`, explizite, frische FX-Kurse). Offen: Postings mit Originalwährung + CHF-Gegenwert, FX-Gewinne/-Verluste auf eigenen Konten.
 3. **Settlement**: Trade-Erlöse sind sofort Broker-Cash; settled vs. unsettled Cash (T+n) fehlt.
 4. **Today's P&L / zeitgewichtete Rendite**: braucht historische Bewertungs-Snapshots (Kurse zum Tagesbeginn). Heute: einfache Rendite auf Nettoeinlagen.

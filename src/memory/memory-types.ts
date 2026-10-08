@@ -40,4 +40,10 @@ export interface RecallQuery {
   /** All listed tags must be present. */
   tags?: string[];
   limit?: number;
+  /**
+   * Second time axis: only records NEXUS had stored up to this memory position (see NexusMemory.position).
+   * `asOf` alone admits records back-filled later with an earlier availableAt; with this bound a past
+   * view stays exactly reproducible.
+   */
+  storedThrough?: number;
 }

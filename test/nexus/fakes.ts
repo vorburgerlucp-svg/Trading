@@ -16,7 +16,7 @@ import { EvidenceStore } from '../../src/evidence/evidence-store.js';
 import type { EvidenceRef } from '../../src/evidence/evidence-types.js';
 import { NexusMemory } from '../../src/memory/nexus-memory.js';
 import { chf } from '../../src/money/money.js';
-import { NexusBrain, readOnlyCapital, type DecisionRequest } from '../../src/nexus/nexus-brain.js';
+import { NexusBrain, readOnlyCapital, type CapitalReader, type DecisionRequest } from '../../src/nexus/nexus-brain.js';
 import type { AiTask, QuantAssessment } from '../../src/nexus/nexus-types.js';
 import { loadSafetyConfig, type SafetyConfig } from '../../src/nexus/safety.js';
 import { createOpportunity } from '../../src/opportunities/opportunity-engine.js';
@@ -127,6 +127,8 @@ export interface BrainSetup {
   safety?: SafetyConfig;
   allocation?: AllocationPolicy;
   modelTimeoutMs?: number;
+  /** Replaces the capital reader (e.g. to simulate a corrupted ledger). */
+  capital?: CapitalReader;
 }
 
 export async function setupBrain(setup: BrainSetup = {}) {
@@ -162,7 +164,7 @@ export async function setupBrain(setup: BrainSetup = {}) {
     memory,
     audit,
     decisions,
-    capital: readOnlyCapital(engine),
+    capital: setup.capital ?? readOnlyCapital(engine),
     allocationPolicy,
     safety: setup.safety ?? loadSafetyConfig({ TRADING_MODE: 'paper', ALLOW_LIVE_TRADING: 'false' }),
     modelTimeoutMs: setup.modelTimeoutMs ?? 1_000,

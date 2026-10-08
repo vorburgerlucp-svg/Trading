@@ -118,8 +118,12 @@ export class NexusBrain {
     const { evidence, blackboard, memory, audit } = this.deps;
 
     // 0. Catch up with every store (other NEXUS processes may have written). Integrity errors fail closed here.
+    // Order matters: champion promotions are re-verified against model performance (memory), so
+    // memory must be caught up before the champion board.
     await this.deps.capital.refresh?.();
-    await Promise.all([evidence.sync(), blackboard.sync(), memory.sync(), this.deps.registry.sync(), this.deps.champions.sync(), audit.sync(), this.deps.decisions.sync()]);
+    await Promise.all([evidence.sync(), blackboard.sync(), memory.sync(), audit.sync(), this.deps.decisions.sync()]);
+    await this.deps.registry.sync();
+    await this.deps.champions.sync();
     this.validate(request);
     const decisionId = 'decision:' + this.deps.newId();
     let eventNo = 0;

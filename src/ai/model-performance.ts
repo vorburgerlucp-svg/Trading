@@ -5,6 +5,8 @@
 //    reaches minSamplesForScore; a single result never changes routing
 //  - published scores are shrunk toward a neutral prior, so small samples cannot look extreme
 //  - every query is point-in-time: observations count only once their outcome was known (availableAt)
+//  - `storedThrough` (a memory position) additionally pins a query to what was stored at that moment,
+//    so a past evaluation can be re-derived exactly even after outcomes were back-filled
 
 import type { NexusMemory } from '../memory/nexus-memory.js';
 import type { ModelCapabilityScore, ModelRegistry } from './model-registry.js';
@@ -40,11 +42,28 @@ export interface PerformanceStats {
   shrunk: number;
 }
 
+export interface PerformanceFilter {
+  domain?: Domain;
+  subtask?: Subtask;
+  /** Memory position bound (see ModelPerformance.position). */
+  storedThrough?: number;
+}
+
 export class ModelPerformance {
   constructor(
     private readonly memory: NexusMemory,
     readonly policy: PerformancePolicy = DEFAULT_PERFORMANCE_POLICY,
   ) {}
+
+  /** Catches up with observations written by other NEXUS processes. */
+  sync(): Promise<void> {
+    return this.memory.sync();
+  }
+
+  /** Current memory position; pass it as `storedThrough` to make a query reproducible later. */
+  position(): number {
+    return this.memory.position;
+  }
 
   async record(id: string, observation: PerformanceObservation): Promise<void> {
     if (!(observation.score >= 0 && observation.score <= 1)) throw new Error('performance score must be within 0..1');
@@ -60,12 +79,13 @@ export class ModelPerformance {
     });
   }
 
-  observations(key: ModelKey, asOf: string, filter: { domain?: Domain; subtask?: Subtask } = {}): PerformanceObservation[] {
+  observations(key: ModelKey, asOf: string, filter: PerformanceFilter = {}): PerformanceObservation[] {
     const tags = [...(filter.domain ? ['domain:' + filter.domain] : []), ...(filter.subtask ? ['subtask:' + filter.subtask] : [])];
-    return this.memory.recall<PerformanceObservation>({ kind: 'model_performance', subject: key, tags, asOf }).map((r) => r.content);
+    const bound = filter.storedThrough === undefined ? {} : { storedThrough: filter.storedThrough };
+    return this.memory.recall<PerformanceObservation>({ kind: 'model_performance', subject: key, tags, asOf, ...bound }).map((r) => r.content);
   }
 
-  stats(key: ModelKey, asOf: string, filter: { domain?: Domain; subtask?: Subtask } = {}): PerformanceStats {
+  stats(key: ModelKey, asOf: string, filter: PerformanceFilter = {}): PerformanceStats {
     const scores = this.observations(key, asOf, filter).map((o) => o.score);
     const sum = scores.reduce((s, x) => s + x, 0);
     const { priorScore, priorWeight } = this.policy;
@@ -77,8 +97,12 @@ export class ModelPerformance {
   }
 
   /** Published score, or null while the sample is too small to be trusted. */
-  published(key: ModelKey, domain: Domain, subtask: Subtask | undefined, asOf: string): ModelCapabilityScore | null {
-    const stats = this.stats(key, asOf, subtask === undefined ? { domain } : { domain, subtask });
+  published(key: ModelKey, domain: Domain, subtask: Subtask | undefined, asOf: string, storedThrough?: number): ModelCapabilityScore | null {
+    const stats = this.stats(key, asOf, {
+      domain,
+      ...(subtask !== undefined ? { subtask } : {}),
+      ...(storedThrough !== undefined ? { storedThrough } : {}),
+    });
     if (stats.sampleSize < this.policy.minSamplesForScore) return null;
     return { domain, ...(subtask !== undefined ? { subtask } : {}), sampleSize: stats.sampleSize, score: stats.shrunk, updatedAt: asOf };
   }

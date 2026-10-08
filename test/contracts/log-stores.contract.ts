@@ -107,23 +107,47 @@ export function logStoresContract(label: string, makeHarness: () => Promise<LogS
 
     it('Champion-Wechsel werden beim Laden gegen gemessene Performance verifiziert; gefälschte werden abgelehnt', async () => {
       const h = await open();
+      // A second NEXUS process whose memory was loaded before any observation existed.
+      const staleMemory = await NexusMemory.open(await h.memory());
       const memory = await NexusMemory.open(await h.memory());
       const performance = new ModelPerformance(memory);
       const registry = await ModelRegistry.open(await h.registry(), { newId: sequentialIds('r-') });
       await registry.registerActive(MODELS.openai, { at: T0, by: HUMAN, reason: 'council' });
       await registry.registerActive(MODELS.anthropic, { at: T0, by: HUMAN, reason: 'council' });
-      for (let i = 0; i < 60; i++) {
-        await performance.record('obs-' + i, { modelKey: 'anthropic/test-claude', domain: 'macro', subtask: 'macro_analysis', role: 'analyst', decisionId: 'd' + i, score: 0.8, shadow: false, occurredAt: T0, availableAt: '2026-10-15T00:00:00.000Z' });
-      }
+      const observe = (id: string, score: number) =>
+        performance.record(id, { modelKey: 'anthropic/test-claude', domain: 'macro', subtask: 'macro_analysis', role: 'analyst', decisionId: 'd-' + id, score, shadow: false, occurredAt: T0, availableAt: '2026-10-15T00:00:00.000Z' });
+      for (let i = 0; i < 60; i++) await observe('obs-' + i, 0.8);
       const board = await ChampionBoard.open({ performance, initialChampions: { macro: 'openai/test-gpt' }, store: await h.champions(), newId: sequentialIds('c-') });
-      await board.apply(board.evaluate('macro', registry, LATER), SYSTEM);
+      const decision = board.evaluate('macro', registry, LATER);
+      expect(decision).toMatchObject({ promote: true, performancePosition: 60 });
+      await board.apply(decision, SYSTEM);
       const reopened = await ChampionBoard.open({ performance, initialChampions: { macro: 'openai/test-gpt' }, store: await h.champions() });
       expect(reopened.champion('macro')).toBe('anthropic/test-claude');
 
+      // The other process loads the promotion before the observations behind it: held back, then verified.
+      const other = await ChampionBoard.open({ performance: new ModelPerformance(staleMemory), initialChampions: { macro: 'openai/test-gpt' }, store: await h.champions() });
+      expect(other.champion('macro')).toBe('anthropic/test-claude');
+
+      // Poor outcomes back-filled later (known before the evaluation time, stored after it) change today's
+      // view, but not the verdict on the past promotion: no false GOVERNANCE_INTEGRITY_ERROR on restart.
+      for (let i = 0; i < 200; i++) await observe('late-' + i, 0);
+      expect(performance.published('anthropic/test-claude', 'macro', undefined, LATER)!.score).toBeLessThan(0.5);
+      const afterBackfill = await ChampionBoard.open({ performance, initialChampions: { macro: 'openai/test-gpt' }, store: await h.champions() });
+      expect(afterBackfill.champion('macro')).toBe('anthropic/test-claude');
+
       // A forged promotion for a domain without any measurements is rejected on load.
       const raw = await AppendOnlyLog.open<ChampionEvent>('champions', await h.champions());
-      await raw.append('forged-c', { type: 'promoted', eventId: 'forged-c', domain: 'crypto', from: null, to: 'openai/test-gpt', at: LATER, by: HUMAN, reason: 'db edit' });
+      await raw.append('forged-c', { type: 'promoted', eventId: 'forged-c', domain: 'crypto', from: null, to: 'openai/test-gpt', at: LATER, performancePosition: 260, by: HUMAN, reason: 'db edit' });
       await expect(ChampionBoard.open({ performance, store: await h.champions() })).rejects.toMatchObject({ code: 'GOVERNANCE_INTEGRITY_ERROR' });
+    });
+
+    it('eine gefälschte Beförderung, die auf nicht existierende Messungen verweist, wird abgelehnt (fail closed)', async () => {
+      const h = await open();
+      const performance = new ModelPerformance(await NexusMemory.open(await h.memory()));
+      const raw = await AppendOnlyLog.open<ChampionEvent>('champions', await h.champions());
+      await raw.append('forged-future', { type: 'promoted', eventId: 'forged-future', domain: 'macro', from: 'openai/test-gpt', to: 'anthropic/test-claude', at: LATER, performancePosition: 1_000_000, by: HUMAN, reason: 'db edit' });
+      await expect(ChampionBoard.open({ performance, initialChampions: { macro: 'openai/test-gpt' }, store: await h.champions() })).rejects.toThrow(/do not exist/);
+      await expect(ChampionBoard.open({ performance, initialChampions: { macro: 'openai/test-gpt' }, store: await h.champions() })).rejects.toMatchObject({ code: 'GOVERNANCE_INTEGRITY_ERROR' });
     });
 
     it('Evidence bleibt point-in-time und versioniert; geänderter Inhalt braucht eine neue ID', async () => {

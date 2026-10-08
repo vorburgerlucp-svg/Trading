@@ -50,6 +50,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
 
     project.provide('pg', { available: true, connection, adminDatabase, version, origin });
     console.log('[pg] integration tests run against ' + origin + ' (server ' + version + ')');
+    if (process.env.NEXUS_PG_WATCHDOG === '1') watchdog = startWatchdog(connection, adminDatabase);
   } catch (error) {
     const reason = error instanceof Error ? error.message.split('\n')[0] ?? error.message : String(error);
     project.provide('pg', { available: false, reason });
@@ -58,6 +59,34 @@ export default async function setup(project: TestProject): Promise<() => Promise
     server = null;
   }
   return async () => {
+    if (watchdog) clearInterval(watchdog);
     if (server) await server.stop();
   };
+}
+
+let watchdog: ReturnType<typeof setInterval> | undefined;
+
+/** Diagnostics (NEXUS_PG_WATCHDOG=1): every 10 s, prints sessions that have been busy or waiting for > 10 s. */
+function startWatchdog(connection: PgConnectionInfo, adminDatabase: string): ReturnType<typeof setInterval> {
+  const timer = setInterval(async () => {
+    const c = new pg.Client({ ...connection, database: adminDatabase, connectionTimeoutMillis: 5_000 });
+    c.on('error', () => undefined);
+    try {
+      await c.connect();
+      const { rows } = await c.query(
+        `SELECT pid, datname, state, wait_event_type, wait_event, pg_blocking_pids(pid) AS blockers,
+                round(extract(epoch FROM now() - query_start)) AS q_s, left(regexp_replace(query, '\\s+', ' ', 'g'), 160) AS q
+           FROM pg_stat_activity
+          WHERE pid <> pg_backend_pid() AND backend_type = 'client backend' AND state <> 'idle' AND now() - query_start > interval '10 seconds'`,
+      );
+      const counts = await c.query(`SELECT datname, state, count(*)::int AS n FROM pg_stat_activity WHERE backend_type = 'client backend' GROUP BY 1, 2 ORDER BY 1, 2`);
+      if (rows.length > 0) console.log('[pg-watchdog] ' + new Date().toISOString() + ' stuck: ' + JSON.stringify(rows) + ' sessions: ' + JSON.stringify(counts.rows));
+    } catch (error) {
+      console.log('[pg-watchdog] ' + new Date().toISOString() + ' cannot query server: ' + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      await c.end().catch(() => undefined);
+    }
+  }, 10_000);
+  timer.unref();
+  return timer;
 }

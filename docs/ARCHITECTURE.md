@@ -1,4 +1,4 @@
-# NEXUS Architecture v0.3
+# NEXUS Architecture v0.4
 
 Verfassung und Regeln: [NEXUS_MASTER_SPEC.md](NEXUS_MASTER_SPEC.md).
 
@@ -36,13 +36,16 @@ Die KI bekommt niemals unkontrollierten Broker-Zugriff. Jede ausführbare Order 
                         MEMORY  → Outcome Evaluator → Model Performance → nächster Zyklus
 ```
 
-Details: [NEXUS_BRAIN.md](NEXUS_BRAIN.md) (Brain) · [CAPITAL_ENGINE.md](CAPITAL_ENGINE.md) (Kapital).
+Details: [NEXUS_BRAIN.md](NEXUS_BRAIN.md) (Brain) · [CAPITAL_ENGINE.md](CAPITAL_ENGINE.md) (Kapital) · [PERSISTENCE.md](PERSISTENCE.md) (PostgreSQL, Audit).
 
 ## Module
 
 ```text
 src/money/          exakte Geld- und Dezimalarithmetik; currency.ts: Money { currency, minor } + explizite FX
-src/persistence/    kanonisches JSON, generisches hash-verkettetes Append-only-Log (Store-Port)
+src/persistence/    kanonisches JSON, verlustfreier JSON-Codec, generisches hash-verkettetes Append-only-Log (Store-Port)
+src/persistence/postgres/  Pool (nur DATABASE_URL), Migrationsrunner, PostgresLedgerStore, PostgresAppendOnlyStore, Projektoren
+src/audit/          Audit Event Store, normalisierter DecisionRecord
+db/migrations/      versionierte SQL-Migrationen (001 Ledger, 002 Append-only-Logs, 003 Domänen-Projektionen)
 src/capital/        Ledger, Engine, Bewertung, Allocator, Reallocation
 src/inventory/      Produkte, Unit Economics, Lagerbuchungen
 src/opportunities/  Opportunity-Schema, Score, Lebenszyklus
@@ -68,8 +71,15 @@ Alle Modelle erhalten dasselbe Anfrage-Schema und müssen dasselbe Antwort-Schem
 
 ## Persistenz
 
-Ziel ist **PostgreSQL** für den finanziellen Kern (Ledger, Audit, Memory, Evidence, Reconciliation). Firebase ist kein kanonischer Finanz-Ledger. Alle Speicher laufen über Ports; aktuell gibt es In-Memory-Implementierungen.
+**PostgreSQL** ist die kanonische Datenbank für den finanziellen Kern und das Audit (Ledger, Idempotenz, Reservierungen, Audit Events, Decision Records, Evidence, Registry, Performance, Memory, Snapshots). Firebase ist kein Finanz-Ledger.
+
+- Gespeichert werden Quell-Ereignisse, der Zustand wird daraus abgeleitet. Normalisierte Tabellen sind Projektionen, die in derselben Transaktion geschrieben werden.
+- Jeder Store besitzt den kritischen Abschnitt: Zeilensperre auf dem Kopf des Logs in einer READ-COMMITTED-Transaktion, Nachladen fremder Einträge, dann Prüfung und Einfügen. Mehrere Instanzen sind damit sicher.
+- Die Datenbank erzwingt die Ledger-Invarianten zusätzlich selbst: Nullsumme, Vollständigkeit, Währungen, Kette, keine Mutation.
+- In-Memory- und PostgreSQL-Adapter bestehen dieselben Contract-Tests.
+
+Details: [PERSISTENCE.md](PERSISTENCE.md).
 
 ## Live-Safety
 
-V0.3 führt keine Netzwerk-Order und keine Warenbestellung aus. `BUILD_LOCKS` sperren Live Trading, Brokerorders und physische Einkäufe unabhängig von der Umgebung. Vor Live-Betrieb nötig: Freigabe-Workflow, Daten-Frischeprüfung (vorhanden), Spread-Check, Positions- und Tagesverlustlimit, Duplicate-Order-Schutz (Ledger-IDs idempotent), Audit (vorhanden) und Kill Switch.
+V0.4 führt keine Netzwerk-Order und keine Warenbestellung aus. `BUILD_LOCKS` sperren Live Trading, Brokerorders und physische Einkäufe unabhängig von der Umgebung. Vor Live-Betrieb nötig: Freigabe-Workflow, Daten-Frischeprüfung (vorhanden), Spread-Check, Positions- und Tagesverlustlimit, Duplicate-Order-Schutz (Ledger-Idempotenz per DB-Constraint vorhanden), Audit (vorhanden) und Kill Switch.

@@ -28,7 +28,8 @@ export class NexusMemory {
   recall<C = unknown>(query: RecallQuery): MemoryRecord<C>[] {
     const asOfMs = Date.parse(query.asOf);
     if (Number.isNaN(asOfMs)) throw new MemoryError('asOf must be an ISO timestamp');
-    const visible = this.log.all().filter((r) => Date.parse(r.payload.availableAt) <= asOfMs);
+    const storedThrough = query.storedThrough ?? Number.POSITIVE_INFINITY;
+    const visible = this.log.all().filter((r) => Date.parse(r.payload.availableAt) <= asOfMs && r.sequence <= storedThrough);
     const superseded = new Set(visible.map((r) => r.payload.supersedes).filter((id): id is string => id !== undefined));
     const result = visible
       .filter((r) => r.payload.kind === query.kind && !superseded.has(r.id))
@@ -36,6 +37,11 @@ export class NexusMemory {
       .filter((r) => (query.tags ?? []).every((t) => r.payload.tags.includes(t)))
       .map((r) => ({ ...(r.payload as MemoryRecordInput<C>), recordedAt: r.recordedAt }));
     return query.limit === undefined ? result : result.slice(-query.limit);
+  }
+
+  /** Number of records stored so far (the memory log position); records never move. */
+  get position(): number {
+    return this.log.all().length;
   }
 
   get<C = unknown>(id: string): MemoryRecord<C> | undefined {

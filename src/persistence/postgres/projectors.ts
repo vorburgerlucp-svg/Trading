@@ -174,7 +174,7 @@ async function upsertModelCache(client: PgClient, record: LogRecord<RegistryEven
 export const championProjector: Projector<ChampionEvent> = async (client, record) => {
   const e = record.payload;
   await client.query(
-    'INSERT INTO champion_changes (event_id, domain, from_model, to_model, at, actor_kind, actor_id, record_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-    [e.eventId, e.domain, e.from, e.to, e.at, e.by.kind, e.by.id, record.hash],
+    'INSERT INTO champion_changes (event_id, domain, from_model, to_model, at, performance_position, actor_kind, actor_id, record_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+    [e.eventId, e.domain, e.from, e.to, e.at, e.performancePosition, e.by.kind, e.by.id, record.hash],
   );
 };

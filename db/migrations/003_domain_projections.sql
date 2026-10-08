@@ -194,6 +194,8 @@ CREATE TABLE champion_changes (
   from_model  TEXT NULL,
   to_model    TEXT NOT NULL,
   at          TIMESTAMPTZ NOT NULL,
+  -- Memory position the evaluation saw; verification counts only observations stored up to here.
+  performance_position BIGINT NOT NULL CHECK (performance_position >= 0),
   actor_kind  TEXT NOT NULL,
   actor_id    TEXT NOT NULL,
   record_hash CHAR(64) NOT NULL,

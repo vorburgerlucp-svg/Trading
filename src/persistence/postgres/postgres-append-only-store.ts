@@ -43,6 +43,12 @@ export class PostgresAppendOnlyStore<T> implements AppendOnlyStore<T> {
   async writeExclusive<R>(knownSequence: number, decide: (newer: readonly LogRecord<T>[]) => WriteDecision<T, R>): Promise<R> {
     const client = await this.pool.connect();
     let failed: unknown;
+    // A connection that dies mid-transaction emits 'error' on the client; without a listener that
+    // would crash the process. The failure surfaces through the pending query instead.
+    const onConnectionError = (error: Error) => {
+      failed = failed ?? error;
+    };
+    client.on('error', onConnectionError);
     try {
       await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
       await client.query("SELECT set_config('lock_timeout', $1, true)", [String(this.lockTimeoutMs) + 'ms']);
@@ -67,6 +73,8 @@ export class PostgresAppendOnlyStore<T> implements AppendOnlyStore<T> {
       }
       throw mapLogDbError(error);
     } finally {
+      client.off('error', onConnectionError);
+      // A client that saw an error is discarded rather than reused.
       client.release(failed instanceof Error ? failed : undefined);
     }
   }

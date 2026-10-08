@@ -169,6 +169,27 @@ export function stripUndefined(refs: EntryRefs): EntryRefs {
   return Object.fromEntries(Object.entries(refs).filter(([, v]) => v !== undefined)) as EntryRefs;
 }
 
+/**
+ * Startup / health check of a stored ledger without opening it: sequence, chain, hashes, zero-sum,
+ * completeness, currencies, reversals and the latest checkpoint. Never throws for integrity problems;
+ * returns them so a health endpoint can report FINANCIAL_INTEGRITY_ERROR. CapitalLedger.open runs the
+ * same verification and refuses to open (fail closed).
+ */
+export async function verifyStoredLedger(
+  store: { ledgerId: string; allowedCurrencies: readonly string[]; loadAll(): Promise<readonly JournalEntry[]> },
+  checkpoints?: LedgerCheckpointStore,
+): Promise<IntegrityReport> {
+  let entries: readonly JournalEntry[];
+  try {
+    entries = await store.loadAll();
+  } catch (error) {
+    if (error instanceof FinancialIntegrityError) return { ok: false, entries: 0, headSequence: 0, headHash: GENESIS_HASH, issues: [...error.issues] };
+    throw error;
+  }
+  const checkpoint = checkpoints ? await checkpoints.getLatestCheckpoint(store.ledgerId) : null;
+  return verifyLedgerEntries(entries, { allowedCurrencies: store.allowedCurrencies, checkpoint });
+}
+
 // ---------------------------------------------------------------------------
 // Checkpoints
 // ---------------------------------------------------------------------------
