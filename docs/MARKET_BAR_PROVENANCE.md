@@ -1,5 +1,9 @@
 # Market Bar Provenance (F9) — 2026-10-09
 
+> **Partly superseded** by `docs/BAR_KNOWLEDGE_EVIDENCE.md` (branch `feature/bar-knowledge-evidence-integration`). The single label
+> `historical_bar_reconstruction` is split into two questions: decision-time knowledge (`knownAt`, `knowledgeSource`) and the market-time
+> vintage (`vintage`, `vintagePolicy`). Where the two documents differ, the newer one applies. Kept as the decision record of F9.
+
 Status: inventory and decisions written before any change (base `9d0e640af766d3de40ce31675916b9e2b1e6b3c1`).
 Branch: `feature/market-bar-provenance`. Not merged.
 

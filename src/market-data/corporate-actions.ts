@@ -11,7 +11,7 @@
 // stored and carry availableAt = max(bar, knowledge of the splits applied): an adjusted price is only knowable once the split is.
 
 import { Decimal, type RoundingMode } from '../money/decimal.js';
-import { isProvenKnowledge as isProvenBarKnowledge, knowledgeOf } from './bar-replay.js';
+import { hasKnownAt, knowledgeOf } from './bar-replay.js';
 import {
   DataQualityError,
   PROVEN_KNOWLEDGE_PROVENANCE,
@@ -119,11 +119,12 @@ function toApplication(a: StoredCorporateAction): SplitApplication {
  */
 function derivedBarKnowledge(bar: MarketBar, splits: readonly StoredCorporateAction[]): BarRevisionKnowledge {
   const own = knowledgeOf(bar);
-  if (!isProvenBarKnowledge(own) || splits.some((a) => !isProvenKnowledge(a.knowledge))) {
-    return { provenance: own.provenance === 'legacy_unproven' ? 'legacy_unproven' : 'historical_bar_reconstruction', revisionKnownAt: null };
+  if (!hasKnownAt(own) || splits.some((a) => !isProvenKnowledge(a.knowledge))) {
+    // A derived bar whose inputs are not proven makes no knowledge claim: it is labelled legacy_unproven (no time, no vintage).
+    return { knownAt: null, knowledgeSource: 'legacy_unproven', vintage: 'legacy_unproven', vintagePolicy: null };
   }
-  const knownMs = Math.max(parseUtc(own.revisionKnownAt!), ...splits.map((a) => parseUtc(a.knowledge.knowledgeAt!)));
-  return { provenance: own.provenance, revisionKnownAt: toUtcIso(knownMs) };
+  const knownMs = Math.max(parseUtc(own.knownAt!), ...splits.map((a) => parseUtc(a.knowledge.knowledgeAt!)));
+  return { knownAt: toUtcIso(knownMs), knowledgeSource: own.knowledgeSource, vintage: own.vintage, vintagePolicy: own.vintagePolicy };
 }
 
 /** Trading date of a bar for split purposes (a split takes effect at the start of its ex-date session). */

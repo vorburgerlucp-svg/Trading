@@ -11,6 +11,7 @@ import {
   type DataQualityIssue,
   type MarketBar,
   type MarketQuote,
+  type BarRevisionKnowledge,
   type StoredBar,
   type StoredCorporateAction,
 } from './market-data-types.js';
@@ -109,36 +110,40 @@ export function validateBar(bar: MarketBar, rules: PriceRules = {}, options: { i
   return issues;
 }
 
-/** Provenances NEXUS may write for a bar revision. legacy_unproven exists only on rows stored before provenance existed. */
-const BAR_INGEST_PROVENANCE = ['captured_by_nexus', 'provider_published_at', 'historical_bar_reconstruction'] as const;
+/** Sources NEXUS may write for a bar revision. legacy_unproven exists only on rows stored before provenance existed. */
+const BAR_INGEST_SOURCES = ['captured_by_nexus', 'provider_published_at'] as const;
+const BAR_INGEST_VINTAGES = ['contemporaneous', 'historical_reconstruction'] as const;
 
 /**
- * Revision knowledge must be proven by its provenance and must never precede what it proves. A historical reconstruction
- * has no knowledge time: NEXUS does not claim to have held that exact vintage then. A captured revision is known exactly at
- * its retrieval. Nothing can be known before a final bar was complete. A legacy row (no provenance) is readable as legacy;
- * it is refused only at ingest, where nothing may be labelled legacy.
+ * Two questions, checked separately. Decision-time knowledge: the knowledge time must be proven by its source and never precede
+ * the completion of a final bar; for captured data it is exactly the retrieval (a backfill included: NEXUS holds it from then).
+ * Vintage: a versioned policy must say how it was classified. A legacy row (no knowledge at all) is readable as legacy; it is
+ * refused at ingest, where nothing may be labelled legacy.
  */
 function barKnowledgeIssues(bar: MarketBar, observed: number | null, retrieved: number | null, at: string | undefined, ingest: boolean): DataQualityIssue[] {
   const issues: DataQualityIssue[] = [];
-  const k = bar.knowledge;
-  if (!k || typeof k !== 'object' || k.provenance === 'legacy_unproven') {
-    if (ingest) issues.push(critical('invalid_time', 'knowledge provenance must be one of the ingest provenances (legacy_unproven cannot be ingested)', at));
-    else if (k && typeof k === 'object' && k.revisionKnownAt !== null) issues.push(critical('invalid_time', 'a legacy revision has no knowledge time', at));
+  const k = bar.knowledge as Partial<BarRevisionKnowledge> | undefined;
+  if (!k || typeof k !== 'object' || k.knowledgeSource === undefined) {
+    if (ingest) issues.push(critical('invalid_time', 'bar knowledge is required (knownAt, knowledgeSource, vintage, vintagePolicy)', at));
     return issues;
   }
-  if (!(BAR_INGEST_PROVENANCE as readonly string[]).includes(k.provenance)) {
-    issues.push(critical('invalid_time', 'unknown knowledge provenance', at));
+  if (k.knowledgeSource === 'legacy_unproven') {
+    if (ingest) issues.push(critical('invalid_time', 'legacy_unproven cannot be ingested', at));
+    else if (k.knownAt !== null || k.vintage !== 'legacy_unproven' || k.vintagePolicy !== null) issues.push(critical('invalid_time', 'a legacy revision has no knowledge time, no vintage claim and no policy', at));
     return issues;
   }
-  if (k.provenance === 'historical_bar_reconstruction') {
-    if (k.revisionKnownAt !== null) issues.push(critical('invalid_time', 'a historical reconstruction has no revision knowledge time', at));
+  if (!(BAR_INGEST_SOURCES as readonly string[]).includes(k.knowledgeSource)) {
+    issues.push(critical('invalid_time', 'unknown knowledge source', at));
     return issues;
   }
-  const known = instant(k.revisionKnownAt, 'revisionKnownAt', issues, at);
+  if (!(BAR_INGEST_VINTAGES as readonly string[]).includes(k.vintage as string)) issues.push(critical('invalid_time', 'vintage must be contemporaneous or historical_reconstruction', at));
+  if (typeof k.vintagePolicy !== 'string' || k.vintagePolicy.trim() === '') issues.push(critical('invalid_time', 'a vintage policy version is required', at));
+  const known = instant(k.knownAt, 'knownAt', issues, at);
   if (known === null || retrieved === null) return issues;
-  if (k.provenance === 'captured_by_nexus' && known !== retrieved) issues.push(critical('invalid_time', 'a captured revision is known exactly at its retrieval', at));
-  if (known > retrieved + CLOCK_SKEW_MS) issues.push(critical('future_timestamp', 'revisionKnownAt is after retrievedAt: NEXUS cannot have held what it did not yet retrieve', at));
-  if (bar.isFinal === true && observed !== null && known < observed) issues.push(critical('invalid_time', 'a final bar cannot be known before it was complete (look-ahead)', at));
+  if (k.knowledgeSource === 'captured_by_nexus' && known !== retrieved) issues.push(critical('invalid_time', 'captured knowledge is exactly the retrieval (NEXUS holds the response from its retrieval)', at));
+  if (known > retrieved + CLOCK_SKEW_MS) issues.push(critical('future_timestamp', 'knownAt is after retrievedAt: NEXUS cannot have held what it did not yet retrieve', at));
+  // The clock skew of the retrieval clock is tolerated, as for the other retrieval checks of a final bar.
+  if (bar.isFinal === true && observed !== null && known + CLOCK_SKEW_MS < observed) issues.push(critical('invalid_time', 'a final bar cannot be known before it was complete (look-ahead)', at));
   return issues;
 }
 
@@ -152,8 +157,10 @@ export function normalizeBar<T extends MarketBar>(bar: T): T {
     availableAt: toUtcIso(parseUtc(bar.availableAt)),
     retrievedAt: toUtcIso(parseUtc(bar.retrievedAt)),
     knowledge: {
-      provenance: bar.knowledge.provenance,
-      revisionKnownAt: bar.knowledge.revisionKnownAt === null ? null : toUtcIso(parseUtc(bar.knowledge.revisionKnownAt)),
+      knownAt: bar.knowledge.knownAt === null ? null : toUtcIso(parseUtc(bar.knowledge.knownAt)),
+      knowledgeSource: bar.knowledge.knowledgeSource,
+      vintage: bar.knowledge.vintage,
+      vintagePolicy: bar.knowledge.vintagePolicy,
     },
   };
 }
@@ -170,8 +177,10 @@ export function barProvenanceHash(bar: Pick<StoredBar, 'instrumentId' | 'source'
     retrievedAt: bar.retrievedAt,
     observedAt: bar.observedAt,
     availableAt: bar.availableAt,
-    knowledgeProvenance: bar.knowledge.provenance,
-    revisionKnownAt: bar.knowledge.revisionKnownAt,
+    knownAt: bar.knowledge.knownAt,
+    knowledgeSource: bar.knowledge.knowledgeSource,
+    vintage: bar.knowledge.vintage,
+    vintagePolicy: bar.knowledge.vintagePolicy,
   });
 }
 

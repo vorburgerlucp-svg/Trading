@@ -28,6 +28,7 @@ import {
 } from '../market-data-types.js';
 import { MarketDataError, type HistoricalBarsRequest, type InstrumentCandidate, type MarketDataProvider, type ProviderBars, type ProviderHealthSnapshot } from '../market-data-provider.js';
 import { calendarForInstrument, operatingMic, type TradingCalendar } from '../sessions.js';
+import { BAR_VINTAGE_POLICY_VERSION, DEFAULT_CAPTURE_WINDOW_MS, barVintageOf } from '../bar-vintage.js';
 import { addDays, localDateOf, parseUtc, toUtcIso, zonedToUtc } from '../time.js';
 import { REAL_DEPS, ResilientCaller, parseRetryAfter, type FetchLike, type ResilienceDeps, type ResiliencePolicy } from './resilience.js';
 import { errorBody, parseDividends, parseQuote, parseSplits, parseSymbolSearch, parseTimeSeries, sanitizeText, type TdTimeSeries } from './twelve-data-schema.js';
@@ -84,13 +85,6 @@ function defaultFetch(): FetchLike {
     return { status: res.status, headers: { get: (n) => res.headers.get(n) }, text: () => res.text() };
   };
 }
-
-/**
- * Live-capture window after a final bar's completion. 15 minutes intraday covers a polling cycle and stays well above the 60 s
- * settlement delay; 2 hours daily covers the same for the end of day. Both are conservative choices for the owner to confirm: a
- * different value only moves bars between the two classes, it never creates knowledge.
- */
-export const DEFAULT_CAPTURE_WINDOW_MS = Object.freeze({ intraday: 15 * 60_000, daily: 2 * 3_600_000 });
 
 function sessionFor(instrument: Instrument): BarSession {
   return instrument.assetClass === 'crypto' || instrument.assetClass === 'forex' ? 'continuous' : 'regular';
@@ -265,12 +259,10 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
       const isFinal = completion + (isIntraday(interval) ? this.settle.intraday : this.settle.daily) <= retrievedMs;
       // MARKET OBSERVABILITY: the completion of a final bar; the observation instant of an in-progress bar.
       const observed = isFinal ? toUtcIso(completion) : retrievedAt;
-      // DATA REVISION KNOWLEDGE. An in-progress bar is the current bar, fetched now: NEXUS holds it from this retrieval. A final
-      // bar is captured live only if fetched within the capture window after its completion; any later fetch (a backfill) is a
-      // historical reconstruction. The provider publishes no vintage or publication time, so none is claimed.
-      const captureWindow = isIntraday(interval) ? this.captureWindow.intraday : this.captureWindow.daily;
-      const live = !isFinal || retrievedMs - completion <= captureWindow;
-      const knowledge: BarRevisionKnowledge = live ? { provenance: 'captured_by_nexus', revisionKnownAt: retrievedAt } : { provenance: 'historical_bar_reconstruction', revisionKnownAt: null };
+      // DECISION-TIME KNOWLEDGE: NEXUS holds this response from its retrieval, backfill or not. The provider publishes no publication
+      // time, so none is claimed. VINTAGE: the versioned policy decides only whether the fetch was contemporaneous with the bar.
+      const vintage = barVintageOf({ observedAt: observed, retrievedAt, isFinal, interval }, this.captureWindow);
+      const knowledge: BarRevisionKnowledge = { knownAt: retrievedAt, knowledgeSource: 'captured_by_nexus', vintage, vintagePolicy: BAR_VINTAGE_POLICY_VERSION };
       const bar: MarketBar = {
         instrumentId: instrument.instrumentId,
         interval,

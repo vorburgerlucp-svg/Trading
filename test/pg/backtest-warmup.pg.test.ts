@@ -17,7 +17,7 @@ function bar(index: number, close: string): MarketBar {
     instrumentId: 'TEST', interval: '5m', startTime: new Date(start).toISOString(), endTime: new Date(end).toISOString(),
     open: c, high: c.plus(1), low: c.minus(1), close: c, volume: Decimal.from(1000),
     source: 'fixture:production', session: 'regular', adjustment: 'raw', isFinal: true,
-    observedAt: new Date(end).toISOString(), availableAt: new Date(end).toISOString(), retrievedAt: new Date(end).toISOString(), knowledge: { provenance: 'historical_bar_reconstruction', revisionKnownAt: null },
+    observedAt: new Date(end).toISOString(), availableAt: new Date(end).toISOString(), retrievedAt: new Date(end).toISOString(), knowledge: { knownAt: new Date(end).toISOString(), knowledgeSource: 'captured_by_nexus', vintage: 'historical_reconstruction', vintagePolicy: 'bar-vintage:v1' },
   };
 }
 

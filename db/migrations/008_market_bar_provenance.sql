@@ -1,56 +1,60 @@
--- 008_market_bar_provenance: revision knowledge for market bars (additive only; 001-007 are unchanged).
+-- 008_market_bar_provenance: decision-time knowledge and market vintage of market bars (001-007 are unchanged).
 --
--- Before this migration a bar revision had one time, available_at: the provider's claim (the completion) for the first revision,
--- so a bar retrieved years later passed the same gate as one captured live (finding F9). Those rows keep every value. They have
--- no provenance (NULL, read as legacy_unproven) and nothing is backfilled or invented for them.
+-- Two independent questions per bar revision (docs/BAR_KNOWLEDGE_EVIDENCE.md):
+--   known_at / knowledge_source  did NEXUS hold exactly this revision at a decision time?
+--                                captured_by_nexus: known_at = retrieved_at (also for a backfill: NEXUS holds the response from then)
+--                                provider_published_at: known_at = the provider's publish time, at or before retrieved_at
+--   vintage / vintage_policy     was this revision already the market's value at its observation time? (versioned policy)
 --
--- From now on each revision states how it is known:
---   captured_by_nexus             NEXUS held this revision from revision_known_at = retrieved_at
---   provider_published_at         the provider stated when this revision was published (never invented)
---   historical_bar_reconstruction a backfill: revision_known_at IS NULL, the vintage is not proven
--- available_at keeps its meaning: the historical replay gate (market observability plus the revision floor). It is not knowledge.
--- observed_at keeps its meaning: market observability (window completion for a final bar).
+-- NULL knowledge_source = a row stored before this model (legacy). Nothing is backfilled or invented for such rows; they are read as
+-- legacy_unproven. observed_at keeps its meaning (market observability), available_at its meaning (the historical market gate).
 --
--- The first revision is NOT checked against retrieval: a historical first revision is legitimate. Its knowledge is checked against
--- its provenance instead (the constraints below). Revision 2 and later keep the floor: available_at >= revision_known_at (or
--- retrieved_at), and knowledge never moves backwards between proven revisions.
+-- This migration was first written as a different model and is rewritten in place: it was never applied outside the test databases,
+-- which are rebuilt on every run. The migrator refuses DROP, so the earlier constraints could not be removed by a later migration.
+-- Any database that applied an earlier version of this file fails the checksum verification and must be recreated.
 
-ALTER TABLE market_bars ADD COLUMN knowledge_provenance TEXT NULL;
-ALTER TABLE market_bars ADD COLUMN revision_known_at TIMESTAMPTZ NULL;
+ALTER TABLE market_bars ADD COLUMN knowledge_source TEXT NULL;
+ALTER TABLE market_bars ADD COLUMN known_at TIMESTAMPTZ NULL;
+ALTER TABLE market_bars ADD COLUMN vintage TEXT NULL;
+ALTER TABLE market_bars ADD COLUMN vintage_policy TEXT NULL;
 ALTER TABLE market_bars ADD COLUMN provenance_hash CHAR(64) NULL;
 
-ALTER TABLE market_bars ADD CONSTRAINT market_bars_knowledge_provenance_values CHECK (
-  knowledge_provenance IS NULL OR knowledge_provenance IN ('captured_by_nexus', 'provider_published_at', 'historical_bar_reconstruction'));
+ALTER TABLE market_bars ADD CONSTRAINT market_bars_knowledge_source_values CHECK (
+  knowledge_source IS NULL OR knowledge_source IN ('captured_by_nexus', 'provider_published_at'));
 
--- A proven revision is known no later than its retrieval; a reconstruction has no knowledge time; NULL = legacy (no claim).
+ALTER TABLE market_bars ADD CONSTRAINT market_bars_vintage_values CHECK (
+  vintage IS NULL OR vintage IN ('contemporaneous', 'historical_reconstruction'));
+
+-- The two questions are kept apart: a known source needs a known time, a vintage and the policy that classified it; legacy has none
+-- of these. A known time is never later than the retrieval that delivered it.
 ALTER TABLE market_bars ADD CONSTRAINT market_bars_knowledge_shape CHECK (
-  (knowledge_provenance IS NULL AND revision_known_at IS NULL)
-  OR (knowledge_provenance IN ('captured_by_nexus', 'provider_published_at') AND revision_known_at IS NOT NULL AND revision_known_at <= retrieved_at)
-  OR (knowledge_provenance = 'historical_bar_reconstruction' AND revision_known_at IS NULL));
+  (knowledge_source IS NULL AND known_at IS NULL AND vintage IS NULL AND vintage_policy IS NULL)
+  OR (knowledge_source IN ('captured_by_nexus', 'provider_published_at') AND known_at IS NOT NULL AND known_at <= retrieved_at
+      AND vintage IS NOT NULL AND vintage_policy IS NOT NULL));
 
--- NEXUS holds a captured revision exactly from its retrieval.
+-- NEXUS holds a captured response exactly from its retrieval.
 ALTER TABLE market_bars ADD CONSTRAINT market_bars_captured_is_retrieval CHECK (
-  knowledge_provenance IS DISTINCT FROM 'captured_by_nexus' OR revision_known_at = retrieved_at);
+  knowledge_source IS DISTINCT FROM 'captured_by_nexus' OR known_at = retrieved_at);
 
--- A final bar cannot be known before it was complete.
+-- Nothing can be known before a final bar was complete, beyond the 5 minutes of retrieval clock skew the application tolerates (CLOCK_SKEW_MS).
 ALTER TABLE market_bars ADD CONSTRAINT market_bars_knowledge_not_before_completion CHECK (
-  NOT is_final OR revision_known_at IS NULL OR revision_known_at >= observed_at);
+  NOT is_final OR known_at IS NULL OR known_at + INTERVAL '5 minutes' >= observed_at);
 
 ALTER TABLE market_bars ADD CONSTRAINT market_bars_provenance_hash_format CHECK (
   provenance_hash IS NULL OR provenance_hash ~ '^[0-9a-f]{64}$');
 
--- The replay gate is never earlier than the market observation it derives from (existing rows already satisfy it).
+-- The market gate is never earlier than the observation it derives from (existing rows already satisfy it).
 ALTER TABLE market_bars ADD CONSTRAINT market_bars_available_not_before_observed CHECK (available_at >= observed_at) NOT VALID;
 
--- New rows only: every row written after this migration states its provenance and carries its provenance hash.
+-- New rows only: every row written after this migration states both questions and carries its provenance hash.
 ALTER TABLE market_bars ADD CONSTRAINT market_bars_provenance_required CHECK (
-  knowledge_provenance IS NOT NULL AND provenance_hash IS NOT NULL) NOT VALID;
+  knowledge_source IS NOT NULL AND vintage IS NOT NULL AND provenance_hash IS NOT NULL) NOT VALID;
 
 CREATE OR REPLACE FUNCTION nexus_market_bar_revision() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   prev RECORD;
 BEGIN
-  SELECT revision, is_final, available_at, revision_known_at INTO prev FROM market_bars
+  SELECT revision, is_final, available_at, known_at INTO prev FROM market_bars
    WHERE instrument_id = NEW.instrument_id AND source_id = NEW.source_id AND bar_interval = NEW.bar_interval
      AND session = NEW.session AND adjustment = NEW.adjustment AND start_time = NEW.start_time
    ORDER BY revision DESC LIMIT 1;
@@ -59,10 +63,11 @@ BEGIN
   ELSE
     IF NEW.revision <> prev.revision + 1 THEN RAISE EXCEPTION 'NEXUS_MARKET_DATA: bar revision must be % (got %)', prev.revision + 1, NEW.revision; END IF;
     IF prev.is_final AND NOT NEW.is_final THEN RAISE EXCEPTION 'NEXUS_MARKET_DATA: a final bar cannot be replaced by an in-progress bar'; END IF;
-    IF NEW.available_at < prev.available_at OR NEW.available_at < COALESCE(NEW.revision_known_at, NEW.retrieved_at) THEN
+    -- A later revision enters the market gate only once NEXUS held it (or, for legacy rows, once it was retrieved).
+    IF NEW.available_at < prev.available_at OR NEW.available_at < COALESCE(NEW.known_at, NEW.retrieved_at) THEN
       RAISE EXCEPTION 'NEXUS_MARKET_DATA: a bar revision cannot become available before it was retrieved or known';
     END IF;
-    IF NEW.revision_known_at IS NOT NULL AND prev.revision_known_at IS NOT NULL AND NEW.revision_known_at < prev.revision_known_at THEN
+    IF NEW.known_at IS NOT NULL AND prev.known_at IS NOT NULL AND NEW.known_at < prev.known_at THEN
       RAISE EXCEPTION 'NEXUS_MARKET_DATA: a later revision cannot be known before an earlier revision';
     END IF;
   END IF;

@@ -35,11 +35,15 @@ const council = () => [
 ];
 
 /** Test double for the quant store: the store's own integrity checks are covered by their suites. */
-function quantRun(c: string, instrumentId = 'AAPL', asOf = T0): QuantRunRecord {
-  return { result: { quantRunId: quantId(c), instrumentId, asOf, series: { interval: '1d' } }, resultHash: 'test', storedThrough: null, createdAt: asOf } as unknown as QuantRunRecord;
+const PROVEN_QUANT_PROVENANCE = { decisionTimeKnowledgeProven: true, allBarsContemporaneousVintage: true, historicalReconstruction: false, legacyUnproven: false, latestFinalBarContemporaneous: true, barCount: 60, knownBars: 60, contemporaneousBars: 60, historicalBars: 0, legacyBars: 0 };
+const PROVEN_BAR_KNOWLEDGE = { decisionTimeKnowledgeProven: true, allBarsContemporaneousVintage: true, historicalReconstruction: false, legacyUnproven: false, latestFinalBarContemporaneous: true };
+
+/** Test double for the quant store: its own integrity checks are covered by their suites. Proven bar knowledge by default. */
+function quantRun(c: string, instrumentId = 'AAPL', asOf = T0, barDataProvenance: Record<string, unknown> = PROVEN_QUANT_PROVENANCE): QuantRunRecord {
+  return { result: { quantRunId: quantId(c), instrumentId, asOf, series: { interval: '1d' }, barDataProvenance }, resultHash: 'test', storedThrough: null, createdAt: asOf } as unknown as QuantRunRecord;
 }
 
-function scannerRun(o: { c: string; asOf?: string; candidates: { instrumentId: string; quantRunId: string }[]; rankingComplete?: boolean; inputsAvailableAt?: string | null }): ScannerRun {
+function scannerRun(o: { c: string; asOf?: string; candidates: { instrumentId: string; quantRunId: string; barKnowledge?: Record<string, unknown> }[]; rankingComplete?: boolean; inputsAvailableAt?: string | null; useCase?: 'live_trading' | 'research' }): ScannerRun {
   const asOf = o.asOf ?? T0;
   const complete = o.rankingComplete ?? true;
   const scannerRunId = scannerId(o.c);
@@ -53,9 +57,9 @@ function scannerRun(o: { c: string; asOf?: string; candidates: { instrumentId: s
     rankingScore: 1 - i / 10,
     rank: i + 1,
     dataQualityStatus: 'fresh',
-    strictPointInTime: true,
+    barKnowledge: { ...PROVEN_BAR_KNOWLEDGE, ...c.barKnowledge } as ScannerCandidate['barKnowledge'],
   }));
-  const definition = { id: 'momentum', version: '1', universeId: 'universe-test', interval: '1d', filters: [], ranking: [], maxCandidates: 10 };
+  const definition = { id: 'momentum', version: '1', universeId: 'universe-test', interval: '1d', filters: [], ranking: [], maxCandidates: 10, ...(o.useCase ? { useCase: o.useCase } : {}) };
   return {
     scannerRunId,
     inputFingerprint: o.c.repeat(64),
@@ -81,7 +85,7 @@ function scannerRun(o: { c: string; asOf?: string; candidates: { instrumentId: s
   };
 }
 
-function backtestRun(o: { c: string; instrumentId?: string; grade?: BacktestRunResult['quality']['grade']; insufficientSample?: boolean; trades?: number; cutoff?: string; winRate?: number }): BacktestRunResult {
+function backtestRun(o: { c: string; instrumentId?: string; grade?: BacktestRunResult['quality']['grade']; insufficientSample?: boolean; trades?: number; cutoff?: string; winRate?: number; dataProvenance?: BacktestRunResult['quality']['dataProvenance'] }): BacktestRunResult {
   const instrumentId = o.instrumentId ?? 'AAPL';
   const trades: BacktestTrade[] = [];
   const fills: BacktestFill[] = [];
@@ -132,7 +136,7 @@ function backtestRun(o: { c: string; instrumentId?: string; grade?: BacktestRunR
       totalFees: D('0'),
       exposurePct: 10,
     },
-    quality: { grade, reasons: grade === 'INVALID' ? ['market data is incomplete'] : [], insufficientSample: o.insufficientSample ?? false, dataProvenance: 'STRICT_PIT_DATA' as const },
+    quality: { grade, reasons: grade === 'INVALID' ? ['market data is incomplete'] : [], insufficientSample: o.insufficientSample ?? false, dataProvenance: o.dataProvenance ?? ('STRICT_PIT_DATA' as const), barKnowledge: { total: 1, knownBeforeUse: 1, contemporaneousVintage: 1, historicalVintage: 0, legacy: 0 } },
     ambiguousBars: 0,
     // One evaluation on the single bar, before any fixture fill, with the whole history at preferredBars = requiredBars = 1.
     warmup: { algorithmVersion: 'test-warmup:v1', requiredBars: 1, preferredBars: 1, requiredWarmupMet: true, preferredWarmupMet: true, firstStrategyEvaluationAt: '2026-09-01T00:00:00.000Z', preferredWarmupCompleteAt: '2026-09-01T00:00:00.000Z', warmupBars: 0, tradableBars: 1, strategyEvaluations: 1, evaluationsBelowPreferred: 0 },
@@ -438,7 +442,7 @@ describe('Evidence reference validation (NEXUS Brain, read-only, fail closed)', 
 
 describe('Split-adjusted quant evidence: the corporate-action timing must be versioned (CORPORATE_ACTION_TIMING_UNPROVEN)', () => {
   const splitAdjusted = (versions: Record<string, string>): QuantRunRecord =>
-    ({ result: { quantRunId: quantId('1'), instrumentId: 'AAPL', asOf: T0, series: { interval: '1d', adjustment: 'split_adjusted' }, algorithmVersions: versions }, resultHash: 'test', storedThrough: 7, createdAt: T0 }) as unknown as QuantRunRecord;
+    ({ result: { quantRunId: quantId('1'), instrumentId: 'AAPL', asOf: T0, series: { interval: '1d', adjustment: 'split_adjusted' }, algorithmVersions: versions, barDataProvenance: PROVEN_QUANT_PROVENANCE }, resultHash: 'test', storedThrough: 7, createdAt: T0 }) as unknown as QuantRunRecord;
   const check = async (quant: QuantRunRecord) =>
     validateEvidenceReferences({ asOf: T0, quantRunId: quantId('1'), scannerRunId: undefined, backtestRunIds: undefined, opportunityInstrumentId: undefined, requiresCompleteUniverse: false }, await readersWith({ quant: [quant] }));
 
@@ -458,5 +462,61 @@ describe('Split-adjusted quant evidence: the corporate-action timing must be ver
   it('a raw quant run needs no corporate-action derivation and is not blocked for it', async () => {
     const result = await check(quantRun('1'));
     expect(result.blocking.map((i) => i.code)).not.toContain('CORPORATE_ACTION_TIMING_UNPROVEN');
+  });
+});
+
+describe('O1 bar knowledge: decision-time knowledge gates the evidence; vintage is reported, never claimed', () => {
+  const base = { asOf: T0, quantRunId: quantId('1'), scannerRunId: undefined, backtestRunIds: undefined, opportunityInstrumentId: undefined, requiresCompleteUniverse: false };
+  const checkQuant = async (quant: QuantRunRecord) => validateEvidenceReferences(base, await readersWith({ quant: [quant] }));
+
+  it('the lineage carries the quant bar knowledge block', async () => {
+    const result = await checkQuant(quantRun('1'));
+    expect(result.lineage.quant).toMatchObject({ barKnowledge: { decisionTimeKnowledgeProven: true, allBarsContemporaneousVintage: true, historicalReconstruction: false } });
+  });
+
+  it('blocks a quant run whose decision-time knowledge is not proven', async () => {
+    const result = await checkQuant(quantRun('1', 'AAPL', T0, { ...PROVEN_QUANT_PROVENANCE, decisionTimeKnowledgeProven: false, knownBars: 59 }));
+    expect(result).toMatchObject({ passed: false, blocking: [{ code: 'BAR_KNOWLEDGE_NOT_PROVEN', ref: quantId('1') }] });
+  });
+
+  it('admits a proven run on historical vintage with a warning, and never reports that vintage as contemporaneous', async () => {
+    const result = await checkQuant(quantRun('1', 'AAPL', T0, { ...PROVEN_QUANT_PROVENANCE, allBarsContemporaneousVintage: false, historicalReconstruction: true, contemporaneousBars: 0, historicalBars: 60 }));
+    expect(result.passed).toBe(true);
+    expect(result.warnings.map((w) => w.code)).toContain('BAR_VINTAGE_NOT_CONTEMPORANEOUS');
+    expect(result.lineage.quant!.barKnowledge).toMatchObject({ decisionTimeKnowledgeProven: true, allBarsContemporaneousVintage: false });
+  });
+
+  it('a run that predates the bar knowledge model is blocked, not read as new evidence', async () => {
+    const predates = { result: { quantRunId: quantId('1'), instrumentId: 'AAPL', asOf: T0, series: { interval: '1d' } }, resultHash: 'test', storedThrough: null, createdAt: T0 } as unknown as QuantRunRecord;
+    expect(await checkQuant(predates)).toMatchObject({ passed: false, blocking: [{ code: 'BAR_KNOWLEDGE_NOT_PROVEN' }] });
+  });
+
+  it('a live scanner candidate needs decision-time knowledge, and its latest signal bar must be contemporaneous', async () => {
+    const scanner = scannerRun({ c: '3', candidates: [{ instrumentId: 'AAPL', quantRunId: quantId('1'), barKnowledge: { ...PROVEN_BAR_KNOWLEDGE, decisionTimeKnowledgeProven: false } }] });
+    const result = await validateEvidenceReferences({ ...base, scannerRunId: scannerId('3') }, await readersWith({ scanner: [scanner], quant: [quantRun('1')] }));
+    expect(result.blocking.map((i) => i.code)).toContain('BAR_KNOWLEDGE_NOT_PROVEN');
+    const stale = scannerRun({ c: '4', candidates: [{ instrumentId: 'AAPL', quantRunId: quantId('1'), barKnowledge: { ...PROVEN_BAR_KNOWLEDGE, latestFinalBarContemporaneous: false } }] });
+    const latest = await validateEvidenceReferences({ ...base, scannerRunId: scannerId('4') }, await readersWith({ scanner: [stale], quant: [quantRun('1')] }));
+    expect(latest.blocking.map((i) => i.code)).toContain('LATEST_BAR_NOT_CONTEMPORANEOUS');
+  });
+
+  it('a research scanner may carry historical vintage: admitted, warned, and visible in the lineage', async () => {
+    const quant = quantRun('1', 'AAPL', T0, { ...PROVEN_QUANT_PROVENANCE, allBarsContemporaneousVintage: false, historicalReconstruction: true, latestFinalBarContemporaneous: false, historicalBars: 60, contemporaneousBars: 0 });
+    const scanner = scannerRun({ c: '3', useCase: 'research', candidates: [{ instrumentId: 'AAPL', quantRunId: quantId('1'), barKnowledge: { decisionTimeKnowledgeProven: true, allBarsContemporaneousVintage: false, historicalReconstruction: true, legacyUnproven: false, latestFinalBarContemporaneous: false } }] });
+    const result = await validateEvidenceReferences({ ...base, scannerRunId: scannerId('3') }, await readersWith({ scanner: [scanner], quant: [quant] }));
+    expect(result.passed).toBe(true);
+    expect(result.warnings.map((w) => w.code)).toContain('SCANNER_RESEARCH_EVIDENCE');
+    expect(result.lineage.scanner!.candidate!.barKnowledge).toMatchObject({ historicalReconstruction: true, latestFinalBarContemporaneous: false });
+  });
+
+  it('strong backtest evidence respects dataProvenance: a historical backtest is weak even with grade A', async () => {
+    const historical = backtestRun({ c: '4', grade: 'A', trades: 30, dataProvenance: 'HISTORICAL_RECONSTRUCTION' });
+    const strict = backtestRun({ c: '5', grade: 'A', trades: 30, dataProvenance: 'STRICT_PIT_DATA' });
+    const readers = await readersWith({ backtests: [historical, strict], quant: [quantRun('1')] });
+    const weak = await validateEvidenceReferences({ ...base, backtestRunIds: [backtestId('4')] }, readers);
+    expect(weak.lineage.backtests[0]!.strength).toBe('weak');
+    expect(evidenceDecisionImpact(weak.lineage, true)).toContain('BACKTEST_STRONG_EVIDENCE_REQUIRED');
+    const strong = await validateEvidenceReferences({ ...base, backtestRunIds: [backtestId('5')] }, readers);
+    expect(strong.lineage.backtests[0]!.strength).toBe('strong');
   });
 });

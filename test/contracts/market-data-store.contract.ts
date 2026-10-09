@@ -10,7 +10,7 @@ import { Decimal } from '../../src/money/decimal.js';
 import type { AppendOnlyStore } from '../../src/persistence/append-only-log.js';
 import { computeQuant } from '../../src/quant/quant-engine.js';
 import { toRunRecord, type QuantRunStore } from '../../src/quant/quant-run-store.js';
-import { AAPL, FIXTURE_SOURCE, dailyBars, intradayBars, randomOhlcv } from '../market-data/fixtures.js';
+import { AAPL, FIXTURE_SOURCE, dailyBars, intradayBars, randomOhlcv, retrievedAs } from '../market-data/fixtures.js';
 import { sequentialIds } from '../helpers.js';
 
 export interface MarketDataHarness {
@@ -56,7 +56,7 @@ export function marketDataStoreContract(label: string, makeHarness: () => Promis
     it('Bar insert, Read range, final vs. in-progress', async () => {
       const { store } = await open();
       const final = bars(10);
-      const forming: MarketBar = { ...bars(11)[10]!, isFinal: false, availableAt: '2026-10-07T14:22:00.000Z', observedAt: '2026-10-07T14:22:00.000Z', retrievedAt: '2026-10-07T14:22:00.000Z' };
+      const forming: MarketBar = retrievedAs({ ...bars(11)[10]!, isFinal: false, availableAt: '2026-10-07T14:22:00.000Z', observedAt: '2026-10-07T14:22:00.000Z' }, '2026-10-07T14:22:00.000Z');
       const r = await store.ingestBars(AAPL, [...final, forming], '2026-10-08T00:00:00Z');
       expect(r).toMatchObject({ inserted: 11, unchanged: 0, providerRevisions: 0, quarantined: [], headSeq: 11 });
       expect((await store.readBars({ ...SERIES, asOf: LATE })).length).toBe(10);
@@ -69,7 +69,7 @@ export function marketDataStoreContract(label: string, makeHarness: () => Promis
     it('Duplikat (Backfill liefert denselben Bar erneut) erzeugt keine Dublette', async () => {
       const { store } = await open();
       await store.ingestBars(AAPL, bars(10), '2026-10-08T00:00:00Z');
-      const again = bars(10).map((b) => ({ ...b, retrievedAt: '2026-10-09T00:00:00.000Z' }));
+      const again = bars(10).map((b) => retrievedAs(b, '2026-10-09T00:00:00.000Z'));
       expect(await store.ingestBars(AAPL, again, '2026-10-09T00:00:00Z')).toMatchObject({ inserted: 0, unchanged: 10, headSeq: 10 });
       expect(await store.head(AAPL.instrumentId)).toBe(10);
     });
@@ -79,7 +79,7 @@ export function marketDataStoreContract(label: string, makeHarness: () => Promis
       await store.ingestBars(AAPL, bars(10), '2026-10-08T00:00:00Z');
       const pinned = await store.head(AAPL.instrumentId);
       const original = bars(10)[3]!;
-      const corrected = { ...original, close: original.close.plus('0.05'), high: original.high.plus('0.05'), retrievedAt: '2026-10-20T00:00:00.000Z' };
+      const corrected = retrievedAs({ ...original, close: original.close.plus('0.05'), high: original.high.plus('0.05') }, '2026-10-20T00:00:00.000Z');
       expect(await store.ingestBars(AAPL, [corrected], '2026-10-20T00:00:00Z')).toMatchObject({ inserted: 1, providerRevisions: 1 });
       const at = (asOf: string, storedThrough?: number) => store.readBars({ ...SERIES, asOf, ...(storedThrough !== undefined ? { storedThrough } : {}) }).then((b) => b[3]!);
       expect((await at('2026-10-10T00:00:00Z')).close.eq(original.close)).toBe(true); // before the revision was known

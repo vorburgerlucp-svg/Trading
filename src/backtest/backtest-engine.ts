@@ -11,8 +11,8 @@
 //
 // This intentionally forbids same-bar execution from final-close decisions.
 
-import { barUsableFromMs, countBarProvenance, knowledgeOf } from '../market-data/bar-replay.js';
-import type { MarketBar } from '../market-data/market-data-types.js';
+import { knownAtMs, replayInstantMs, vintageOf } from '../market-data/bar-replay.js';
+import type { BarReplayMode, MarketBar } from '../market-data/market-data-types.js';
 import { parseUtc } from '../market-data/time.js';
 import { Decimal } from '../money/decimal.js';
 import { hashOf } from '../persistence/canonical-json.js';
@@ -22,12 +22,12 @@ import { backtestMetrics } from './performance.js';
 import { PointInTimeBarState, buildBarAvailabilityQueue } from './point-in-time.js';
 import { assessBacktestQuality } from './quality.js';
 import { desiredLongQuantity } from './sizing.js';
-import type { BacktestFill, BacktestInput, BacktestPosition, BacktestQuality, BacktestRunResult, BacktestTrade, BacktestWarmupResult } from './backtest-types.js';
+import type { BacktestBarKnowledge, BacktestFill, BacktestInput, BacktestPosition, BacktestQuality, BacktestRunResult, BacktestTrade, BacktestWarmupResult } from './backtest-types.js';
 import type { BacktestStrategy, StrategyDecision } from './strategy.js';
 import { validateWarmupPlan, type WarmupPlan } from './warmup.js';
 
-/** v3: bars are timed by their usable instant (proven revisions from the instant NEXUS held them) and graded by provenance. */
-export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v3';
+/** v4: the replay mode decides when a bar is used (market gate, or the instant NEXUS held it); quality counts knowledge at use and vintage. */
+export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v4';
 
 interface PendingOrder {
   side: 'buy' | 'sell';
@@ -41,8 +41,25 @@ function minDecimal(a: Decimal, b: Decimal): Decimal {
 }
 
 function barFingerprint(bar: MarketBar): unknown[] {
-  const knowledge = knowledgeOf(bar);
-  return [bar.instrumentId, bar.startTime, bar.endTime, bar.open, bar.high, bar.low, bar.close, bar.volume ?? null, bar.observedAt, bar.availableAt, bar.retrievedAt, knowledge.provenance, knowledge.revisionKnownAt, bar.isFinal, bar.source, bar.adjustment];
+  const k = bar.knowledge;
+  return [bar.instrumentId, bar.startTime, bar.endTime, bar.open, bar.high, bar.low, bar.close, bar.volume ?? null, bar.observedAt, bar.availableAt, bar.retrievedAt, k.knownAt, k.knowledgeSource, k.vintage, k.vintagePolicy, bar.isFinal, bar.source, bar.adjustment];
+}
+
+/**
+ * Per bar: was the revision NEXUS held at the simulated use time, and was it contemporaneous with its market time. A legacy bar is
+ * never known. These counts are the input of the provenance grading (quality.ts).
+ */
+function barKnowledgeAtUse(bars: readonly MarketBar[], mode: BarReplayMode): BacktestBarKnowledge {
+  const out: BacktestBarKnowledge = { total: bars.length, knownBeforeUse: 0, contemporaneousVintage: 0, historicalVintage: 0, legacy: 0 };
+  for (const bar of bars) {
+    const vintage = vintageOf(bar);
+    if (vintage === 'legacy_unproven') out.legacy++;
+    else if (vintage === 'contemporaneous') out.contemporaneousVintage++;
+    else out.historicalVintage++;
+    const known = knownAtMs(bar);
+    if (known !== null && known <= replayInstantMs(bar, mode)) out.knownBeforeUse++;
+  }
+  return out;
 }
 
 function decisionToPending(decision: StrategyDecision, currentBar: MarketBar): PendingOrder | null {
@@ -55,11 +72,11 @@ function decisionToPending(decision: StrategyDecision, currentBar: MarketBar): P
   return null;
 }
 
-function assertChronologicalAvailability(bars: readonly MarketBar[]): void {
+function assertChronologicalAvailability(bars: readonly MarketBar[], mode: BarReplayMode): void {
   const ordered = [...bars].sort((a, b) => parseUtc(a.startTime) - parseUtc(b.startTime));
   let previousAvailable = Number.NEGATIVE_INFINITY;
   for (const bar of ordered) {
-    const available = barUsableFromMs(bar);
+    const available = replayInstantMs(bar, mode);
     if (available < previousAvailable) {
       throw new Error('V1 backtest does not support per-instrument availability inversion; an older bar arrived after a newer bar');
     }
@@ -84,6 +101,7 @@ function applyWarmupToQuality(base: BacktestQuality, w: { requiredWarmupMet: boo
       reasons: ['INSUFFICIENT_WARMUP_HISTORY: ' + w.barsProcessed + ' bar(s) available, requiredBars ' + w.requiredBars + '; the strategy was never evaluated, so no order or fill exists', ...base.reasons],
       insufficientSample: base.insufficientSample,
       dataProvenance: base.dataProvenance,
+      barKnowledge: base.barKnowledge,
     };
   }
   if (!w.preferredWarmupMet) {
@@ -117,10 +135,11 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     if (starts.has(bar.startTime)) throw new Error('backtest bars contain a duplicate startTime');
     starts.add(bar.startTime);
   }
-  assertChronologicalAvailability(input.bars);
+  const replay: BarReplayMode = input.replay ?? 'historical_research';
+  assertChronologicalAvailability(input.bars, replay);
 
-  const events = buildBarAvailabilityQueue({ [instrumentId]: input.bars });
-  const state = new PointInTimeBarState();
+  const events = buildBarAvailabilityQueue({ [instrumentId]: input.bars }, replay);
+  const state = new PointInTimeBarState(replay);
   const costModel = new DeterministicCostModel(input.costModel);
   const intrabarPolicy = input.intrabarPolicy ?? 'conservative';
   let cash = input.initialCapital;
@@ -227,7 +246,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
   const preferredWarmupMet = strategyEvaluations > 0 && evaluationsBelowPreferred === 0;
   const endingEquity = equityCurve.at(-1)?.equity ?? cash;
   const metrics = backtestMetrics({ startingCapital: input.initialCapital, endingEquity, trades, equityCurve, totalFees, exposedPoints, tradablePoints: tradableBars });
-  const assessed = assessBacktestQuality(input.quality, trades.length, ambiguousBars, costModel.isZeroCost(), countBarProvenance(input.bars));
+  const assessed = assessBacktestQuality(input.quality, trades.length, ambiguousBars, costModel.isZeroCost(), barKnowledgeAtUse(input.bars, replay));
   const quality = applyWarmupToQuality(assessed, { requiredWarmupMet, preferredWarmupMet, barsProcessed, requiredBars: warmup.requiredBars, preferredBars: warmup.preferredBars, strategyEvaluations, evaluationsBelowPreferred });
   const warmupResult: BacktestWarmupResult = {
     algorithmVersion: warmup.algorithmVersion,
@@ -252,6 +271,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     costModel: costModel.config,
     intrabarPolicy,
     qualityContext: input.quality,
+    replay,
     bars: input.bars.map(barFingerprint),
   });
 

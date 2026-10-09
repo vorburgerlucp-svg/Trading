@@ -1,4 +1,4 @@
-import type { MarketBar } from '../market-data/market-data-types.js';
+import type { BarReplayMode, MarketBar } from '../market-data/market-data-types.js';
 import type { Decimal } from '../money/decimal.js';
 import type { CostModelConfig } from './cost-model.js';
 import type { IntrabarFillPolicy } from './execution-model.js';
@@ -67,11 +67,22 @@ export interface BacktestMetrics {
 /** The revision knowledge of the bars a backtest used (see docs/MARKET_BAR_PROVENANCE.md). */
 export type BacktestDataProvenance = 'STRICT_PIT_DATA' | 'HISTORICAL_RECONSTRUCTION' | 'LEGACY_UNPROVEN';
 
+/** What the bars of a backtest were at their simulated use time (see quality.ts). Counts only; no probabilities. */
+export interface BacktestBarKnowledge {
+  total: number;
+  /** Bars NEXUS held at the simulated time the engine used them. */
+  knownBeforeUse: number;
+  contemporaneousVintage: number;
+  historicalVintage: number;
+  legacy: number;
+}
+
 export interface BacktestQuality {
   grade: 'A' | 'B' | 'C' | 'INVALID';
   reasons: string[];
   insufficientSample: boolean;
   dataProvenance: BacktestDataProvenance;
+  barKnowledge: BacktestBarKnowledge;
 }
 
 export interface BacktestRunResult {
@@ -139,4 +150,9 @@ export interface BacktestInput {
   costModel: CostModelConfig;
   intrabarPolicy?: IntrabarFillPolicy;
   quality: BacktestQualityContext;
+  /**
+   * When a bar is used. historical_research (default): at its market gate. decision_time: at the instant NEXUS held it, so the engine
+   * never acts before NEXUS had the bar. A legacy bar throws in decision_time mode.
+   */
+  replay?: BarReplayMode;
 }

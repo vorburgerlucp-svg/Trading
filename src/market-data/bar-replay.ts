@@ -1,80 +1,97 @@
-// Bar replay rules, shared by the in-memory store, PostgreSQL, quant, data quality and the backtest engine.
-// See docs/MARKET_BAR_PROVENANCE.md.
+// Bar replay and knowledge rules, shared by the in-memory store, PostgreSQL, quant, data quality and the backtest engine.
+// See docs/BAR_KNOWLEDGE_EVIDENCE.md. Two questions, never one boolean:
 //
-// Two questions, never one field:
-//   when may a bar REVISION be used?  barUsableFromMs: for an unproven revision (reconstruction, legacy) its historical gate
-//                                     (availableAt). For a proven revision the later of that gate and the instant NEXUS held it.
-//                                     So NEXUS never uses a proven revision before it held it, in any mode.
-//   which revision does a replay see?  the highest revision whose historical gate is <= asOf (the "visible" revision).
-//                                     Proven and held: returned. Proven but not yet held: absent. Unproven: returned in
-//                                     historical reconstruction (labelled), refused in strict point-in-time (fail closed).
+//   decision-time knowledge  did NEXUS hold exactly this revision at asOf?      knownAt <= asOf, source not legacy
+//   vintage                  was it already the market's value at its time?     vintage === 'contemporaneous'
+//
+// Replay modes (BarReplayMode):
+//   historical_research: visibility by the market gate (availableAt). Revisions NEXUS held only later are used and labelled.
+//   decision_time:       a bar is usable only once NEXUS held it. Legacy rows are refused.
 
-import { PROVEN_BAR_PROVENANCE, type BarKnowledgeProvenance, type BarRevisionKnowledge, type MarketBar } from './market-data-types.js';
+import type { BarReplayMode, BarRevisionKnowledge, BarVintage, MarketBar } from './market-data-types.js';
 import { parseUtc } from './time.js';
 
-const LEGACY: BarRevisionKnowledge = Object.freeze({ provenance: 'legacy_unproven', revisionKnownAt: null });
+const LEGACY: BarRevisionKnowledge = Object.freeze({ knownAt: null, knowledgeSource: 'legacy_unproven', vintage: 'legacy_unproven', vintagePolicy: null });
 
-/** The knowledge of a bar. A bar without it (built outside the typed API) is legacy: fail closed, never proven. */
+/** The knowledge of a bar. A bar without it (built outside the typed API) is legacy: fail closed. */
 export function knowledgeOf(bar: Pick<MarketBar, 'knowledge'>): BarRevisionKnowledge {
-  return bar.knowledge ?? LEGACY;
+  const k = bar.knowledge as Partial<BarRevisionKnowledge> | undefined;
+  if (!k || typeof k !== 'object' || k.knowledgeSource === undefined || k.knowledgeSource === 'legacy_unproven') return LEGACY;
+  return k as BarRevisionKnowledge;
 }
 
-/** True only when the provenance proves a knowledge time and that time is present. */
-export function isProvenKnowledge(knowledge: BarRevisionKnowledge): boolean {
-  return (PROVEN_BAR_PROVENANCE as readonly BarKnowledgeProvenance[]).includes(knowledge.provenance) && knowledge.revisionKnownAt !== null;
+/** Decision-time knowledge is proven when the source proves a time and that time is present. */
+export function hasKnownAt(knowledge: BarRevisionKnowledge): boolean {
+  return knowledge.knowledgeSource !== 'legacy_unproven' && knowledge.knownAt !== null;
 }
 
-/** The floor a later revision carries in its historical gate: when NEXUS proved it held it, else when NEXUS retrieved it. */
+/** The instant NEXUS held this revision (ms), or null for legacy rows. */
+export function knownAtMs(bar: Pick<MarketBar, 'knowledge'>): number | null {
+  const knowledge = knowledgeOf(bar);
+  return hasKnownAt(knowledge) ? parseUtc(knowledge.knownAt!) : null;
+}
+
+/** Decision-time knowledge at asOf: proven, and NEXUS held the revision no later than asOf. */
+export function isKnownAt(bar: Pick<MarketBar, 'knowledge'>, asOfMs: number): boolean {
+  const known = knownAtMs(bar);
+  return known !== null && known <= asOfMs;
+}
+
+export function isContemporaneous(bar: Pick<MarketBar, 'knowledge'>): boolean {
+  return knowledgeOf(bar).vintage === 'contemporaneous';
+}
+
+/** The floor a later revision carries in its market gate: when NEXUS held it, else when NEXUS retrieved it. */
 export function revisionFloorOf(bar: Pick<MarketBar, 'knowledge' | 'retrievedAt'>): string {
   const knowledge = knowledgeOf(bar);
-  return isProvenKnowledge(knowledge) ? knowledge.revisionKnownAt! : bar.retrievedAt;
-}
-
-/** Earliest instant (ms) a replay may use this revision. */
-export function barUsableFromMs(bar: Pick<MarketBar, 'availableAt' | 'knowledge'>): number {
-  const gate = parseUtc(bar.availableAt);
-  const knowledge = knowledgeOf(bar);
-  return isProvenKnowledge(knowledge) ? Math.max(gate, parseUtc(knowledge.revisionKnownAt!)) : gate;
+  return hasKnownAt(knowledge) ? knowledge.knownAt! : bar.retrievedAt;
 }
 
 /**
- * What a replay at `asOfMs` makes of the highest visible revision of a bar:
- *   usable       proven and held by asOf
- *   not_yet_held proven, but NEXUS held it only after asOf: the bar is absent at asOf
- *   unproven     the provenance proves nothing about when it was held
+ * The instant (ms) from which a replay in `mode` may use this bar.
+ *   historical_research: the market gate (availableAt).
+ *   decision_time: the later of the market gate and the instant NEXUS held it. A legacy bar throws BarKnowledgeNotProvenError.
  */
-export function classifyVisibleBar(bar: Pick<MarketBar, 'availableAt' | 'knowledge'>, asOfMs: number): 'usable' | 'not_yet_held' | 'unproven' {
-  const knowledge = knowledgeOf(bar);
-  if (!isProvenKnowledge(knowledge)) return 'unproven';
-  return barUsableFromMs(bar) <= asOfMs ? 'usable' : 'not_yet_held';
+export function replayInstantMs(bar: Pick<MarketBar, 'availableAt' | 'knowledge' | 'startTime'>, mode: BarReplayMode): number {
+  const gate = parseUtc(bar.availableAt);
+  if (mode === 'historical_research') return gate;
+  const known = knownAtMs(bar);
+  if (known === null) throw new BarKnowledgeNotProvenError([{ instrumentId: (bar as { instrumentId?: string }).instrumentId ?? '?', startTime: bar.startTime, provenance: 'legacy_unproven' }]);
+  return Math.max(gate, known);
 }
 
-export interface BarProvenanceCounts {
+/** Vintage of a bar as a plain value (legacy rows are their own class). */
+export function vintageOf(bar: Pick<MarketBar, 'knowledge'>): BarVintage {
+  return knowledgeOf(bar).vintage;
+}
+
+export interface BarKnowledgeCounts {
   total: number;
-  /** Proven revisions (captured_by_nexus, provider_published_at). */
-  proven: number;
-  /** Historical reconstructions: the vintage is not proven. */
+  /** Bars whose revision NEXUS held at asOf (proven source, knownAt <= asOf). */
+  knownAtAsOf: number;
+  contemporaneous: number;
   historical: number;
-  /** Rows stored before provenance existed. */
   legacy: number;
 }
 
-export function countBarProvenance(bars: readonly Pick<MarketBar, 'knowledge'>[]): BarProvenanceCounts {
-  const counts: BarProvenanceCounts = { total: bars.length, proven: 0, historical: 0, legacy: 0 };
+/** Counts for a set of bars at a decision time. A legacy bar is never known. */
+export function countBarKnowledge(bars: readonly Pick<MarketBar, 'knowledge'>[], asOfMs: number): BarKnowledgeCounts {
+  const counts: BarKnowledgeCounts = { total: bars.length, knownAtAsOf: 0, contemporaneous: 0, historical: 0, legacy: 0 };
   for (const bar of bars) {
-    const { provenance } = knowledgeOf(bar);
-    if (provenance === 'legacy_unproven') counts.legacy++;
-    else if (provenance === 'historical_bar_reconstruction') counts.historical++;
-    else counts.proven++;
+    const vintage = vintageOf(bar);
+    if (vintage === 'legacy_unproven') counts.legacy++;
+    else if (vintage === 'contemporaneous') counts.contemporaneous++;
+    else counts.historical++;
+    if (isKnownAt(bar, asOfMs)) counts.knownAtAsOf++;
   }
   return counts;
 }
 
-/** A strict replay met revisions it cannot prove. Refused as a whole: nothing is silently dropped or substituted. */
-export class BarVintageNotProvenError extends Error {
-  override readonly name = 'BarVintageNotProvenError';
-  readonly code = 'BAR_VINTAGE_NOT_PROVEN' as const;
-  constructor(readonly refused: ReadonlyArray<{ instrumentId: string; startTime: string; provenance: BarKnowledgeProvenance }>) {
-    super('strict point-in-time replay refused ' + refused.length + ' bar(s) whose revision is not proven (BAR_VINTAGE_NOT_PROVEN): ' + refused.slice(0, 3).map((r) => r.startTime + ' ' + r.provenance).join(', '));
+/** A decision-time read met a revision NEXUS cannot prove it held (legacy). Refused as a whole; nothing is substituted. */
+export class BarKnowledgeNotProvenError extends Error {
+  override readonly name = 'BarKnowledgeNotProvenError';
+  readonly code = 'BAR_KNOWLEDGE_NOT_PROVEN' as const;
+  constructor(readonly refused: ReadonlyArray<{ instrumentId: string; startTime: string; provenance: string }>) {
+    super('decision-time replay refused ' + refused.length + ' bar(s) whose knowledge is not proven (BAR_KNOWLEDGE_NOT_PROVEN): ' + refused.slice(0, 3).map((r) => r.startTime + ' ' + r.provenance).join(', '));
   }
 }

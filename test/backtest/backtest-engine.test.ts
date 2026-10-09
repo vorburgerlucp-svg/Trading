@@ -24,7 +24,7 @@ function bar(index: number, o: string, h: string, l: string, c: string): MarketB
     isFinal: true,
     observedAt: new Date(end).toISOString(),
     availableAt: new Date(end).toISOString(),
-    retrievedAt: new Date(end).toISOString(), knowledge: { provenance: 'historical_bar_reconstruction', revisionKnownAt: null },
+    retrievedAt: new Date(end).toISOString(), knowledge: { knownAt: new Date(end).toISOString(), knowledgeSource: 'captured_by_nexus', vintage: 'historical_reconstruction', vintagePolicy: 'bar-vintage:v1' },
   };
 }
 

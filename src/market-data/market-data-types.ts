@@ -62,26 +62,38 @@ export type BarSession = 'regular' | 'extended' | 'continuous';
 export type PriceAdjustment = 'raw' | 'split_adjusted' | 'total_return_adjusted';
 
 /**
- * How a bar REVISION is known. Market observability (observedAt) is not knowledge: a revision of a bar completed in 2020 can be
- * retrieved in 2026, and then it is a reconstruction, not proof that NEXUS held it in 2020.
- *   captured_by_nexus                NEXUS received this revision live. revisionKnownAt = retrievedAt. Strong.
- *   provider_published_at            the provider states when this revision was published. revisionKnownAt = that time. Not used by Twelve Data.
- *   historical_bar_reconstruction    a historical backfill: window, values and market existence are known; the exact vintage is not. revisionKnownAt = null.
- *   legacy_unproven                  stored before provenance existed. revisionKnownAt = null. Never invented, never strict.
+ * Decision-time knowledge: how NEXUS came to hold this exact bar revision.
+ *   captured_by_nexus      NEXUS received the provider response; knownAt = retrievedAt. Also for backfills: NEXUS holds the value from its retrieval.
+ *   provider_published_at  the provider states when this revision was published; knownAt = that time (<= retrievedAt). Not used by Twelve Data.
+ *   legacy_unproven        stored before provenance existed. knownAt = null. Never invented.
  */
-export type BarKnowledgeProvenance = 'captured_by_nexus' | 'provider_published_at' | 'historical_bar_reconstruction' | 'legacy_unproven';
+export type BarKnowledgeSource = 'captured_by_nexus' | 'provider_published_at' | 'legacy_unproven';
 
-/** Provenances that prove when a revision was known. Only these can support strict point-in-time use. */
-export const PROVEN_BAR_PROVENANCE: readonly BarKnowledgeProvenance[] = ['captured_by_nexus', 'provider_published_at'];
+/**
+ * Vintage: was this revision already the market's value at its observation time? A different question from knowledge.
+ *   contemporaneous          proven by the vintage policy (fetched within its window after completion, or in progress) or by the provider's publish time
+ *   historical_reconstruction a later fetch of an old bar: the market-time value is not proven
+ *   legacy_unproven          no provenance at all
+ */
+export type BarVintage = 'contemporaneous' | 'historical_reconstruction' | 'legacy_unproven';
 
+/** The two independent questions of a bar revision. Booleans derived from them are never stored separately. */
 export interface BarRevisionKnowledge {
-  provenance: BarKnowledgeProvenance;
-  /** ISO UTC instant from which this exact revision is provably held. null unless the provenance proves it. */
-  revisionKnownAt: string | null;
+  /** Decision-time knowledge: NEXUS held exactly this revision from here. null only for legacy rows. */
+  knownAt: string | null;
+  knowledgeSource: BarKnowledgeSource;
+  /** Market-time vintage (see above). */
+  vintage: BarVintage;
+  /** The versioned policy that classified the vintage (BAR_VINTAGE_POLICY_VERSION); null for legacy rows. */
+  vintagePolicy: string | null;
 }
 
-/** How a replay reads bars. Strict replay refuses what it cannot prove (fail closed). */
-export type BarReplayMode = 'historical_reconstruction' | 'strict_point_in_time';
+/**
+ * How a replay reads bars.
+ *   historical_research: bars are visible by their market gate. A bar NEXUS held only later is used and is labelled. For research only.
+ *   decision_time:       a bar is usable only if NEXUS held it at asOf. A bar NEXUS did not yet hold is absent. Legacy refused (fail closed).
+ */
+export type BarReplayMode = 'historical_research' | 'decision_time';
 
 export interface MarketBar {
   instrumentId: string;
@@ -107,7 +119,7 @@ export interface MarketBar {
   availableAt: string;
   /** NEXUS capture of this revision. */
   retrievedAt: string;
-  /** DATA REVISION KNOWLEDGE: how this exact revision is known. Required on every bar. */
+  /** The two questions of a revision: decision-time knowledge and vintage. Required on every bar. */
   knowledge: BarRevisionKnowledge;
 }
 
@@ -247,7 +259,9 @@ export type DataQualityCode =
   | 'revised'
   | 'provider_disagreement'
   | 'vintage_not_proven'
-  | 'legacy_provenance_unproven';
+  | 'legacy_provenance_unproven'
+  | 'decision_knowledge_not_proven'
+  | 'latest_bar_vintage_not_proven';
 
 export interface DataQualityIssue {
   code: DataQualityCode;

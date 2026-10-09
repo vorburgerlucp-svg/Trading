@@ -1,17 +1,17 @@
 // Point-in-time market state for scanner/backtest consumers.
 //
-// Core invariant: a consumer at T may only observe bars whose usable instant is <= T. For a proven revision that instant is the
-// later of its historical gate and the instant NEXUS held it (barUsableFromMs); a reconstruction is usable from its gate.
-// Events are ordered by usability, never by bar start/end. This prevents a later-delivered instrument from leaking its close
-// into portfolio valuation at another instrument's decision time.
+// Core invariant: a consumer at T may only observe bars whose replay instant is <= T. The replay instant depends on the mode
+// (replayInstantMs): the market gate for historical research; for decision-time replay, the later of the gate and the instant
+// NEXUS held the revision. Events are ordered by that instant, never by bar start/end. This prevents a later-delivered instrument
+// from leaking its close into portfolio valuation at another instrument's decision time.
 
-import { barUsableFromMs } from '../market-data/bar-replay.js';
-import type { MarketBar } from '../market-data/market-data-types.js';
+import { replayInstantMs } from '../market-data/bar-replay.js';
+import type { BarReplayMode, MarketBar } from '../market-data/market-data-types.js';
 import { parseUtc, toUtcIso } from '../market-data/time.js';
 
-/** The instant from which NEXUS may use this bar (ISO UTC). */
-export function usableAtOf(bar: MarketBar): string {
-  return toUtcIso(barUsableFromMs(bar));
+/** The instant from which a replay in the given mode may use this bar (ISO UTC). */
+export function usableAtOf(bar: MarketBar, mode: BarReplayMode = 'historical_research'): string {
+  return toUtcIso(replayInstantMs(bar, mode));
 }
 
 export interface BarAvailabilityEvent {
@@ -22,12 +22,12 @@ export interface BarAvailabilityEvent {
   bar: MarketBar;
 }
 
-export function buildBarAvailabilityQueue(series: Readonly<Record<string, readonly MarketBar[]>>): BarAvailabilityEvent[] {
+export function buildBarAvailabilityQueue(series: Readonly<Record<string, readonly MarketBar[]>>, mode: BarReplayMode = 'historical_research'): BarAvailabilityEvent[] {
   const events: BarAvailabilityEvent[] = [];
   for (const [instrumentId, bars] of Object.entries(series)) {
     for (const bar of bars) {
       if (bar.instrumentId !== instrumentId) throw new Error('series key does not match bar instrumentId');
-      events.push({ kind: 'bar', instrumentId, availableAt: usableAtOf(bar), bar });
+      events.push({ kind: 'bar', instrumentId, availableAt: usableAtOf(bar, mode), bar });
     }
   }
   return events.sort((a, b) => {
@@ -40,6 +40,7 @@ export function buildBarAvailabilityQueue(series: Readonly<Record<string, readon
 }
 
 export class PointInTimeBarState {
+  constructor(private readonly mode: BarReplayMode = 'historical_research') {}
   private currentTime = Number.NEGATIVE_INFINITY;
   private readonly historyByInstrument = new Map<string, MarketBar[]>();
   private readonly latestByInstrument = new Map<string, MarketBar>();
@@ -47,7 +48,7 @@ export class PointInTimeBarState {
   advance(event: BarAvailabilityEvent): void {
     const eventTime = parseUtc(event.availableAt);
     if (eventTime < this.currentTime) throw new Error('point-in-time state cannot move backwards');
-    if (barUsableFromMs(event.bar) !== eventTime) throw new Error('event availability does not match bar availability');
+    if (replayInstantMs(event.bar, this.mode) !== eventTime) throw new Error('event availability does not match bar availability');
     this.currentTime = eventTime;
     const history = this.historyByInstrument.get(event.instrumentId);
     if (history) {
@@ -73,7 +74,7 @@ export class PointInTimeBarState {
   historyAt(instrumentId: string, asOf: string): readonly MarketBar[] {
     const t = parseUtc(asOf);
     if (t > this.currentTime) throw new Error('cannot query point-in-time state beyond the processed event time');
-    return (this.historyByInstrument.get(instrumentId) ?? []).filter((bar) => barUsableFromMs(bar) <= t);
+    return (this.historyByInstrument.get(instrumentId) ?? []).filter((bar) => replayInstantMs(bar, this.mode) <= t);
   }
 
   snapshot(asOf: string): ReadonlyMap<string, MarketBar> {

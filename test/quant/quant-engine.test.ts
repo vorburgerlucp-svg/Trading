@@ -10,7 +10,7 @@ import { canonicalJson } from '../../src/persistence/canonical-json.js';
 import { computeQuant, quantResultHash, type QuantInput } from '../../src/quant/quant-engine.js';
 import { InMemoryQuantRunStore } from '../../src/quant/quant-run-store.js';
 import { QuantService } from '../../src/quant/quant-service.js';
-import { AAPL, EURUSD, FIXTURE_SOURCE, dailyBars, intradayBars, randomOhlcv } from '../market-data/fixtures.js';
+import { AAPL, EURUSD, FIXTURE_SOURCE, dailyBars, intradayBars, randomOhlcv, retrievedAs } from '../market-data/fixtures.js';
 
 const XNAS = getCalendar('XNAS')!;
 const CREATED = { createdAt: '2026-12-31T00:00:00.000Z' };
@@ -35,7 +35,7 @@ describe('Kein Look-ahead (Pflichttest)', () => {
     // a later correction of bar 180 that only became known after T
     mutated.push({ ...scaleBar(series[180]!, '3'), availableAt: toUtcIso(t + 86_400_000), retrievedAt: toUtcIso(t + 86_400_000) });
     // the next session's still-forming bar
-    mutated.push({ ...series[181]!, isFinal: false, availableAt: toUtcIso(t + 3_600_000), observedAt: toUtcIso(t + 3_600_000), retrievedAt: toUtcIso(t + 3_600_000) });
+    mutated.push(retrievedAs({ ...series[181]!, isFinal: false, availableAt: toUtcIso(t + 3_600_000), observedAt: toUtcIso(t + 3_600_000) }, toUtcIso(t + 3_600_000)));
     const after = computeQuant(input(mutated, asOf), CREATED);
 
     expect(canonicalJson(after)).toBe(canonicalJson(before));
@@ -82,7 +82,7 @@ describe('Final vs. in-progress, Datenqualität, zu wenig Historie', () => {
   const forming: MarketBar = { ...dailyBars(XNAS, '2026-01-05', randomOhlcv(61, 3))[60]!, isFinal: false };
 
   it('Standard: nur finale Bars; in-progress nur explizit (Live-Vorschau) und dann markiert', () => {
-    const formingVisible = { ...forming, availableAt: toUtcIso(parseUtc(forming.startTime) + 14 * 3_600_000), observedAt: toUtcIso(parseUtc(forming.startTime) + 14 * 3_600_000), retrievedAt: toUtcIso(parseUtc(forming.startTime) + 14 * 3_600_000) };
+    const formingVisible = retrievedAs({ ...forming, availableAt: toUtcIso(parseUtc(forming.startTime) + 14 * 3_600_000), observedAt: toUtcIso(parseUtc(forming.startTime) + 14 * 3_600_000) }, toUtcIso(parseUtc(forming.startTime) + 14 * 3_600_000));
     const at = toUtcIso(parseUtc(formingVisible.availableAt) + 1000);
     const finalOnly = computeQuant(input([...bars, formingVisible], at, { useCase: 'analysis' }), CREATED);
     expect(finalOnly).toMatchObject({ mode: 'final_only', barCount: 60 });

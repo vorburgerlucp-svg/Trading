@@ -16,8 +16,9 @@ import { MarketDataQualityService } from '../market-data/data-quality.js';
 import type { FreshnessUseCase } from '../market-data/freshness.js';
 import { INTERVAL_MS, isIntraday, type DataQualityResult, type Instrument, type IntradayInterval, type MarketBar, type MarketDataSource } from '../market-data/market-data-types.js';
 import type { SessionScope, TradingCalendar } from '../market-data/sessions.js';
-import { barUsableFromMs, countBarProvenance, knowledgeOf } from '../market-data/bar-replay.js';
-import { canonicalUtc, parseUtc, toUtcIso } from '../market-data/time.js';
+import { countBarKnowledge, isContemporaneous } from '../market-data/bar-replay.js';
+import type { BarReplayMode } from '../market-data/market-data-types.js';
+import { canonicalUtc, parseUtc } from '../market-data/time.js';
 import { assertPeriod, IndicatorError, qn, type Series } from './indicators/common.js';
 import { ADX_VERSION, adx } from './indicators/adx.js';
 import { ATR_VERSION, atr } from './indicators/atr.js';
@@ -33,8 +34,8 @@ import { SUPPORT_RESISTANCE_VERSION, supportResistance } from './structure/suppo
 import { SWING_VERSION, findSwings } from './structure/swings.js';
 import type { IndicatorValue, QuantBarProvenance, QuantIndicators, QuantParameters, QuantPivots, QuantResult, QuantSeriesId, QuantSupportResistance, QuantSwing, WarmupEntry } from './quant-types.js';
 
-/** v2: bar provenance is part of the input and of the result (barDataProvenance). Runs of v1 are not replayable identically. */
-export const QUANT_ENGINE_VERSION = 'quant-engine:v2';
+/** v3: decision-time knowledge and vintage are separate questions of the input and of the result (barDataProvenance). */
+export const QUANT_ENGINE_VERSION = 'quant-engine:v3';
 export const DATA_QUALITY_VERSION = 'data-quality:v1';
 
 export const ALGORITHM_VERSIONS: Readonly<Record<string, string>> = Object.freeze({
@@ -81,6 +82,8 @@ export interface QuantInput {
   useCase?: FreshnessUseCase;
   /** Versioned derivation the bars came from (e.g. the split-adjustment policy). Undefined for raw series: their identities are unchanged. */
   derivation?: Readonly<Record<string, string>>;
+  /** The replay that produced the bars: decision_time or historical_research. Part of the result and of the fingerprint. */
+  barReplay?: BarReplayMode;
 }
 
 export function resolveParameters(overrides: Partial<QuantParameters> = {}): QuantParameters {
@@ -104,31 +107,39 @@ function safeMs(iso: string): number {
   }
 }
 
-/** Everything a bar contributes to a run, including when and how it is known: identical OHLC with other knowledge is another input. */
+/** Everything a bar contributes to a run, including what NEXUS knew and the vintage: identical OHLC with other knowledge is another input. */
 function fingerprintBars(bars: readonly MarketBar[]): unknown[] {
-  return bars.map((b) => [b.startTime, b.endTime, b.open, b.high, b.low, b.close, b.volume ?? null, b.isFinal, b.observedAt, b.availableAt, b.retrievedAt, knowledgeOf(b).provenance, knowledgeOf(b).revisionKnownAt]);
+  return bars.map((b) => [b.startTime, b.endTime, b.open, b.high, b.low, b.close, b.volume ?? null, b.isFinal, b.observedAt, b.availableAt, b.retrievedAt, b.knowledge.knownAt, b.knowledge.knowledgeSource, b.knowledge.vintage, b.knowledge.vintagePolicy]);
 }
 
-/** When a bar may be used; NaN for an unparseable timestamp (so data quality rejects it, fail closed). */
-function usableFromOrNaN(bar: MarketBar): number {
-  try {
-    return barUsableFromMs(bar);
-  } catch {
-    return Number.NaN;
-  }
-}
-
-/** What the input bars were: strict point in time only when every bar is a proven revision held by asOf. */
-export function barProvenanceOf(bars: readonly MarketBar[]): QuantBarProvenance {
-  const counts = countBarProvenance(bars);
+/**
+ * The two questions of a run's bars, each separately: was every bar held by NEXUS at asOf (decision-time knowledge), and was every
+ * bar contemporaneous with its market time (vintage)? The latest final bar is the signal bar and is reported on its own.
+ */
+export function barProvenanceOf(bars: readonly MarketBar[], asOfMs: number): QuantBarProvenance {
+  const counts = countBarKnowledge(bars, asOfMs);
+  const signalBar = [...bars].filter((b) => b.isFinal).sort((x, y) => parseUtc(x.startTime) - parseUtc(y.startTime)).at(-1);
   return {
-    strictPointInTime: counts.total > 0 && counts.proven === counts.total,
+    decisionTimeKnowledgeProven: counts.total > 0 && counts.knownAtAsOf === counts.total,
+    allBarsContemporaneousVintage: counts.total > 0 && counts.contemporaneous === counts.total,
     historicalReconstruction: counts.historical > 0,
     legacyUnproven: counts.legacy > 0,
-    provenBars: counts.proven,
+    latestFinalBarContemporaneous: signalBar !== undefined && isContemporaneous(signalBar),
+    barCount: counts.total,
+    knownBars: counts.knownAtAsOf,
+    contemporaneousBars: counts.contemporaneous,
     historicalBars: counts.historical,
     legacyBars: counts.legacy,
   };
+}
+
+/** The market gate of a bar (ms), or NaN for an unparseable timestamp (so data quality rejects it, fail closed). */
+function marketGateOrNaN(bar: MarketBar): number {
+  try {
+    return parseUtc(bar.availableAt);
+  } catch {
+    return Number.NaN;
+  }
 }
 
 function latest(series: Series, bars: readonly MarketBar[], required: number, reasonIfMissing = 'not enough history'): IndicatorValue<number> {
@@ -298,9 +309,10 @@ export function computeQuant(input: QuantInput, options: { createdAt: string }):
   const useCase: FreshnessUseCase = input.useCase ?? 'analysis';
 
   // 1. Point-in-time cut. Unparseable timestamps stay in so data quality rejects them (fail closed).
-  // A proven revision is used only from the instant NEXUS held it; an unproven one from its historical gate (labelled below).
+  // The cut uses the market gate only. Which revisions NEXUS held at asOf is decided by the replay that produced the bars (decision-time
+  // reads return only what was held); here, what the bars carry is reported below, bar by bar.
   const selected = input.bars.filter((b) => {
-    const usableFrom = usableFromOrNaN(b);
+    const usableFrom = marketGateOrNaN(b);
     const start = safeMs(b.startTime);
     if (!Number.isNaN(usableFrom) && usableFrom > asOfMs) return false;
     if (!Number.isNaN(start) && start >= asOfMs) return false;
@@ -324,6 +336,7 @@ export function computeQuant(input: QuantInput, options: { createdAt: string }):
     engine: QUANT_ENGINE_VERSION,
     algorithms: ALGORITHM_VERSIONS,
     derivation: input.derivation,
+    barReplay: input.barReplay ?? 'historical_research',
     parameters: p,
     instrumentId: input.instrument.instrumentId,
     series: input.series,
@@ -342,7 +355,8 @@ export function computeQuant(input: QuantInput, options: { createdAt: string }):
     useCase,
     inputFingerprint,
     dataQuality: quality,
-    barDataProvenance: barProvenanceOf(selected),
+    barDataProvenance: barProvenanceOf(selected, asOfMs),
+    barReplay: input.barReplay ?? 'historical_research',
     algorithmVersions: { ...ALGORITHM_VERSIONS, ...(input.derivation ?? {}) },
     parameters: p,
     createdAt: options.createdAt,
@@ -380,7 +394,7 @@ export function computeQuant(input: QuantInput, options: { createdAt: string }):
   const swingPoints = findSwings(finals.map((b) => b.high.toNumber()), finals.map((b) => b.low.toNumber()), p.swings.leftBars, p.swings.rightBars);
   const swings: QuantSwing[] = swingPoints.map((s) => {
     const bar = finals[s.index]!;
-    return { kind: s.kind, index: s.index, price: s.kind === 'high' ? bar.high : bar.low, time: bar.startTime, confirmedIndex: s.confirmedIndex, confirmedAt: toUtcIso(barUsableFromMs(finals[s.confirmedIndex]!)) };
+    return { kind: s.kind, index: s.index, price: s.kind === 'high' ? bar.high : bar.low, time: bar.startTime, confirmedIndex: s.confirmedIndex, confirmedAt: finals[s.confirmedIndex]!.availableAt };
   });
   let sr: QuantSupportResistance;
   if (finals.length === 0) sr = { status: 'insufficient_data', reason: 'no final bars', levels: [] };

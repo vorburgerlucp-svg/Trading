@@ -14,12 +14,12 @@ import { SPLIT_ADJUSTMENT_VERSION } from '../market-data/corporate-actions.js';
 import { parseUtc } from '../market-data/time.js';
 import type { EvidenceSeal, EvidenceSealKind, Sealed } from '../persistence/evidence-seal.js';
 import type { QuantRunStore } from '../quant/quant-run-store.js';
-import type { QuantRunRecord } from '../quant/quant-types.js';
+import type { QuantBarProvenance, QuantRunRecord } from '../quant/quant-types.js';
 import type { ScannerRunStore } from '../scanner/scanner-store.js';
-import type { ScannerCandidate, ScannerRun } from '../scanner/scanner-types.js';
+import type { ScannerBarKnowledge, ScannerCandidate, ScannerRun } from '../scanner/scanner-types.js';
 
 /** Version of the lineage object that enters the decision input fingerprint. */
-export const EVIDENCE_LINEAGE_VERSION = 'evidence-lineage:v2';
+export const EVIDENCE_LINEAGE_VERSION = 'evidence-lineage:v3';
 
 export interface ScannerEvidenceReader {
   getSealed(scannerRunId: string): Promise<Sealed<ScannerRun> | null>;
@@ -74,6 +74,10 @@ export const EVIDENCE_REASON_CODES = [
   'WEAK_BACKTEST_EVIDENCE_ONLY',
   'EVIDENCE_INSTRUMENT_UNKNOWN',
   'CROSS_INSTRUMENT_EVIDENCE',
+  'BAR_KNOWLEDGE_NOT_PROVEN',
+  'BAR_VINTAGE_NOT_CONTEMPORANEOUS',
+  'LATEST_BAR_NOT_CONTEMPORANEOUS',
+  'SCANNER_RESEARCH_EVIDENCE',
 ] as const;
 export type EvidenceReasonCode = (typeof EVIDENCE_REASON_CODES)[number];
 
@@ -98,11 +102,31 @@ export interface EvidenceRequest {
  * Identity lineage: Decision → QuantRun → ScannerRun → ScannerCandidate → BacktestRuns. IDs, fingerprints,
  * grades and data times only. It enters the decision input fingerprint. Commit times are NOT in here (see EvidenceSealSummary).
  */
+/** The bar knowledge of a run, as the evidence sees it. The two questions stay separate. null when the run predates the model. */
+export interface BarKnowledgeLineage {
+  decisionTimeKnowledgeProven: boolean;
+  allBarsContemporaneousVintage: boolean;
+  historicalReconstruction: boolean;
+  legacyUnproven: boolean;
+  latestFinalBarContemporaneous: boolean;
+}
+
+function barKnowledgeOf(provenance: Partial<QuantBarProvenance> | undefined): BarKnowledgeLineage | null {
+  if (!provenance) return null;
+  return {
+    decisionTimeKnowledgeProven: provenance.decisionTimeKnowledgeProven === true,
+    allBarsContemporaneousVintage: provenance.allBarsContemporaneousVintage === true,
+    historicalReconstruction: provenance.historicalReconstruction === true,
+    legacyUnproven: provenance.legacyUnproven === true,
+    latestFinalBarContemporaneous: provenance.latestFinalBarContemporaneous === true,
+  };
+}
+
 export interface EvidenceLineage {
   evidenceLineageVersion: typeof EVIDENCE_LINEAGE_VERSION;
   asOf: string;
   instrumentId: string | null;
-  quant: { quantRunId: string; instrumentId: string; asOf: string } | null;
+  quant: { quantRunId: string; instrumentId: string; asOf: string; barKnowledge: BarKnowledgeLineage | null } | null;
   scanner: {
     scannerRunId: string;
     asOf: string;
@@ -110,7 +134,9 @@ export interface EvidenceLineage {
     inputFingerprint: string;
     /** Latest input availability (engine-computed, stored with the run). null when unknown or no inputs. */
     inputsAvailableAt: string | null;
-    candidate: { instrumentId: string; rank: number; quantRunId: string } | null;
+    /** live_trading (the default) or research: a research scan is never live evidence. */
+    useCase: 'live_trading' | 'research';
+    candidate: { instrumentId: string; rank: number; quantRunId: string; barKnowledge: ScannerBarKnowledge | null } | null;
   } | null;
   backtests: {
     backtestRunId: string;
@@ -125,6 +151,8 @@ export interface EvidenceLineage {
     strength: 'strong' | 'weak';
     /** Last market availability time the backtest used (last equity point). */
     dataCutoff: string | null;
+    /** What the bars were at their simulated use time. null for runs that predate the field (weak). */
+    dataProvenance: string | null;
   }[];
 }
 
@@ -241,6 +269,16 @@ export async function validateEvidenceReferences(request: EvidenceRequest, reade
     }
   }
 
+  // Bar knowledge of the quant run. Decision-time knowledge gates the evidence. Vintage is reported and never claimed as contemporaneous.
+  if (quant !== null) {
+    const provenance = quant.record.result.barDataProvenance as Partial<QuantBarProvenance> | undefined;
+    if (provenance?.decisionTimeKnowledgeProven !== true) {
+      block('BAR_KNOWLEDGE_NOT_PROVEN', quant.record.result.quantRunId, provenance === undefined ? 'the run predates the bar knowledge model: its bar knowledge cannot be shown' : 'NEXUS did not hold every bar of the run at asOf, or a bar is legacy');
+    } else if (provenance.allBarsContemporaneousVintage !== true) {
+      warn('BAR_VINTAGE_NOT_CONTEMPORANEOUS', quant.record.result.quantRunId, 'every bar was held by NEXUS at asOf, but some bars have a historical vintage: their market-time value is not proven');
+    }
+  }
+
   // Scanner run and lineage: the candidate must come from exactly the cited quant run.
   const scanner = request.scannerRunId === undefined
     ? null
@@ -265,6 +303,16 @@ export async function validateEvidenceReferences(request: EvidenceRequest, reade
       if (candidate === null) block('SCANNER_QUANT_LINEAGE_MISMATCH', run.scannerRunId, 'no candidate of this scanner run was produced by quant run ' + request.quantRunId);
       if (quant !== null && parseUtc(quant.record.result.asOf) !== parseUtc(run.asOf)) {
         block('SCANNER_QUANT_LINEAGE_MISMATCH', run.scannerRunId, 'quant run asOf ' + quant.record.result.asOf + ' differs from scanner asOf ' + run.asOf);
+      }
+      if (candidate !== null) {
+        // The candidate's bars must be known at asOf in every case. A live candidate also needs a contemporaneous signal bar.
+        const k = candidate.barKnowledge as Partial<ScannerBarKnowledge> | undefined;
+        if (k?.decisionTimeKnowledgeProven !== true) block('BAR_KNOWLEDGE_NOT_PROVEN', run.scannerRunId, 'the candidate does not prove decision-time knowledge of its bars' + (k === undefined ? ' (it predates the bar knowledge model)' : ''));
+        if (run.definition.useCase === 'research') {
+          warn('SCANNER_RESEARCH_EVIDENCE', run.scannerRunId, 'research scan: its candidates may rest on historical reconstructions; it is not live evidence');
+        } else if (k?.latestFinalBarContemporaneous !== true) {
+          block('LATEST_BAR_NOT_CONTEMPORANEOUS', run.scannerRunId, 'a live candidate needs a contemporaneous signal bar (the latest final bar)');
+        }
       }
     }
   }
@@ -296,8 +344,10 @@ export async function validateEvidenceReferences(request: EvidenceRequest, reade
     if (dataCutoff === null) block('BACKTEST_AVAILABILITY_UNVERIFIABLE', ref, 'backtest has no equity series, so its data window cannot be placed in time');
     else if (parseUtc(dataCutoff) > asOfMs) block('EVIDENCE_FROM_FUTURE', ref, 'backtest data runs to ' + dataCutoff + ', after decision asOf ' + request.asOf);
     if (run.quality.insufficientSample) warn('BACKTEST_INSUFFICIENT_SAMPLE', ref, run.metrics.numberOfTrades + ' trade(s): weak evidence only, no probability may be derived from it');
-    const strong = grade === 'A' && !run.quality.insufficientSample;
-    if (!strong && grade !== 'INVALID') warn('BACKTEST_WEAK_EVIDENCE', ref, 'quality ' + grade + ': supporting evidence only, never strong proof');
+    // Strong evidence needs grade A, a sufficient sample and STRICT_PIT_DATA. A run without the field is weak.
+    const dataProvenance = run.quality.dataProvenance ?? null;
+    const strong = grade === 'A' && !run.quality.insufficientSample && dataProvenance === 'STRICT_PIT_DATA';
+    if (!strong && grade !== 'INVALID') warn('BACKTEST_WEAK_EVIDENCE', ref, 'quality ' + grade + ', data ' + (dataProvenance ?? 'unknown (run predates data provenance)') + ': supporting evidence only, never strong proof');
     backtests.push({
       backtestRunId: run.backtestRunId,
       instrumentId: run.instrumentId,
@@ -309,6 +359,7 @@ export async function validateEvidenceReferences(request: EvidenceRequest, reade
       insufficientSample: run.quality.insufficientSample,
       strength: strong ? 'strong' : 'weak',
       dataCutoff,
+      dataProvenance,
     });
   }
   if (backtests.length > 0) {
@@ -327,7 +378,7 @@ export async function validateEvidenceReferences(request: EvidenceRequest, reade
     evidenceLineageVersion: EVIDENCE_LINEAGE_VERSION,
     asOf: request.asOf,
     instrumentId,
-    quant: quant === null ? null : { quantRunId: quant.record.result.quantRunId, instrumentId: quant.record.result.instrumentId, asOf: quant.record.result.asOf },
+    quant: quant === null ? null : { quantRunId: quant.record.result.quantRunId, instrumentId: quant.record.result.instrumentId, asOf: quant.record.result.asOf, barKnowledge: barKnowledgeOf(quant.record.result.barDataProvenance as Partial<QuantBarProvenance> | undefined) },
     scanner: scanner === null
       ? null
       : {
@@ -336,7 +387,8 @@ export async function validateEvidenceReferences(request: EvidenceRequest, reade
           rankingComplete: scanner.record.rankingComplete,
           inputFingerprint: scanner.record.inputFingerprint,
           inputsAvailableAt: scanner.record.inputsAvailableAt ?? null,
-          candidate: candidate === null ? null : { instrumentId: candidate.instrumentId, rank: candidate.rank, quantRunId: candidate.quantRunId },
+          useCase: scanner.record.definition.useCase ?? 'live_trading',
+          candidate: candidate === null ? null : { instrumentId: candidate.instrumentId, rank: candidate.rank, quantRunId: candidate.quantRunId, barKnowledge: candidate.barKnowledge ?? null },
         },
     backtests: backtests.sort((a, b) => (a.backtestRunId < b.backtestRunId ? -1 : a.backtestRunId > b.backtestRunId ? 1 : 0)),
   };

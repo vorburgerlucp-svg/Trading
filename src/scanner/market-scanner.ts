@@ -6,7 +6,7 @@ import type { UniverseSnapshot } from './universe.js';
 
 // v2 adds inputsAvailableAt to the stored run. The version is part of the input fingerprint, so the same inputs get
 // a new scannerRunId under v2. A v1 run is never re-stored with different content under its old id.
-export const MARKET_SCANNER_VERSION = 'market-scanner:v2';
+export const MARKET_SCANNER_VERSION = 'market-scanner:v3';
 
 export function runMarketScanner(definition: ScannerDefinition, universe: UniverseSnapshot, snapshots: readonly ScannerSnapshot[], asOf: string): ScannerRun {
   if (definition.universeId !== universe.universeId) throw new Error('scanner universe does not match universe snapshot');
@@ -60,7 +60,9 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
     } else {
       if (!snapshot.quant.dataQuality.usableForTrading) reasons.push('market data not usable for trading');
       // A live signal may rest only on revisions NEXUS can prove it held.
-      if (!snapshot.quant.barDataProvenance.strictPointInTime) reasons.push('bar revisions not proven point in time: a historical reconstruction cannot back a live signal');
+      // Decision-time knowledge of every bar, and a contemporaneous signal bar. Warm-up history may be a reconstruction.
+      if (!snapshot.quant.barDataProvenance.decisionTimeKnowledgeProven) reasons.push('bar knowledge not proven at the decision time');
+      if (!snapshot.quant.barDataProvenance.latestFinalBarContemporaneous) reasons.push('latest signal bar is not contemporaneous (historical reconstruction)');
     }
 
     const evaluations = definition.filters.map((filter) => evaluateScannerFilter(snapshot, filter));
@@ -125,7 +127,13 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
     rankingScore: x.score,
     rank: index + 1,
     dataQualityStatus: x.snapshot.quant.dataQuality.severity,
-    strictPointInTime: x.snapshot.quant.barDataProvenance.strictPointInTime,
+    barKnowledge: {
+      decisionTimeKnowledgeProven: x.snapshot.quant.barDataProvenance.decisionTimeKnowledgeProven,
+      allBarsContemporaneousVintage: x.snapshot.quant.barDataProvenance.allBarsContemporaneousVintage,
+      historicalReconstruction: x.snapshot.quant.barDataProvenance.historicalReconstruction,
+      legacyUnproven: x.snapshot.quant.barDataProvenance.legacyUnproven,
+      latestFinalBarContemporaneous: x.snapshot.quant.barDataProvenance.latestFinalBarContemporaneous,
+    },
   }));
 
   return {

@@ -4,13 +4,13 @@ import { splitAdjustBars, type SplitAdjustmentResult } from '../../src/market-da
 import type { CorporateActionKnowledge, StoredCorporateAction } from '../../src/market-data/market-data-types.js';
 import { getCalendar } from '../../src/market-data/sessions.js';
 import { Decimal } from '../../src/money/decimal.js';
-import { AAPL, FIXTURE_SOURCE, dailyBars } from './fixtures.js';
+import { AAPL, FIXTURE_SOURCE, dailyBars, retrievedAs } from './fixtures.js';
 
 const XNAS = getCalendar('XNAS')!;
 const row = (p: string, v = '1000') => ({ open: p, high: p, low: p, close: p, volume: v });
 // Aug 27, 28, 31 (ex-date of a 4-for-1 split), Sep 1
 const raw = dailyBars(XNAS, '2026-08-27', [row('400.00'), row('404.00'), row('101.00'), row('102.00')], { retrievedAt: '2026-08-02T00:00:00.000Z' }).map((b, i) =>
-  i < 2 ? { ...b, retrievedAt: '2026-08-30T00:00:00.000Z' } : { ...b, retrievedAt: '2026-09-05T00:00:00.000Z' },
+  i < 2 ? retrievedAs(b, '2026-08-30T00:00:00.000Z') : retrievedAs(b, '2026-09-05T00:00:00.000Z'),
 );
 const CAPTURED_AT = '2026-07-30T20:00:00.000Z';
 const captured = (at: string = CAPTURED_AT): CorporateActionKnowledge => ({ provenance: 'captured_by_nexus', knowledgeAt: at });

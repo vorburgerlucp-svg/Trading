@@ -8,7 +8,7 @@
 //   warning  – usable with care (gaps, stale, partial bars, out-of-order input, calendar uncertainty)
 
 import { barContentHash, validateBar, validateQuote } from './bar-validation.js';
-import { barUsableFromMs, countBarProvenance } from './bar-replay.js';
+import { countBarKnowledge, isContemporaneous } from './bar-replay.js';
 import { assessBarFreshness, assessQuoteFreshness, type FreshnessPolicy, type FreshnessUseCase } from './freshness.js';
 import { isIntraday, type BarInterval, type BarSession, type DataQualityIssue, type DataQualityResult, type Instrument, type MarketBar, type MarketDataSource, type MarketQuote, type PriceAdjustment, type Severity } from './market-data-types.js';
 import type { SessionScope, TradingCalendar } from './sessions.js';
@@ -99,7 +99,7 @@ export class MarketDataQualityService {
         continue;
       }
       const start = parseUtc(bar.startTime);
-      if (barUsableFromMs(bar) > asOf || start >= asOf) {
+      if (parseUtc(bar.availableAt) > asOf || start >= asOf) {
         c.add({ code: 'not_yet_available', severity: 'error', message: 'bar was not available at asOf ' + ctx.asOf + ' (look-ahead)', at: bar.startTime });
         continue;
       }
@@ -195,14 +195,22 @@ export class MarketDataQualityService {
       }
     }
 
-    // Revision knowledge: bars used without a proof of their revision are labelled, never presented as strict point in time.
-    // A historical reconstruction is fine for research; trading needs proven revisions only.
-    const provenance = countBarProvenance(unique);
-    if (provenance.historical > 0) {
-      c.add({ code: 'vintage_not_proven', severity: 'warning', message: provenance.historical + ' bar(s) are historical reconstructions: their exact vintage is not proven', count: provenance.historical });
+    // Two questions, reported separately. Decision-time knowledge: was every bar held by NEXUS at asOf? Vintage: which bars are
+    // contemporaneous with their market time? Warm-up history may be a reconstruction; the latest final (signal) bar may not.
+    const knowledge = countBarKnowledge(unique, asOf);
+    if (knowledge.historical > 0) {
+      c.add({ code: 'vintage_not_proven', severity: 'warning', message: knowledge.historical + ' bar(s) have a historical reconstruction vintage: their market-time value is not proven', count: knowledge.historical });
     }
-    if (provenance.legacy > 0) {
-      c.add({ code: 'legacy_provenance_unproven', severity: 'warning', message: provenance.legacy + ' bar(s) stored without provenance: their revision knowledge is unproven', count: provenance.legacy });
+    if (knowledge.legacy > 0) {
+      c.add({ code: 'legacy_provenance_unproven', severity: 'warning', message: knowledge.legacy + ' bar(s) stored without provenance: their knowledge is unproven', count: knowledge.legacy });
+    }
+    if (knowledge.total - knowledge.knownAtAsOf > 0) {
+      const notHeld = knowledge.total - knowledge.knownAtAsOf;
+      c.add({ code: 'decision_knowledge_not_proven', severity: 'warning', message: notHeld + ' bar(s) were not held by NEXUS at asOf (or are legacy): not usable as decision-time knowledge', count: notHeld });
+    }
+    const signalBar = [...unique].reverse().find((b) => b.isFinal);
+    if (signalBar && !isContemporaneous(signalBar)) {
+      c.add({ code: 'latest_bar_vintage_not_proven', severity: 'warning', message: 'the latest final bar (the signal bar) is a historical reconstruction: a live signal needs a contemporaneous signal bar', at: signalBar.startTime });
     }
 
     // Trading needs a known production source; unknown provenance is never tradable.
@@ -210,10 +218,11 @@ export class MarketDataQualityService {
     return c.result((issues, severity) => {
       const has = (code: DataQualityIssue['code']) => issues.some((i) => i.code === code);
       const valid = RANK[severity] < RANK.error;
-      const vintageProven = !has('vintage_not_proven') && !has('legacy_provenance_unproven');
+      const decisionKnown = !has('decision_knowledge_not_proven') && !has('legacy_provenance_unproven');
+      const signalProven = !has('latest_bar_vintage_not_proven');
       return {
         usableForBacktest: valid && !has('partial_bar') && unique.length > 0,
-        usableForTrading: valid && !stale && !has('partial_bar') && unique.length > 0 && ctx.calendar !== null && !freshnessAssumed && production && !has('missing_bars') && vintageProven,
+        usableForTrading: valid && !stale && !has('partial_bar') && unique.length > 0 && ctx.calendar !== null && !freshnessAssumed && production && !has('missing_bars') && decisionKnown && signalProven,
       };
     });
   }

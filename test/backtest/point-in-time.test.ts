@@ -21,7 +21,7 @@ function bar(instrumentId: string, startTime: string, availableAt: string, close
     isFinal: true,
     observedAt: availableAt,
     availableAt,
-    retrievedAt: availableAt, knowledge: { provenance: 'historical_bar_reconstruction', revisionKnownAt: null },
+    retrievedAt: availableAt, knowledge: { knownAt: availableAt, knowledgeSource: 'captured_by_nexus', vintage: 'historical_reconstruction', vintagePolicy: 'bar-vintage:v1' },
   };
 }
 

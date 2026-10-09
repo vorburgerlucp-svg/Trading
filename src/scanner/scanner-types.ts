@@ -41,6 +41,15 @@ export interface ScannerSnapshot {
   quant: QuantResult;
 }
 
+/** The bar knowledge of a candidate, copied from its quant run. */
+export interface ScannerBarKnowledge {
+  decisionTimeKnowledgeProven: boolean;
+  allBarsContemporaneousVintage: boolean;
+  historicalReconstruction: boolean;
+  legacyUnproven: boolean;
+  latestFinalBarContemporaneous: boolean;
+}
+
 export interface ScannerCandidate {
   scannerRunId: string;
   instrumentId: string;
@@ -51,8 +60,8 @@ export interface ScannerCandidate {
   rankingScore: number;
   rank: number;
   dataQualityStatus: string;
-  /** Whether every bar behind the candidate's quant run was a proven revision held by asOf. */
-  strictPointInTime: boolean;
+  /** What the candidate's bars were: the two questions, and the signal bar (see docs/BAR_KNOWLEDGE_EVIDENCE.md). */
+  barKnowledge: ScannerBarKnowledge;
 }
 
 export interface ScannerCoverage {

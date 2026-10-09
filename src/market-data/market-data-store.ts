@@ -3,9 +3,10 @@
 // Rules shared by every implementation (the PostgreSQL store reuses the planning functions below):
 //   * idempotent: re-delivering an identical record changes nothing (status "unchanged")
 //   * nothing is overwritten: a different record for the same key becomes a new REVISION
-//   * bars: a revision's historical gate (availableAt) is raised to max(given, its knowledge floor, the previous gate) for
-//     revisions >= 2. A proven revision is used only from the instant NEXUS held it, in every mode; an unproven one
-//     (historical reconstruction, legacy) is labelled, and a strict read refuses it (BAR_VINTAGE_NOT_PROVEN). See bar-replay.ts.
+//   * bars: a revision's market gate (availableAt) is raised to max(given, its knowledge floor, the previous gate) for
+//     revisions >= 2. Two replay modes (bar-replay.ts): historical_research shows a revision by its market gate and labels
+//     what NEXUS held only later; decision_time shows a revision only once NEXUS held it (absent before), and refuses legacy
+//     rows (BAR_KNOWLEDGE_NOT_PROVEN). The vintage is a separate question and never decides knowledge.
 //   * quotes: a revision becomes visible at availableAt, raised to max(availableAt, retrievedAt, previous) for revisions >= 2
 //     only (the first revision keeps the provided value; quote finding F10).
 //     Corporate actions do not use availableAt at all: their information time is a proven knowledge time (corporate-actions.ts).
@@ -32,11 +33,10 @@ import {
   validateQuote,
   type PriceRules,
 } from './bar-validation.js';
-import { BarVintageNotProvenError, classifyVisibleBar, isProvenKnowledge, knowledgeOf, revisionFloorOf } from './bar-replay.js';
+import { BarKnowledgeNotProvenError, hasKnownAt, isKnownAt, knownAtMs, knowledgeOf, revisionFloorOf } from './bar-replay.js';
 import { selectReplayRevision, type ReplayPurpose } from './corporate-actions.js';
 import type {
   BarInterval,
-  BarKnowledgeProvenance,
   BarReplayMode,
   BarSession,
   CorporateAction,
@@ -83,8 +83,8 @@ export interface BarQuery {
   /** Default true: in-progress bars are excluded (no repainting). */
   finalOnly?: boolean;
   /**
-   * historical_reconstruction (default): unproven revisions are used at their historical gate, labelled by their provenance.
-   * strict_point_in_time: an unproven visible revision makes the read throw BarVintageNotProvenError (fail closed).
+   * historical_research (default): visibility by the market gate; revisions NEXUS held only later are used and labelled.
+   * decision_time: only revisions NEXUS held at asOf; a legacy visible revision throws BarKnowledgeNotProvenError (fail closed).
    * In both modes a proven revision is used only from the instant NEXUS held it.
    */
   replay?: BarReplayMode;
@@ -318,9 +318,9 @@ export function planBars(instrument: IngestInstrument, bars: readonly MarketBar[
 
 /** A proven revision cannot be known before an earlier proven revision of the same bar: knowledge only moves forward. */
 function knowledgeRegression(record: MarketBar, previous: StoredBar): DataQualityIssue[] {
-  const now = knowledgeOf(record);
-  const before = knowledgeOf(previous);
-  if (isProvenKnowledge(now) && isProvenKnowledge(before) && parseUtc(now.revisionKnownAt!) < parseUtc(before.revisionKnownAt!)) {
+  const nowKnown = knownAtMs(record);
+  const beforeKnown = knownAtMs(previous);
+  if (nowKnown !== null && beforeKnown !== null && nowKnown < beforeKnown) {
     return [{ code: 'invalid_time', severity: 'critical', message: 'a later revision cannot be known before an earlier proven revision (knowledge would move backwards)' }];
   }
   return [];
@@ -438,7 +438,7 @@ function stripBar(b: MarketBar): MarketBar {
     observedAt: b.observedAt,
     availableAt: b.availableAt,
     retrievedAt: b.retrievedAt,
-    knowledge: { provenance: b.knowledge.provenance, revisionKnownAt: b.knowledge.revisionKnownAt },
+    knowledge: { knownAt: b.knowledge.knownAt, knowledgeSource: b.knowledge.knowledgeSource, vintage: b.knowledge.vintage, vintagePolicy: b.knowledge.vintagePolicy },
   };
 }
 
@@ -531,11 +531,11 @@ export class InMemoryMarketDataStore implements MarketDataStore {
     if (!d) return [];
     const asOf = parseUtc(q.asOf);
     const storedThrough = q.storedThrough ?? Number.POSITIVE_INFINITY;
-    const replay = q.replay ?? 'historical_reconstruction';
+    const replay = q.replay ?? 'historical_research';
     const from = q.from === undefined ? Number.NEGATIVE_INFINITY : parseUtc(q.from);
     const to = q.to === undefined ? Number.POSITIVE_INFINITY : parseUtc(q.to);
     const out: StoredBar[] = [];
-    const refused: Array<{ instrumentId: string; startTime: string; provenance: BarKnowledgeProvenance }> = [];
+    const refused: Array<{ instrumentId: string; startTime: string; provenance: string }> = [];
     for (const revisions of d.bars.values()) {
       const first = revisions[0]!;
       if (first.source !== q.source || first.interval !== q.interval || first.session !== q.session || first.adjustment !== q.adjustment) continue;
@@ -546,15 +546,17 @@ export class InMemoryMarketDataStore implements MarketDataStore {
       assertIntact('bar', barKey(v), barContentHash(v), v.contentHash);
       assertBarProvenanceIntact(v);
       if ((q.finalOnly ?? true) && !v.isFinal) continue;
-      const state = classifyVisibleBar(v, asOf);
-      if (state === 'not_yet_held') continue;
-      if (state === 'unproven' && replay === 'strict_point_in_time') {
-        refused.push({ instrumentId: v.instrumentId, startTime: v.startTime, provenance: knowledgeOf(v).provenance });
-        continue;
+      // Decision time: the revision must be proven and held by asOf. Legacy is refused; a revision held later is absent.
+      if (replay === 'decision_time') {
+        if (!hasKnownAt(knowledgeOf(v))) {
+          refused.push({ instrumentId: v.instrumentId, startTime: v.startTime, provenance: knowledgeOf(v).knowledgeSource });
+          continue;
+        }
+        if (!isKnownAt(v, asOf)) continue;
       }
       out.push(v);
     }
-    if (refused.length > 0) throw new BarVintageNotProvenError(refused);
+    if (refused.length > 0) throw new BarKnowledgeNotProvenError(refused);
     return out.sort((a, b) => parseUtc(a.startTime) - parseUtc(b.startTime));
   }
 

@@ -37,8 +37,8 @@ export interface QuantRunRequest {
   storedThrough?: number;
   useCase?: FreshnessUseCase;
   /**
-   * historical_reconstruction (default): unproven bars are used from their historical gate and the run says so (barDataProvenance).
-   * strict_point_in_time: a bar whose revision is not proven makes the read fail closed (BarVintageNotProvenError).
+   * historical_research (default): visibility by the market gate; bars NEXUS held only later are used and the run says so.
+   * decision_time: only bars NEXUS held at asOf; legacy bars make the read fail closed (BarKnowledgeNotProvenError).
    */
   replay?: BarReplayMode;
 }
@@ -54,7 +54,7 @@ export class QuantService {
     const instrument = this.deps.registry.get(request.instrumentId);
     if (!instrument) throw new Error('unknown instrument ' + request.instrumentId);
     const asOf = canonicalUtc(request.asOf);
-    const replay = request.replay ?? 'historical_reconstruction';
+    const replay = request.replay ?? 'historical_research';
     if (request.adjustment !== 'split_adjusted') {
       return this.deps.store.readBars({ instrumentId: request.instrumentId, source: request.source, interval: request.interval, session: request.session, adjustment: request.adjustment, asOf, storedThrough, replay, ...(request.from ? { from: request.from } : {}) });
     }
@@ -83,6 +83,7 @@ export class QuantService {
         bars,
         asOf: request.asOf,
         derivation: derivationOf(request.adjustment),
+        barReplay: request.replay ?? 'historical_research',
         sourceInfo: await this.deps.store.getSource(request.source),
         ...(request.parameters ? { parameters: request.parameters } : {}),
         ...(request.useCase ? { useCase: request.useCase } : {}),
@@ -102,10 +103,10 @@ export class QuantService {
     const r = stored.result;
     const instrument = this.deps.registry.get(r.instrumentId);
     if (!instrument) throw new Error('unknown instrument ' + r.instrumentId);
-    const request: QuantRunRequest = { instrumentId: r.instrumentId, source: r.series.source, interval: r.series.interval, session: r.series.session, adjustment: r.series.adjustment, asOf: r.asOf, parameters: r.parameters, storedThrough: stored.storedThrough };
+    const request: QuantRunRequest = { instrumentId: r.instrumentId, source: r.series.source, interval: r.series.interval, session: r.series.session, adjustment: r.series.adjustment, asOf: r.asOf, parameters: r.parameters, storedThrough: stored.storedThrough, replay: r.barReplay };
     const bars = await this.inputs(request, stored.storedThrough);
     const recomputed = computeQuant(
-      { instrument, calendar: calendarForInstrument(instrument), series: r.series, bars, asOf: r.asOf, parameters: r.parameters, useCase: r.useCase, ...(r.mode === 'include_in_progress' ? { includeInProgress: true } : {}), derivation: derivationOf(r.series.adjustment), sourceInfo: await this.deps.store.getSource(r.series.source) },
+      { instrument, calendar: calendarForInstrument(instrument), series: r.series, bars, asOf: r.asOf, parameters: r.parameters, useCase: r.useCase, ...(r.mode === 'include_in_progress' ? { includeInProgress: true } : {}), derivation: derivationOf(r.series.adjustment), barReplay: r.barReplay, sourceInfo: await this.deps.store.getSource(r.series.source) },
       { createdAt: r.createdAt },
     );
     const recomputedHash = quantResultHash(recomputed);

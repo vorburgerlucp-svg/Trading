@@ -96,14 +96,21 @@ export interface WarmupEntry {
 }
 
 /**
- * The revision knowledge of the bars a run used. strictPointInTime only when every bar is a proven revision NEXUS held by asOf.
- * A run with historical reconstruction bars may be valid research; it is never presented as strict point in time.
+ * The two questions about the bars a run used, answered separately (docs/BAR_KNOWLEDGE_EVIDENCE.md). No probabilities.
+ *   decisionTimeKnowledgeProven: every bar was held by NEXUS at asOf (proven source, knownAt <= asOf).
+ *   allBarsContemporaneousVintage: every bar was already the market's value at its time (vintage contemporaneous).
+ * A run can be decision-time proven and still rest on historical vintage (analysis today over backfilled history).
  */
 export interface QuantBarProvenance {
-  strictPointInTime: boolean;
+  decisionTimeKnowledgeProven: boolean;
+  allBarsContemporaneousVintage: boolean;
   historicalReconstruction: boolean;
   legacyUnproven: boolean;
-  provenBars: number;
+  /** The signal bar (the latest final bar) is contemporaneous. */
+  latestFinalBarContemporaneous: boolean;
+  barCount: number;
+  knownBars: number;
+  contemporaneousBars: number;
   historicalBars: number;
   legacyBars: number;
 }
@@ -124,6 +131,8 @@ export interface QuantResult {
   inputFingerprint: string;
   dataQuality: DataQualityResult;
   barDataProvenance: QuantBarProvenance;
+  /** The replay that produced the bars. A decision-time run is replayed in decision-time mode only. */
+  barReplay: 'historical_research' | 'decision_time';
   algorithmVersions: Record<string, string>;
   parameters: QuantParameters;
   indicators: QuantIndicators;
