@@ -15,7 +15,8 @@
     "test:live": "vitest run --project live",
     "bench": "vitest run --project bench",
     "test:watch": "vitest --project unit",
-    "check": "npm run typecheck && npm run test"
+    "check": "npm run typecheck && npm run test",
+    "check:fast": "npm run typecheck && vitest run --project unit && echo NOT A COMPLETE CHECK: PostgreSQL integration tests were not run. Full check: npm run check"
   },
   "devDependencies": {
     "@types/node": "26.6.4",

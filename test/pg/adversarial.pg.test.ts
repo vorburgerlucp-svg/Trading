@@ -188,7 +188,7 @@ describe.skipIf(!pgAvailable)('PostgreSQL adversarial' + (pgAvailable ? '' : ' (
 
   it('Migrationen: wiederholbar, Prüfsummen geschützt, destruktive Statements verweigert', async () => {
     const d = await fresh();
-    expect(await migrate(d.pool)).toEqual({ applied: [], alreadyApplied: [1, 2, 3, 4, 5] });
+    expect(await migrate(d.pool)).toEqual({ applied: [], alreadyApplied: [1, 2, 3, 4, 5, 6] });
     const edited = loadMigrations().map((m) => (m.version === 2 ? { ...m, sql: m.sql + '\n-- edited later', checksum: hashOf('edited') } : m));
     await expect(migrate(d.pool, edited)).rejects.toBeInstanceOf(MigrationError);
     await expect(migrate(d.pool, edited)).rejects.toThrow(/modified after it was applied/);

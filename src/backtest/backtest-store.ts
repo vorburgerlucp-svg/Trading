@@ -1,4 +1,5 @@
 import { hashOf } from '../persistence/canonical-json.js';
+import { isoMs, sealFor, verifySeal, type EvidenceSeal, type Sealed } from '../persistence/evidence-seal.js';
 import type { BacktestRunResult } from './backtest-types.js';
 
 export class BacktestRunConflictError extends Error {
@@ -38,10 +39,17 @@ export function verifyBacktestRun(run: BacktestRunResult): BacktestRunResult {
 export interface BacktestRunStore {
   save(run: BacktestRunResult): Promise<'APPLIED' | 'ALREADY_APPLIED'>;
   get(backtestRunId: string): Promise<BacktestRunResult | null>;
+  /** The run with its commit seal (null seal: stored before sealing existed, so its time is not provable). */
+  getSealed(backtestRunId: string): Promise<Sealed<BacktestRunResult> | null>;
 }
 
 export class InMemoryBacktestRunStore implements BacktestRunStore {
-  private readonly runs = new Map<string, { run: BacktestRunResult; hash: string }>();
+  private readonly runs = new Map<string, { run: BacktestRunResult; hash: string; seal: EvidenceSeal }>();
+  private readonly clock: () => Date;
+
+  constructor(options: { clock?: () => Date } = {}) {
+    this.clock = options.clock ?? (() => new Date());
+  }
 
   async save(run: BacktestRunResult): Promise<'APPLIED' | 'ALREADY_APPLIED'> {
     verifyBacktestRun(run);
@@ -51,14 +59,22 @@ export class InMemoryBacktestRunStore implements BacktestRunStore {
       if (existing.hash !== hash) throw new BacktestRunConflictError('backtest run already exists with different content');
       return 'ALREADY_APPLIED';
     }
-    this.runs.set(run.backtestRunId, { run, hash });
+    // Test double for the database: recordedAt is read before the "commit", sealedAt after it.
+    const recordedAt = isoMs(this.clock());
+    const sealedAt = isoMs(this.clock());
+    const seal = sealFor({ kind: 'backtest_run', recordId: run.backtestRunId, resultHash: hash, recordedAt, sealedAt });
+    this.runs.set(run.backtestRunId, { run, hash, seal });
     return 'APPLIED';
   }
 
-  async get(backtestRunId: string): Promise<BacktestRunResult | null> {
+  async getSealed(backtestRunId: string): Promise<Sealed<BacktestRunResult> | null> {
     const stored = this.runs.get(backtestRunId);
     if (!stored) return null;
     if (hashOf(stored.run) !== stored.hash) throw new BacktestRunIntegrityError('stored backtest run hash mismatch');
-    return verifyBacktestRun(stored.run);
+    return { record: verifyBacktestRun(stored.run), seal: verifySeal(stored.seal, { kind: 'backtest_run', recordId: backtestRunId, resultHash: stored.hash }) };
+  }
+
+  async get(backtestRunId: string): Promise<BacktestRunResult | null> {
+    return (await this.getSealed(backtestRunId))?.record ?? null;
   }
 }

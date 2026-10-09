@@ -71,4 +71,9 @@ export interface ScannerRun {
   rankingComplete: boolean;
   candidates: ScannerCandidate[];
   rejected: Array<{ instrumentId: string; reasons: string[] }>;
+  /**
+   * Latest availability time of any in-universe snapshot input (last price or average volume). null when there
+   * were no inputs. Absent in runs stored before market-scanner:v2: such a run's input time is not provable.
+   */
+  inputsAvailableAt?: string | null;
 }

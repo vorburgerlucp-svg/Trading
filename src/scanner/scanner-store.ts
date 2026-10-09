@@ -1,4 +1,5 @@
 import { hashOf } from '../persistence/canonical-json.js';
+import { isoMs, sealFor, verifySeal, type EvidenceSeal, type Sealed } from '../persistence/evidence-seal.js';
 import type { ScannerRun } from './scanner-types.js';
 
 export class ScannerRunConflictError extends Error {
@@ -39,10 +40,17 @@ export function verifyScannerRun(run: ScannerRun): ScannerRun {
 export interface ScannerRunStore {
   save(run: ScannerRun): Promise<'APPLIED' | 'ALREADY_APPLIED'>;
   get(scannerRunId: string): Promise<ScannerRun | null>;
+  /** The run with its commit seal (null seal: stored before sealing existed, so its time is not provable). */
+  getSealed(scannerRunId: string): Promise<Sealed<ScannerRun> | null>;
 }
 
 export class InMemoryScannerRunStore implements ScannerRunStore {
-  private readonly runs = new Map<string, { run: ScannerRun; hash: string }>();
+  private readonly runs = new Map<string, { run: ScannerRun; hash: string; seal: EvidenceSeal }>();
+  private readonly clock: () => Date;
+
+  constructor(options: { clock?: () => Date } = {}) {
+    this.clock = options.clock ?? (() => new Date());
+  }
 
   async save(run: ScannerRun): Promise<'APPLIED' | 'ALREADY_APPLIED'> {
     verifyScannerRun(run);
@@ -52,14 +60,22 @@ export class InMemoryScannerRunStore implements ScannerRunStore {
       if (existing.hash !== hash) throw new ScannerRunConflictError('scanner run already exists with different content');
       return 'ALREADY_APPLIED';
     }
-    this.runs.set(run.scannerRunId, { run, hash });
+    // Test double for the database: recordedAt is read before the "commit", sealedAt after it.
+    const recordedAt = isoMs(this.clock());
+    const sealedAt = isoMs(this.clock());
+    const seal = sealFor({ kind: 'scanner_run', recordId: run.scannerRunId, resultHash: hash, recordedAt, sealedAt });
+    this.runs.set(run.scannerRunId, { run, hash, seal });
     return 'APPLIED';
   }
 
-  async get(scannerRunId: string): Promise<ScannerRun | null> {
+  async getSealed(scannerRunId: string): Promise<Sealed<ScannerRun> | null> {
     const stored = this.runs.get(scannerRunId);
     if (!stored) return null;
     if (hashOf(stored.run) !== stored.hash) throw new ScannerRunIntegrityError('stored scanner run hash mismatch');
-    return verifyScannerRun(stored.run);
+    return { record: verifyScannerRun(stored.run), seal: verifySeal(stored.seal, { kind: 'scanner_run', recordId: scannerRunId, resultHash: stored.hash }) };
+  }
+
+  async get(scannerRunId: string): Promise<ScannerRun | null> {
+    return (await this.getSealed(scannerRunId))?.record ?? null;
   }
 }

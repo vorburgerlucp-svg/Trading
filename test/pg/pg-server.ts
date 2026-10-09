@@ -37,8 +37,25 @@ function freePort(): Promise<number> {
   });
 }
 
-/** Locates the PostgreSQL binaries and copies them to a plain temp directory (works around sandboxed/virtualized app folders). */
+/** Shown whenever the platform package cannot be found, because this is the most common cause on Windows. */
+export const PG_WINDOWS_PATH_HINT =
+  'Windows: npm silently skips an optional package it cannot extract, and a repository path longer than 260 characters makes that happen. ' +
+  'Move the repository to a shorter path, or enable Windows long paths yourself (system setting, not changed by this project). ' +
+  'Alternatively point NEXUS_PG_BIN_DIR at the bin directory of a PostgreSQL 17 installation.';
+
+/**
+ * Locates the PostgreSQL binaries and copies them to a plain temp directory (works around sandboxed/virtualized app folders).
+ * NEXUS_PG_BIN_DIR, if set, is used instead of the platform package. It must contain postgres and initdb.
+ */
 function binaries(): string {
+  const override = process.env.NEXUS_PG_BIN_DIR?.trim();
+  const exe = process.platform === 'win32' ? '.exe' : '';
+  if (override) {
+    if (!existsSync(join(override, 'postgres' + exe)) || !existsSync(join(override, 'initdb' + exe))) {
+      throw new Error('NEXUS_PG_BIN_DIR does not contain postgres and initdb: ' + override);
+    }
+    return override;
+  }
   const require = createRequire(import.meta.url);
   const platform = process.platform === 'win32' ? 'windows' : process.platform;
   const pkg = '@embedded-postgres/' + platform + '-' + process.arch;
@@ -47,10 +64,9 @@ function binaries(): string {
     // The package only exports dist/index.js; the binaries live next to it in ../native.
     native = join(dirname(require.resolve(pkg)), '..', 'native');
   } catch {
-    throw new Error('PostgreSQL binaries for ' + process.platform + '-' + process.arch + ' are not installed (' + pkg + ')');
+    throw new Error('PostgreSQL binaries for ' + process.platform + '-' + process.arch + ' are not installed (' + pkg + '). ' + PG_WINDOWS_PATH_HINT);
   }
   const target = join(tmpdir(), 'nexus-pg-bin-' + process.platform + '-' + process.arch);
-  const exe = process.platform === 'win32' ? '.exe' : '';
   if (!existsSync(join(target, 'bin', 'postgres' + exe))) cpSync(native, target, { recursive: true });
   return join(target, 'bin');
 }

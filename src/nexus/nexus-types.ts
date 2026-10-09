@@ -1,7 +1,7 @@
 import type { DecisionRecord, FinalAction } from '../audit/decision-records.js';
 import type { ModelCapability, CouncilRole, Domain, ModelKey, ModelOpinion, Recommendation, RiskFlag, Stance, Subtask } from '../ai/model-types.js';
 import type { Rappen } from '../money/money.js';
-import type { EvidenceIssue, EvidenceLineage } from './evidence-validation.js';
+import type { EvidenceIssue, EvidenceLineage, EvidenceReasonCode, EvidenceSealSummary } from './evidence-validation.js';
 
 export type Importance = 'low' | 'medium' | 'high' | 'critical';
 
@@ -176,8 +176,11 @@ export interface NexusDecision {
   execution: ExecutionGateResult;
   reasons: string[];
   consensus: ConsensusResult;
-  /** Validated evidence lineage and non-blocking warnings (weak backtests, incomplete universe). */
-  evidence: { lineage: EvidenceLineage; warnings: EvidenceIssue[] };
+  /**
+   * Validated evidence: identity lineage, commit seals (audit only), non-blocking warnings, and the
+   * reason codes the evidence imposed on the outcome (impact). Weak evidence shows up here, never as strength.
+   */
+  evidence: { lineage: EvidenceLineage; seals: EvidenceSealSummary[]; warnings: EvidenceIssue[]; impact: EvidenceReasonCode[] };
 }
 
 /**

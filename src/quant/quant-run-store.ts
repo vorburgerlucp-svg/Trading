@@ -3,6 +3,7 @@
 // result means the engine is not deterministic or an algorithm changed without a version bump —
 // that is refused loudly (QuantRunConflictError), never overwritten.
 
+import { isoMs, sealFor, verifySeal, type EvidenceSeal, type Sealed } from '../persistence/evidence-seal.js';
 import { decodeJson, encodeJson } from '../persistence/json-codec.js';
 import { quantResultHash } from './quant-engine.js';
 import type { QuantResult, QuantRunRecord } from './quant-types.js';
@@ -20,6 +21,8 @@ export class QuantRunIntegrityError extends Error {
 export interface QuantRunStore {
   save(record: QuantRunRecord): Promise<'APPLIED' | 'ALREADY_APPLIED'>;
   get(quantRunId: string): Promise<QuantRunRecord | null>;
+  /** The run with its commit seal (null seal: stored before sealing existed, so its time is not provable). */
+  getSealed(quantRunId: string): Promise<Sealed<QuantRunRecord> | null>;
   list(filter?: { instrumentId?: string }): Promise<QuantRunRecord[]>;
 }
 
@@ -34,29 +37,44 @@ export function verifyRunRecord(record: QuantRunRecord): QuantRunRecord {
 }
 
 export class InMemoryQuantRunStore implements QuantRunStore {
-  private readonly runs = new Map<string, string>();
+  private readonly runs = new Map<string, { raw: string; seal: EvidenceSeal }>();
+  private readonly clock: () => Date;
+
+  constructor(options: { clock?: () => Date } = {}) {
+    this.clock = options.clock ?? (() => new Date());
+  }
 
   async save(record: QuantRunRecord): Promise<'APPLIED' | 'ALREADY_APPLIED'> {
     verifyRunRecord(record);
     const existing = this.runs.get(record.result.quantRunId);
     if (existing) {
-      const stored = decodeJson(JSON.parse(existing)) as QuantRunRecord;
+      const stored = decodeJson(JSON.parse(existing.raw)) as QuantRunRecord;
       if (stored.resultHash !== record.resultHash) throw new QuantRunConflictError('quant run ' + record.result.quantRunId + ' already exists with a different result (non-determinism or unversioned algorithm change)');
       return 'ALREADY_APPLIED';
     }
+    // Test double for the database: recordedAt is read before the "commit", sealedAt after it.
+    const recordedAt = isoMs(this.clock());
+    const sealedAt = isoMs(this.clock());
+    const seal = sealFor({ kind: 'quant_run', recordId: record.result.quantRunId, resultHash: record.resultHash, recordedAt, sealedAt });
     // Stored serialized (like the database) so callers cannot mutate the audit record afterwards.
-    this.runs.set(record.result.quantRunId, JSON.stringify(encodeJson(record)));
+    this.runs.set(record.result.quantRunId, { raw: JSON.stringify(encodeJson(record)), seal });
     return 'APPLIED';
   }
 
+  async getSealed(quantRunId: string): Promise<Sealed<QuantRunRecord> | null> {
+    const stored = this.runs.get(quantRunId);
+    if (!stored) return null;
+    const record = verifyRunRecord(decodeJson(JSON.parse(stored.raw)) as QuantRunRecord);
+    return { record, seal: verifySeal(stored.seal, { kind: 'quant_run', recordId: quantRunId, resultHash: record.resultHash }) };
+  }
+
   async get(quantRunId: string): Promise<QuantRunRecord | null> {
-    const raw = this.runs.get(quantRunId);
-    return raw ? verifyRunRecord(decodeJson(JSON.parse(raw)) as QuantRunRecord) : null;
+    return (await this.getSealed(quantRunId))?.record ?? null;
   }
 
   async list(filter: { instrumentId?: string } = {}): Promise<QuantRunRecord[]> {
     const out: QuantRunRecord[] = [];
-    for (const raw of this.runs.values()) {
+    for (const { raw } of this.runs.values()) {
       const r = verifyRunRecord(decodeJson(JSON.parse(raw)) as QuantRunRecord);
       if (filter.instrumentId === undefined || r.result.instrumentId === filter.instrumentId) out.push(r);
     }

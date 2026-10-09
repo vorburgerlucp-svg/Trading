@@ -36,7 +36,7 @@ import { toUntrustedBlock } from '../security/untrusted-input.js';
 import { AiRouter, DEFAULT_ROUTER_CONFIG, type RouterConfig } from './ai-router.js';
 import { buildConsensus } from './consensus-engine.js';
 import { assessRiskFlags } from './critic.js';
-import { EvidenceReferenceError, validateEvidenceReferences, type EvidenceReaders, type EvidenceValidation } from './evidence-validation.js';
+import { evidenceDecisionImpact, EvidenceReferenceError, validateEvidenceReferences, type EvidenceReaders, type EvidenceReasonCode, type EvidenceValidation } from './evidence-validation.js';
 import type { AiTask, AttemptRecord, AuthoredRiskFlag, CapitalDecision, ConsensusResult, DecisionOutcome, DecisionTrace, NexusDecision, QuantAssessment, TaskPlan } from './nexus-types.js';
 import { executionGate, isFinancialBucket, type SafetyConfig } from './safety.js';
 import { TaskManager } from './task-manager.js';
@@ -98,6 +98,15 @@ export interface DecisionRequest {
   requiresQuant?: boolean;
   /** The decision assumes a ranking of the full universe; an incomplete scanner ranking then fails closed. */
   requiresCompleteUniverse?: boolean;
+  /** The decision needs strong backtest evidence (grade A, sufficient sample). Weak evidence never meets this. */
+  requiresStrongBacktest?: boolean;
+}
+
+/** A decision refused on evidence before any decision cycle ran. Its refusal is recorded as REJECT. */
+export interface EvidenceRejection {
+  record: DecisionRecord;
+  reasonCodes: string[];
+  evidence: EvidenceValidation;
 }
 
 export class NexusBrainError extends Error {
@@ -153,10 +162,25 @@ export class NexusBrain {
       this.deps.evidenceReaders ?? {},
     );
     if (!evidenceValidation.passed) {
-      // Refused before any write. The task and the blocking reasons stay in the audit trail.
-      await emit('TASK_CREATED', { task, question: request.question, outcome: 'REJECTED_EVIDENCE', evidenceValidation });
+      // Refused before any write. No task entered the decision cycle, so the refusal is recorded as the decision it is:
+      // REJECT, with the blocking reason codes, in the audit trail and the decision records.
+      const reasonCodes = [...new Set(evidenceValidation.blocking.map((i) => i.code))].sort();
+      await emit('DECISION_RECORDED', { outcome: 'REJECTED_EVIDENCE', finalAction: 'REJECT', reasonCodes, evidenceValidation });
+      await this.deps.decisions.save({
+        decisionId,
+        taskId: task.id,
+        createdAt: this.deps.clock().toISOString(),
+        asOf,
+        inputFingerprint: hashOf({ task, question: request.question, asOf, evidenceLineage: evidenceValidation.lineage, refusedWith: reasonCodes }),
+        evidenceRefs: [],
+        modelRuns: [],
+        finalAction: 'REJECT',
+        reasonCodes,
+      });
       throw new EvidenceReferenceError(evidenceValidation);
     }
+    // What the validated evidence does to the outcome: weak evidence never supports a RECOMMEND on its own.
+    const evidenceImpact = evidenceDecisionImpact(evidenceValidation.lineage, request.requiresStrongBacktest === true);
 
     // 1. Inputs, point-in-time. Look-ahead evidence is excluded; external text is quoted / quarantined.
     const keyIds = request.keyEvidenceIds ?? [];
@@ -242,7 +266,7 @@ export class NexusBrain {
       potentialCapitalImpactChf,
       opportunity: opportunity ? { id: opportunity.id, type: opportunity.type, bucket: opportunity.bucket, status: opportunity.status } : null,
       security,
-      evidenceReferences: { lineage: evidenceValidation.lineage, warnings: evidenceValidation.warnings },
+      evidenceReferences: { lineage: evidenceValidation.lineage, warnings: evidenceValidation.warnings, seals: evidenceValidation.seals, impact: evidenceImpact },
     });
 
     let quantResultRef: string | undefined;
@@ -373,11 +397,11 @@ export class NexusBrain {
     // 7. Outcome, approval, execution gate.
     let outcome: DecisionOutcome;
     if (!opportunity) outcome = 'ANALYSIS_ONLY';
-    else outcome = consensus.execution === 'PROCEED_TO_RISK' && consensus.recommendation === 'buy' && risk.passed && (capital?.recommendedChf ?? 0n) > 0n ? 'RECOMMEND' : 'NO_ACTION';
+    else outcome = consensus.execution === 'PROCEED_TO_RISK' && consensus.recommendation === 'buy' && risk.passed && (capital?.recommendedChf ?? 0n) > 0n && evidenceImpact.length === 0 ? 'RECOMMEND' : 'NO_ACTION';
     const requiresHumanApproval = outcome === 'RECOMMEND' && approvalReasons.length > 0;
     const execGate = executionGate({ outcome, bucket: opportunity?.bucket ?? null, safety: this.deps.safety });
     const reasons = [...new Set([...consensus.blockingReasons, ...(consensus.execution === 'PROCEED_TO_RISK' ? risk.reasons : [])])];
-    const { finalAction, reasonCodes } = classify(outcome, consensus, risk, capital, requiresHumanApproval);
+    const { finalAction, reasonCodes } = classify(outcome, consensus, risk, capital, requiresHumanApproval, evidenceImpact);
 
     let humanApprovalRef: string | undefined;
     if (requiresHumanApproval) humanApprovalRef = await emit('HUMAN_APPROVAL', { required: true, status: 'pending', reasons: approvalReasons });
@@ -401,7 +425,7 @@ export class NexusBrain {
       execution: execGate,
       reasons,
       consensus,
-      evidence: { lineage: evidenceValidation.lineage, warnings: evidenceValidation.warnings },
+      evidence: { lineage: evidenceValidation.lineage, seals: evidenceValidation.seals, warnings: evidenceValidation.warnings, impact: evidenceImpact },
     };
     await emit('DECISION_RECORDED', decision);
 
@@ -459,11 +483,23 @@ export class NexusBrain {
     return this.deps.decisions.get(decisionId);
   }
 
-  /** Full reconstruction of a decision from its DecisionRecord and audit events. */
+  /** Audit view of a decision refused on evidence before any decision cycle ran. */
+  rejection(decisionId: string): EvidenceRejection | undefined {
+    const record = this.deps.decisions.get(decisionId);
+    const refusal = this.deps.audit.byDecision(decisionId).find((e) => e.type === 'DECISION_RECORDED' && (e.payload as { outcome?: string }).outcome === 'REJECTED_EVIDENCE');
+    if (!record || !refusal) return undefined;
+    const payload = refusal.payload as { reasonCodes: string[]; evidenceValidation: EvidenceValidation };
+    return { record, reasonCodes: payload.reasonCodes, evidence: payload.evidenceValidation };
+  }
+
+  /** Full reconstruction of a decision from its DecisionRecord and audit events. Not available for evidence refusals: see rejection(). */
   trace(decisionId: string): DecisionTrace | undefined {
     const record = this.deps.decisions.get(decisionId);
     if (!record) return undefined;
     const events = this.deps.audit.byDecision(decisionId);
+    if (events.some((e) => e.type === 'DECISION_RECORDED' && (e.payload as { outcome?: string }).outcome === 'REJECTED_EVIDENCE')) {
+      throw new NexusBrainError('decision ' + decisionId + ' was refused on evidence before any decision cycle; use rejection()');
+    }
     const one = <P>(type: AuditEventType): P | undefined => events.find((e) => e.type === type)?.payload as P | undefined;
     const all = <P>(type: AuditEventType): P[] => events.filter((e) => e.type === type).map((e) => e.payload as P);
     const created = one<{ task: AiTask; question: string; plan: TaskPlan; inputs: Omit<DecisionTrace['inputs'], 'quant' | 'evidenceLineage'>; security: DecisionTrace['security']; evidenceReferences: Pick<EvidenceValidation, 'lineage' | 'warnings'> }>('TASK_CREATED');
@@ -513,8 +549,9 @@ function classify(
   risk: { passed: boolean },
   capital: CapitalDecision | null,
   requiresHumanApproval: boolean,
+  evidenceImpact: EvidenceReasonCode[],
 ): { finalAction: FinalAction; reasonCodes: string[] } {
-  const codes = new Set(consensus.blockingCodes);
+  const codes = new Set<string>([...consensus.blockingCodes, ...evidenceImpact]);
   if (outcome === 'ANALYSIS_ONLY') return { finalAction: 'NO_ACTION', reasonCodes: [...codes, 'ANALYSIS_ONLY'] };
   if (outcome === 'RECOMMEND') return { finalAction: 'RECOMMEND', reasonCodes: requiresHumanApproval ? ['HUMAN_APPROVAL_REQUIRED'] : [] };
   if (consensus.execution === 'PROCEED_TO_RISK' && !risk.passed) {

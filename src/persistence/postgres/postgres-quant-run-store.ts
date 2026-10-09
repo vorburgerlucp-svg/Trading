@@ -3,7 +3,9 @@
 
 import { QuantRunConflictError, verifyRunRecord, type QuantRunStore } from '../../quant/quant-run-store.js';
 import type { QuantRunRecord } from '../../quant/quant-types.js';
+import type { Sealed } from '../evidence-seal.js';
 import { decodeJson, encodeJson } from '../json-codec.js';
+import { databaseClock, readSeal, sealCommittedRun } from './postgres-scanner-backtest-store.js';
 import type { PgPool } from './pool.js';
 
 export class PostgresQuantRunStore implements QuantRunStore {
@@ -12,10 +14,12 @@ export class PostgresQuantRunStore implements QuantRunStore {
   async save(record: QuantRunRecord): Promise<'APPLIED' | 'ALREADY_APPLIED'> {
     verifyRunRecord(record);
     const r = record.result;
+    // Single statement (autocommit). recordedAt is read before it: a lower bound on the commit time.
+    const recordedAt = await databaseClock(this.pool);
     const inserted = await this.pool.query(
       `INSERT INTO quant_runs (quant_run_id, instrument_id, source_id, bar_interval, session, adjustment, as_of, mode, use_case, stored_through, input_start, input_end, bar_count,
-         input_fingerprint, engine_version, algorithm_versions, quality_severity, insufficient_data, result, result_hash, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19::jsonb, $20, $21)
+         input_fingerprint, engine_version, algorithm_versions, quality_severity, insufficient_data, result, result_hash, created_at, recorded_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19::jsonb, $20, $21, $22::timestamptz)
        ON CONFLICT (quant_run_id) DO NOTHING`,
       [
         r.quantRunId,
@@ -39,9 +43,14 @@ export class PostgresQuantRunStore implements QuantRunStore {
         JSON.stringify(encodeJson(r)),
         record.resultHash,
         record.createdAt,
+        recordedAt,
       ],
     );
-    if (inserted.rowCount === 1) return 'APPLIED';
+    if (inserted.rowCount === 1) {
+      // After the commit (autocommit above): sealedAt is an upper bound on the commit time.
+      await sealCommittedRun(this.pool, 'quant_run', r.quantRunId, record.resultHash, recordedAt);
+      return 'APPLIED';
+    }
     const existing = (await this.pool.query<{ result_hash: string }>('SELECT result_hash FROM quant_runs WHERE quant_run_id = $1', [r.quantRunId])).rows[0];
     if (existing?.result_hash !== record.resultHash) throw new QuantRunConflictError('quant run ' + r.quantRunId + ' already exists with a different result (non-determinism or unversioned algorithm change)');
     return 'ALREADY_APPLIED';
@@ -57,13 +66,18 @@ export class PostgresQuantRunStore implements QuantRunStore {
   }
 
   async get(quantRunId: string): Promise<QuantRunRecord | null> {
+    return (await this.getSealed(quantRunId))?.record ?? null;
+  }
+
+  async getSealed(quantRunId: string): Promise<Sealed<QuantRunRecord> | null> {
     const row = (
       await this.pool.query<{ result: unknown; result_hash: string; stored_through_text: string | null; created_at: Date }>(
         'SELECT result, result_hash, stored_through::text AS stored_through_text, created_at FROM quant_runs WHERE quant_run_id = $1',
         [quantRunId],
       )
     ).rows[0];
-    return row ? this.toRecord(row) : null;
+    if (!row) return null;
+    return { record: this.toRecord(row), seal: await readSeal(this.pool, 'quant_run', quantRunId, row.result_hash) };
   }
 
   async list(filter: { instrumentId?: string } = {}): Promise<QuantRunRecord[]> {

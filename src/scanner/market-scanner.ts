@@ -1,10 +1,12 @@
 import { hashOf } from '../persistence/canonical-json.js';
-import { parseUtc } from '../market-data/time.js';
+import { parseUtc, toUtcIso } from '../market-data/time.js';
 import { evaluateScannerFilter, scannerRankingScore } from './scanner-filters.js';
 import type { ScannerCandidate, ScannerCoverage, ScannerDefinition, ScannerRun, ScannerSnapshot } from './scanner-types.js';
 import type { UniverseSnapshot } from './universe.js';
 
-export const MARKET_SCANNER_VERSION = 'market-scanner:v1';
+// v2 adds inputsAvailableAt to the stored run. The version is part of the input fingerprint, so the same inputs get
+// a new scannerRunId under v2. A v1 run is never re-stored with different content under its old id.
+export const MARKET_SCANNER_VERSION = 'market-scanner:v2';
 
 export function runMarketScanner(definition: ScannerDefinition, universe: UniverseSnapshot, snapshots: readonly ScannerSnapshot[], asOf: string): ScannerRun {
   if (definition.universeId !== universe.universeId) throw new Error('scanner universe does not match universe snapshot');
@@ -14,6 +16,7 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
   const rejected: Array<{ instrumentId: string; reasons: string[] }> = [];
   const accepted: Array<{ snapshot: ScannerSnapshot; passed: string[]; failed: string[]; score: number }> = [];
   const auditInputs: Array<[string, string, string, string, string, string | null, string | null]> = [];
+  let inputsAvailableMs: number | null = null;
 
   const counts = new Map<string, number>();
   for (const snapshot of snapshots) {
@@ -37,6 +40,10 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
       snapshot.averageVolume?.toString() ?? null,
       snapshot.averageVolumeAvailableAt ?? null,
     ]);
+    // Every unique in-universe input counts, also a rejected one: a future input stays visible and blocks the run for decisions.
+    for (const availableAt of [snapshot.lastPriceAvailableAt, snapshot.averageVolumeAvailableAt]) {
+      if (availableAt !== undefined) inputsAvailableMs = Math.max(inputsAvailableMs ?? Number.NEGATIVE_INFINITY, parseUtc(availableAt));
+    }
     const reasons: string[] = [];
     if (snapshot.quant.instrumentId !== snapshot.instrumentId) reasons.push('quant instrument mismatch');
     if (snapshot.quant.series.interval !== definition.interval) reasons.push('quant interval does not match scanner interval');
@@ -127,5 +134,6 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
     rankingComplete: coverage.complete,
     candidates,
     rejected,
+    inputsAvailableAt: inputsAvailableMs === null ? null : toUtcIso(inputsAvailableMs),
   };
 }

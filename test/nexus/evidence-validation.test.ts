@@ -4,6 +4,7 @@ import type { BacktestFill, BacktestRunResult, BacktestTrade } from '../../src/b
 import type { CostModelConfig } from '../../src/backtest/cost-model.js';
 import {
   EvidenceReferenceError,
+  evidenceDecisionImpact,
   readOnlyBacktestEvidence,
   readOnlyScannerEvidence,
   validateEvidenceReferences,
@@ -12,6 +13,7 @@ import {
 import type { QuantAssessment } from '../../src/nexus/nexus-types.js';
 import { Decimal } from '../../src/money/decimal.js';
 import { hashOf } from '../../src/persistence/canonical-json.js';
+import { sealFor, verifySeal } from '../../src/persistence/evidence-seal.js';
 import type { QuantRunRecord } from '../../src/quant/quant-types.js';
 import { InMemoryScannerRunStore } from '../../src/scanner/scanner-store.js';
 import type { ScannerCandidate, ScannerRun } from '../../src/scanner/scanner-types.js';
@@ -36,7 +38,7 @@ function quantRun(c: string, instrumentId = 'AAPL', asOf = T0): QuantRunRecord {
   return { result: { quantRunId: quantId(c), instrumentId, asOf, series: { interval: '1d' } }, resultHash: 'test', storedThrough: null, createdAt: asOf } as unknown as QuantRunRecord;
 }
 
-function scannerRun(o: { c: string; asOf?: string; candidates: { instrumentId: string; quantRunId: string }[]; rankingComplete?: boolean }): ScannerRun {
+function scannerRun(o: { c: string; asOf?: string; candidates: { instrumentId: string; quantRunId: string }[]; rankingComplete?: boolean; inputsAvailableAt?: string | null }): ScannerRun {
   const asOf = o.asOf ?? T0;
   const complete = o.rankingComplete ?? true;
   const scannerRunId = scannerId(o.c);
@@ -73,6 +75,7 @@ function scannerRun(o: { c: string; asOf?: string; candidates: { instrumentId: s
     rankingComplete: complete,
     candidates,
     rejected: [],
+    inputsAvailableAt: o.inputsAvailableAt === undefined ? '2026-09-30T08:00:00.000Z' : o.inputsAvailableAt,
   };
 }
 
@@ -132,17 +135,25 @@ function backtestRun(o: { c: string; instrumentId?: string; grade?: BacktestRunR
   };
 }
 
+/** A commit clock that reads one hour before the decision time, so stored runs are available at T0. */
+const committedBeforeAsOf = (): (() => Date) => {
+  const at = new Date(Date.parse(T0) - 3_600_000);
+  return () => at;
+};
+
 /** Read-only readers over real in-memory stores (save verifies the run exactly as production does). */
-async function readersWith(runs: { scanner?: ScannerRun[]; backtests?: BacktestRunResult[]; quant?: QuantRunRecord[] }): Promise<EvidenceReaders> {
-  const scannerStore = new InMemoryScannerRunStore();
+async function readersWith(runs: { scanner?: ScannerRun[]; backtests?: BacktestRunResult[]; quant?: QuantRunRecord[] }, clock: () => Date = committedBeforeAsOf()): Promise<EvidenceReaders> {
+  const scannerStore = new InMemoryScannerRunStore({ clock });
   for (const r of runs.scanner ?? []) await scannerStore.save(r);
-  const backtestStore = new InMemoryBacktestRunStore();
+  const backtestStore = new InMemoryBacktestRunStore({ clock });
   for (const r of runs.backtests ?? []) await backtestStore.save(r);
-  const quantById = new Map((runs.quant ?? []).map((q) => [q.result.quantRunId, q] as const));
+  // Test double for the quant store: its own integrity checks are covered by their suites. The seal is the same as the store would write.
+  const before = new Date(Date.parse(T0) - 3_600_000).toISOString();
+  const quantById = new Map((runs.quant ?? []).map((q) => [q.result.quantRunId, { record: q, seal: sealFor({ kind: 'quant_run', recordId: q.result.quantRunId, resultHash: 'test', recordedAt: before, sealedAt: before }) }] as const));
   return {
     scanner: readOnlyScannerEvidence(scannerStore),
     backtest: readOnlyBacktestEvidence(backtestStore),
-    quant: { get: async (id: string) => quantById.get(id) ?? null },
+    quant: { getSealed: async (id: string) => quantById.get(id) ?? null },
   };
 }
 
@@ -164,11 +175,14 @@ describe('Evidence reference validation (NEXUS Brain, read-only, fail closed)', 
     expect(error).toBeInstanceOf(EvidenceReferenceError);
     expect((error as EvidenceReferenceError).codes).toEqual(['SCANNER_EVIDENCE_NOT_FOUND']);
     expect(ctx.blackboard.entries(t.id)).toHaveLength(0);
-    // The refusal is audited with its blocking reason, and no decision record exists for it.
-    const rejected = ctx.audit.all().filter((e) => e.taskId === t.id);
-    expect(rejected.map((e) => e.type)).toEqual(['TASK_CREATED']);
-    expect(rejected[0]?.payload).toMatchObject({ outcome: 'REJECTED_EVIDENCE', evidenceValidation: { passed: false, blocking: [{ code: 'SCANNER_EVIDENCE_NOT_FOUND' }] } });
-    expect(ctx.decisions.get(rejected[0]!.decisionId!)).toBeUndefined();
+    // The refusal is recorded as a REJECT decision with its blocking reason. No task entered the cycle (no TASK_CREATED).
+    const refused = ctx.audit.all().filter((e) => e.taskId === t.id);
+    expect(refused.map((e) => e.type)).toEqual(['DECISION_RECORDED']);
+    expect(refused[0]?.payload).toMatchObject({ outcome: 'REJECTED_EVIDENCE', finalAction: 'REJECT', reasonCodes: ['SCANNER_EVIDENCE_NOT_FOUND'] });
+    const decisionId = refused[0]!.decisionId!;
+    expect(ctx.decisions.get(decisionId)).toMatchObject({ finalAction: 'REJECT', reasonCodes: ['SCANNER_EVIDENCE_NOT_FOUND'] });
+    expect(ctx.brain.rejection(decisionId)).toMatchObject({ reasonCodes: ['SCANNER_EVIDENCE_NOT_FOUND'], evidence: { passed: false } });
+    expect(() => ctx.brain.trace(decisionId)).toThrow(/rejection\(\)/);
   });
 
   it('Phantom Backtest: nicht existierende backtestRunId wird abgelehnt', async () => {
@@ -196,8 +210,14 @@ describe('Evidence reference validation (NEXUS Brain, read-only, fail closed)', 
       scanner: { scannerRunId: scannerId('3'), candidate: { instrumentId: 'AAPL', rank: 1, quantRunId: quantId('1') } },
       backtests: [{ backtestRunId: backtestId('4'), instrumentId: 'AAPL', strength: 'strong' }],
     });
-    // Coverage is only ever reported, never upgraded into a claim of a complete universe.
-    expect(decision.evidence.warnings.map((w) => w.code)).toEqual(expect.arrayContaining(['BACKTEST_RECORDING_TIME_NOT_RECORDED']));
+    // A complete, sealed, available lineage with a strong backtest carries no warnings and no outcome impact.
+    expect(decision.evidence.warnings).toEqual([]);
+    expect(decision.evidence.impact).toEqual([]);
+    expect(decision.evidence.seals).toEqual([
+      expect.objectContaining({ kind: 'backtest_run', recordId: backtestId('4') }),
+      expect.objectContaining({ kind: 'quant_run', recordId: quantId('1') }),
+      expect.objectContaining({ kind: 'scanner_run', recordId: scannerId('3') }),
+    ]);
     const created = ctx.audit.byDecision(decision.decisionId).find((e) => e.type === 'TASK_CREATED');
     expect(created?.payload).toMatchObject({ evidenceReferences: { lineage: { instrumentId: 'AAPL' } } });
     expect(ctx.brain.trace(decision.decisionId)?.inputs.evidenceLineage).toEqual(decision.evidence.lineage);
@@ -267,7 +287,7 @@ describe('Evidence reference validation (NEXUS Brain, read-only, fail closed)', 
   });
 
   it('Store-Integritätsfehler wird als Reason Code gemeldet, nicht als „gefunden“ behandelt', async () => {
-    const corrupt: EvidenceReaders = { scanner: { get: async () => { throw new Error('stored scanner run hash mismatch'); } } };
+    const corrupt: EvidenceReaders = { scanner: { getSealed: async () => { throw new Error('stored scanner run hash mismatch'); } } };
     const result = await validateEvidenceReferences({ asOf: T0, quantRunId: undefined, scannerRunId: scannerId('3'), backtestRunIds: undefined, opportunityInstrumentId: undefined, requiresCompleteUniverse: false }, corrupt);
     expect(result.passed).toBe(false);
     expect(result.blocking.map((i) => i.code)).toEqual(['SCANNER_EVIDENCE_INTEGRITY_FAILED']);
@@ -276,7 +296,7 @@ describe('Evidence reference validation (NEXUS Brain, read-only, fail closed)', 
   it('Der Brain bekommt nur get(): Lese-Interfaces sind eingefroren und haben keine Schreibmethoden', async () => {
     const store = new InMemoryBacktestRunStore();
     const reader = readOnlyBacktestEvidence(store);
-    expect(Object.keys(reader)).toEqual(['get']);
+    expect(Object.keys(reader)).toEqual(['getSealed']);
     expect(Object.isFrozen(reader)).toBe(true);
   });
 
@@ -304,6 +324,77 @@ describe('Evidence reference validation (NEXUS Brain, read-only, fail closed)', 
 
   it('Ein nicht lesbares asOf schlägt fail closed fehl und lässt Future-Prüfungen nicht still durch', async () => {
     await expect(validateEvidenceReferences({ asOf: 'not-a-time', quantRunId: undefined, scannerRunId: undefined, backtestRunIds: undefined, opportunityInstrumentId: undefined, requiresCompleteUniverse: false }, {})).rejects.toThrow(/ISO asOf/);
+  });
+
+  it('Ergebnis nach asOf gespeichert wird für diesen historischen Zeitpunkt abgelehnt', async () => {
+    const lateClock = () => new Date(Date.parse(T0) + 3_600_000);
+    const readers = await readersWith({ scanner: [scannerRun({ c: '3', candidates: [{ instrumentId: 'AAPL', quantRunId: quantId('1') }] })], quant: [quantRun('1')] }, lateClock);
+    const result = await validateEvidenceReferences({ asOf: T0, quantRunId: quantId('1'), scannerRunId: scannerId('3'), backtestRunIds: undefined, opportunityInstrumentId: undefined, requiresCompleteUniverse: false }, readers);
+    expect(result.passed).toBe(false);
+    expect(result.blocking.map((i) => i.code)).toEqual(['RESULT_RECORDED_AFTER_ASOF']);
+  });
+
+  it('Commit-Lücke: recordedAt vor asOf, sealedAt danach → Verfügbarkeit ist nicht nachgewiesen', async () => {
+    // recordedAt is read before the commit, sealedAt after it. Only the pair proves availability.
+    const readings = [new Date(Date.parse(T0) - 60_000), new Date(Date.parse(T0) + 60_000)];
+    const readers = await readersWith({ scanner: [scannerRun({ c: '3', candidates: [{ instrumentId: 'AAPL', quantRunId: quantId('1') }] })] }, () => readings.shift() ?? new Date(Date.parse(T0) + 120_000));
+    const result = await validateEvidenceReferences({ asOf: T0, quantRunId: undefined, scannerRunId: scannerId('3'), backtestRunIds: undefined, opportunityInstrumentId: undefined, requiresCompleteUniverse: false }, readers);
+    expect(result.blocking.map((i) => i.code)).toEqual(['RESULT_AVAILABILITY_UNPROVEN']);
+    expect(result.seals).toEqual([expect.objectContaining({ kind: 'scanner_run', sealedAt: new Date(Date.parse(T0) + 60_000).toISOString() })]);
+  });
+
+  it('Fehlender Zeitnachweis (Altdatum ohne Seal) und fehlende Eingangsverfügbarkeit werden abgelehnt', async () => {
+    const legacy = scannerRun({ c: '3', candidates: [{ instrumentId: 'AAPL', quantRunId: quantId('1') }], inputsAvailableAt: null });
+    const readers: EvidenceReaders = { scanner: { getSealed: async () => ({ record: legacy, seal: null }) } };
+    const result = await validateEvidenceReferences({ asOf: T0, quantRunId: undefined, scannerRunId: scannerId('3'), backtestRunIds: undefined, opportunityInstrumentId: undefined, requiresCompleteUniverse: false }, readers);
+    expect(result.passed).toBe(false);
+    expect(result.blocking.map((i) => i.code)).toEqual(['DATA_AVAILABILITY_UNPROVEN', 'RESULT_AVAILABILITY_UNPROVEN']);
+  });
+
+  it('Manipulierter Zeitnachweis wird erkannt: geänderte Zeit oder fremder Run lässt die Seal-Prüfung scheitern', async () => {
+    const hash = '3'.repeat(64);
+    const seal = sealFor({ kind: 'scanner_run', recordId: scannerId('3'), resultHash: hash, recordedAt: '2026-09-30T07:00:00.000Z', sealedAt: '2026-09-30T07:00:01.000Z' });
+    const expected = { kind: 'scanner_run' as const, recordId: scannerId('3'), resultHash: hash };
+    expect(verifySeal(seal, expected)).toEqual(seal);
+    expect(() => verifySeal({ ...seal, recordedAt: '2026-09-30T06:00:00.000Z' }, expected)).toThrow(/seal hash mismatch/);
+    expect(() => verifySeal({ ...seal, sealedAt: '2026-09-30T09:00:00.000Z' }, expected)).toThrow(/seal hash mismatch/);
+    expect(() => verifySeal(seal, { ...expected, resultHash: '4'.repeat(64) })).toThrow(/does not match the stored result/);
+    expect(() => sealFor({ kind: 'scanner_run', recordId: scannerId('3'), resultHash: hash, recordedAt: '2026-09-30T07:00:02.000Z', sealedAt: '2026-09-30T07:00:01.000Z' })).toThrow(/after sealedAt/);
+  });
+
+  it('Wiederholtes Speichern verändert recordedAt und sealedAt nicht; der Aufrufer kann keine Zeit setzen', async () => {
+    const readings = [new Date('2026-09-30T07:00:00.000Z'), new Date('2026-09-30T07:00:00.500Z'), new Date('2026-10-05T00:00:00.000Z'), new Date('2026-10-05T00:00:01.000Z')];
+    const store = new InMemoryScannerRunStore({ clock: () => readings.shift() ?? new Date('2026-10-05T00:00:02.000Z') });
+    const run = scannerRun({ c: '3', candidates: [{ instrumentId: 'AAPL', quantRunId: quantId('1') }] });
+    expect(await store.save(run)).toBe('APPLIED');
+    expect(await store.save(run)).toBe('ALREADY_APPLIED');
+    const sealed = await store.getSealed(run.scannerRunId);
+    expect(sealed?.seal).toMatchObject({ recordedAt: '2026-09-30T07:00:00.000Z', sealedAt: '2026-09-30T07:00:00.500Z' });
+  });
+
+  it('Schwache Evidenz erfüllt eine Anforderung an starke Evidenz nicht und begründet kein RECOMMEND', async () => {
+    const { readers, cited } = await validLineage({ backtest: { grade: 'C', insufficientSample: true, trades: 3, winRate: 1 } });
+    const ctx = await setupBrain({ adapters: council(), evidenceReaders: readers });
+    const decision = await ctx.brain.decide(decisionRequest(task(), { quant: cited, requiresStrongBacktest: true }));
+    expect(decision.outcome).not.toBe('RECOMMEND');
+    expect(decision.evidence.impact).toEqual(['BACKTEST_STRONG_EVIDENCE_REQUIRED', 'WEAK_BACKTEST_EVIDENCE_ONLY']);
+    expect(decision.reasonCodes).toEqual(expect.arrayContaining(['BACKTEST_STRONG_EVIDENCE_REQUIRED', 'WEAK_BACKTEST_EVIDENCE_ONLY']));
+  });
+
+  it('Mehrfachzählung: drei schwache Backtests ergeben keine starke Evidenz', async () => {
+    const weak = { grade: 'C' as const, insufficientSample: true, trades: 3, winRate: 1 };
+    const scanner = scannerRun({ c: '3', candidates: [{ instrumentId: 'AAPL', quantRunId: quantId('1') }] });
+    const readers = await readersWith({ scanner: [scanner], backtests: [backtestRun({ c: '4', ...weak }), backtestRun({ c: '5', ...weak }), backtestRun({ c: '6', ...weak })], quant: [quantRun('1')] });
+    const result = await validateEvidenceReferences({ asOf: T0, quantRunId: quantId('1'), scannerRunId: scannerId('3'), backtestRunIds: [backtestId('4'), backtestId('5'), backtestId('6')], opportunityInstrumentId: undefined, requiresCompleteUniverse: false }, readers);
+    expect(result.passed).toBe(true);
+    expect(result.lineage.backtests.map((b) => b.strength)).toEqual(['weak', 'weak', 'weak']);
+    expect(evidenceDecisionImpact(result.lineage, true)).toEqual(['BACKTEST_STRONG_EVIDENCE_REQUIRED', 'WEAK_BACKTEST_EVIDENCE_ONLY']);
+  });
+
+  it('Starke Evidenz erfüllt die Anforderung: kein Impact-Code', async () => {
+    const { readers, cited } = await validLineage();
+    const result = await validateEvidenceReferences({ asOf: T0, quantRunId: cited.quantRunId, scannerRunId: cited.scannerRunId, backtestRunIds: cited.backtestRunIds, opportunityInstrumentId: undefined, requiresCompleteUniverse: false }, readers);
+    expect(evidenceDecisionImpact(result.lineage, true)).toEqual([]);
   });
 
   it('Gleiche Eingaben liefern dieselbe Validierung (deterministisch)', async () => {

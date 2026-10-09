@@ -8,8 +8,8 @@ import { createPoolFromEnv, DatabaseConfigError } from '../../src/persistence/po
 describe('Migrationen (ohne Datenbank)', () => {
   it('sind lückenlos versioniert, nicht destruktiv und haben stabile Prüfsummen', () => {
     const migrations = loadMigrations();
-    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5]);
-    expect(migrations.map((m) => m.name)).toEqual(['ledger', 'append_only_logs', 'domain_projections', 'market_data', 'scanner_backtest_core']);
+    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(migrations.map((m) => m.name)).toEqual(['ledger', 'append_only_logs', 'domain_projections', 'market_data', 'scanner_backtest_core', 'evidence_seals']);
     expect(migrations.every((m) => /^[0-9a-f]{64}$/.test(m.checksum))).toBe(true);
     expect(loadMigrations().map((m) => m.checksum)).toEqual(migrations.map((m) => m.checksum));
   });

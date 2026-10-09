@@ -22,7 +22,7 @@ import { loadSafetyConfig } from '../../src/nexus/safety.js';
 import { openPostgresStores } from '../../src/persistence/postgres/postgres-stores.js';
 import type { PgPool } from '../../src/persistence/postgres/pool.js';
 import { fixedClock, policy, sequentialIds, T0 } from '../helpers.js';
-import { byRole, decisionRequest, evidenceRef, GENEROUS_ALLOCATION, HUMAN, MODELS, opinion, ScriptedAdapter, task } from '../nexus/fakes.js';
+import { byRole, decisionRequest, evidenceRef, GENEROUS_ALLOCATION, HUMAN, MODELS, opinion, QUANT_CONFIRMS, ScriptedAdapter, task } from '../nexus/fakes.js';
 import { createTestDatabase, pgAvailable, pgSkipReason, type TestDatabase } from './db.js';
 
 async function nexusOn(pool: PgPool, prefix: string) {
@@ -107,6 +107,20 @@ describe.skipIf(!pgAvailable)('NEXUS on PostgreSQL' + (pgAvailable ? '' : ' (NOT
 
     // The capital state the decision used is referenced by its exact ledger position.
     expect(decision.capitalStateRef).toBe('ledger:main@1:' + second.ledger.all()[0]!.hash + '#asOf=' + T0);
+  });
+
+  it('abgelehnte Evidenz wird als REJECT-Entscheidung in PostgreSQL persistiert und nach Neustart rekonstruierbar', async () => {
+    db = await createTestDatabase();
+    const first = await nexusOn(db.extraPool(), 'pref');
+    // No scanner reader is configured, so the cited scanner run is refused before any write of the decision cycle.
+    const refusal = await first.brain.decide(decisionRequest(task({ id: 'pg-refused' }), { quant: { ...QUANT_CONFIRMS, scannerRunId: 'scan_' + 'e'.repeat(40) } })).catch((e: unknown) => e);
+    expect(refusal).toMatchObject({ name: 'EvidenceReferenceError', codes: ['EVIDENCE_READER_NOT_CONFIGURED'] });
+    const decisionId = first.audit.all().find((e) => e.taskId === 'pg-refused' && e.type === 'DECISION_RECORDED')!.decisionId!;
+    // Reopen from PostgreSQL only: the refusal must be reconstructible without the process that made it.
+    const reopened = await nexusOn(db.extraPool(), 'pref2');
+    expect(reopened.decisions.get(decisionId)).toMatchObject({ finalAction: 'REJECT', reasonCodes: ['EVIDENCE_READER_NOT_CONFIGURED'] });
+    expect(reopened.audit.byDecision(decisionId).map((e) => e.type)).toEqual(['DECISION_RECORDED']);
+    expect(reopened.brain.rejection(decisionId)).toMatchObject({ reasonCodes: ['EVIDENCE_READER_NOT_CONFIGURED'], evidence: { passed: false } });
   });
 
   it('Snapshots in PostgreSQL: richtige Reihenfolge auch ab 10 Stück, Reconciliation gegen die DB', async () => {
