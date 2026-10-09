@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { SPLIT_ADJUSTMENT_VERSION } from '../../src/market-data/corporate-actions.js';
 import { InstrumentRegistry } from '../../src/market-data/instrument-registry.js';
 import { InMemoryMarketDataStore } from '../../src/market-data/market-data-store.js';
 import type { MarketBar } from '../../src/market-data/market-data-types.js';
@@ -200,7 +201,7 @@ describe('QuantService: gleiche Mathematik für Live und Backtest, Replay', () =
     const { store, service } = await setup();
     const raw = dailyBars(XNAS, '2026-06-01', randomOhlcv(120, 8)).map((b) => (b.startTime >= '2026-08-31' ? scaleBar(b, '0.25') : b));
     await store.ingestBars(AAPL, raw, '2026-11-01T00:00:00Z');
-    await store.ingestCorporateActions(AAPL, [{ actionKey: 'split:2026-08-31', instrumentId: AAPL.instrumentId, source: FIXTURE_SOURCE.sourceId, type: 'split', exDate: '2026-08-31', ratioFrom: Decimal.from(1), ratioTo: Decimal.from(4), availableAt: '2026-07-30T20:00:00.000Z', retrievedAt: '2026-07-30T20:00:00.000Z' }], '2026-11-01T00:00:00Z');
+    await store.ingestCorporateActions(AAPL, [{ actionKey: 'split:2026-08-31', instrumentId: AAPL.instrumentId, source: FIXTURE_SOURCE.sourceId, type: 'split', exDate: '2026-08-31', ratioFrom: Decimal.from(1), ratioTo: Decimal.from(4), retrievedAt: '2026-07-30T20:00:00.000Z', knowledge: { provenance: 'captured_by_nexus', knowledgeAt: '2026-07-30T20:00:00.000Z' } }], '2026-11-01T00:00:00Z');
     const before = await service.run({ instrumentId: AAPL.instrumentId, ...DAILY, adjustment: 'split_adjusted', asOf: '2026-08-21T00:00:00Z', useCase: 'backtest' });
     const rawBefore = await service.run({ instrumentId: AAPL.instrumentId, ...DAILY, asOf: '2026-08-21T00:00:00Z', useCase: 'backtest' });
     // before the ex-date nothing is adjusted: same numbers as raw
@@ -210,5 +211,29 @@ describe('QuantService: gleiche Mathematik für Live und Backtest, Replay', () =
     // the adjusted series has no artificial 75 % crash; the raw one does
     expect(after.record.result.indicators.atr.value!).toBeLessThan(rawAfter.record.result.indicators.atr.value!);
     expect((await service.replay(after.record.result.quantRunId)).identical).toBe(true);
+  });
+
+  it('split-adjustiert: die Ableitungsversion ist Teil des Laufs; Rohreihen tragen keine', async () => {
+    const { store, service } = await setup();
+    await store.ingestBars(AAPL, dailyBars(XNAS, '2026-06-01', randomOhlcv(120, 8)), '2026-11-01T00:00:00Z');
+    const adjusted = await service.run({ instrumentId: AAPL.instrumentId, ...DAILY, adjustment: 'split_adjusted', asOf: '2026-10-30T00:00:00Z', useCase: 'backtest' });
+    const raw = await service.run({ instrumentId: AAPL.instrumentId, ...DAILY, asOf: '2026-10-30T00:00:00Z', useCase: 'backtest' });
+    expect(adjusted.record.result.algorithmVersions).toMatchObject({ 'split-adjust': SPLIT_ADJUSTMENT_VERSION });
+    expect(raw.record.result.algorithmVersions).not.toHaveProperty('split-adjust');
+    expect(adjusted.record.result.quantRunId).not.toBe(raw.record.result.quantRunId);
+  });
+
+  it('Informationsbetrieb: ein unbewiesener Split, der das Fenster ändert, verweigert den Lauf typisiert (kein Raten)', async () => {
+    const { store, service } = await setup();
+    const raw = dailyBars(XNAS, '2026-06-01', randomOhlcv(120, 8)).map((b) => (b.startTime >= '2026-08-31' ? scaleBar(b, '0.25') : b));
+    await store.ingestBars(AAPL, raw, '2026-11-01T00:00:00Z');
+    // imported without proof of when it was known: economic reconstruction only
+    await store.ingestCorporateActions(AAPL, [{ actionKey: 'split:2026-08-31', instrumentId: AAPL.instrumentId, source: FIXTURE_SOURCE.sourceId, type: 'split', exDate: '2026-08-31', ratioFrom: Decimal.from(1), ratioTo: Decimal.from(4), retrievedAt: '2026-07-30T20:00:00.000Z', knowledge: { provenance: 'historical_effective_date_inference', knowledgeAt: null } }], '2026-11-01T00:00:00Z');
+    await expect(service.run({ instrumentId: AAPL.instrumentId, ...DAILY, adjustment: 'split_adjusted', asOf: '2026-10-30T00:00:00Z', useCase: 'backtest' })).rejects.toMatchObject({
+      code: 'CORPORATE_ACTION_TIMING_UNPROVEN',
+      unproven: [{ actionKey: 'split:2026-08-31', provenance: 'historical_effective_date_inference', knowledgeAt: null }],
+    });
+    // the raw series does not depend on corporate actions and still runs
+    expect((await service.run({ instrumentId: AAPL.instrumentId, ...DAILY, asOf: '2026-10-30T00:00:00Z', useCase: 'backtest' })).status).toBe('APPLIED');
   });
 });

@@ -11,6 +11,7 @@ import {
   type DataQualityIssue,
   type MarketBar,
   type MarketQuote,
+  type StoredCorporateAction,
 } from './market-data-types.js';
 import { HOUR_MS, MINUTE_MS, isLocalDate, parseUtc, toUtcIso } from './time.js';
 
@@ -196,10 +197,9 @@ export function validateCorporateAction(action: CorporateAction): DataQualityIss
   if (!nonEmpty(action.actionKey) || !nonEmpty(action.instrumentId) || !nonEmpty(action.source)) issues.push(critical('invalid_number', 'actionKey/instrumentId/source missing', at));
   if (!ACTION_TYPES.includes(action.type)) issues.push(critical('invalid_number', 'unknown corporate action type', at));
   if (typeof action.exDate !== 'string' || !isLocalDate(action.exDate)) issues.push(critical('invalid_time', 'exDate must be YYYY-MM-DD', at));
-  const available = instant(action.availableAt, 'availableAt', issues, at);
   const retrieved = instant(action.retrievedAt, 'retrievedAt', issues, at);
   if (action.announcedAt !== undefined) instant(action.announcedAt, 'announcedAt', issues, at);
-  if (available !== null && retrieved !== null && available > retrieved + CLOCK_SKEW_MS) issues.push(critical('future_timestamp', 'availableAt is after retrievedAt', at));
+  issues.push(...knowledgeIssues(action, retrieved, at));
   if (action.type === 'split' || action.type === 'reverse_split') {
     const from = action.ratioFrom;
     const to = action.ratioTo;
@@ -215,15 +215,51 @@ export function validateCorporateAction(action: CorporateAction): DataQualityIss
   return issues;
 }
 
+/** Provenances NEXUS may write. legacy_unproven exists only on rows stored before provenance was introduced. */
+const INGEST_PROVENANCE = ['provider_published_at', 'provider_announced_at', 'captured_by_nexus', 'historical_effective_date_inference'] as const;
+
+/**
+ * A knowledge time must be proven by its provenance. It is never a free value and never the ex-date. A provider timestamp
+ * cannot lie after NEXUS retrieved the record, because NEXUS cannot hold what was not yet known.
+ */
+function knowledgeIssues(action: CorporateAction, retrieved: number | null, at: string | undefined): DataQualityIssue[] {
+  const issues: DataQualityIssue[] = [];
+  const k = action.knowledge;
+  if (!k || typeof k !== 'object' || !(INGEST_PROVENANCE as readonly string[]).includes(k.provenance)) {
+    issues.push(critical('invalid_time', 'knowledge provenance must be one of the ingest provenances (legacy_unproven cannot be ingested)', at));
+    return issues;
+  }
+  if (k.provenance === 'historical_effective_date_inference') {
+    if (k.knowledgeAt !== null) issues.push(critical('invalid_time', 'an inferred record has no knowledge time', at));
+    return issues;
+  }
+  const known = instant(k.knowledgeAt, 'knowledgeAt', issues, at);
+  if (known === null || retrieved === null) return issues;
+  if (k.provenance === 'captured_by_nexus' && known !== retrieved) issues.push(critical('invalid_time', 'a captured record is known exactly at its retrieval', at));
+  if (known > retrieved + CLOCK_SKEW_MS) issues.push(critical('future_timestamp', 'knowledgeAt is after retrievedAt: NEXUS cannot have retrieved what was not yet known', at));
+  if (k.provenance === 'provider_announced_at' && (action.announcedAt === undefined || parseUtc(action.announcedAt) !== known)) {
+    issues.push(critical('invalid_time', 'provider_announced_at needs announcedAt equal to knowledgeAt', at));
+  }
+  return issues;
+}
+
 export function normalizeCorporateAction(action: CorporateAction): CorporateAction {
   return {
     ...action,
-    availableAt: toUtcIso(parseUtc(action.availableAt)),
     retrievedAt: toUtcIso(parseUtc(action.retrievedAt)),
     ...(action.announcedAt !== undefined ? { announcedAt: toUtcIso(parseUtc(action.announcedAt)) } : {}),
+    knowledge: {
+      provenance: action.knowledge.provenance,
+      knowledgeAt: action.knowledge.knowledgeAt === null ? null : toUtcIso(parseUtc(action.knowledge.knowledgeAt)),
+    },
   };
 }
 
+/**
+ * Economic content identity: change detection between revisions. Its definition is unchanged, so rows stored before
+ * provenance keep their hash. Retrieval and knowledge are deliberately NOT part of it: a re-fetch of the same economic record
+ * must not become a new revision, and the first capture keeps its knowledge.
+ */
 export function corporateActionContentHash(action: CorporateAction): string {
   return hashOf({
     actionKey: action.actionKey,
@@ -238,5 +274,20 @@ export function corporateActionContentHash(action: CorporateAction): string {
     oldSymbol: action.oldSymbol ?? null,
     newSymbol: action.newSymbol ?? null,
     announcedAt: action.announcedAt ?? null,
+  });
+}
+
+/**
+ * Integrity of what the content hash does not cover: when NEXUS retrieved the record and what proves its knowledge time.
+ * Verified on every read, so a privileged change of either is detected.
+ */
+export function corporateActionProvenanceHash(action: Pick<StoredCorporateAction, 'instrumentId' | 'source' | 'actionKey' | 'contentHash' | 'retrievedAt' | 'knowledge'>): string {
+  return hashOf({
+    contentVersion: 'corporate-action-provenance:v1',
+    key: [action.instrumentId, action.source, action.actionKey].join('|'),
+    contentHash: action.contentHash,
+    retrievedAt: action.retrievedAt,
+    knowledgeProvenance: action.knowledge.provenance,
+    knowledgeAt: action.knowledge.knowledgeAt,
   });
 }

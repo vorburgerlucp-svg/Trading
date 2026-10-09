@@ -3,8 +3,10 @@
 // Rules shared by every implementation (the PostgreSQL store reuses the planning functions below):
 //   * idempotent: re-delivering an identical record changes nothing (status "unchanged")
 //   * nothing is overwritten: a different record for the same key becomes a new REVISION
-//   * a revision becomes visible when NEXUS retrieved it (availableAt = max(availableAt, retrievedAt,
-//     previous revision's availableAt)), so a provider correction never leaks into the past
+//   * bars and quotes: a revision becomes visible at availableAt, which is raised to max(availableAt, retrievedAt,
+//     previous revision's availableAt) for revisions >= 2 only (the first revision keeps the provider value; finding F9).
+//     Corporate actions do not use availableAt at all: their information time is a proven knowledge time (corporate-actions.ts).
+//     A provider correction (revision >= 2) therefore never leaks into the past for corporate actions either.
 //   * final → in-progress is refused (final_regression); structurally invalid records are quarantined
 //   * every stored record gets the next number of a gapless per-instrument ingest sequence.
 //     A computation that records `storedThrough` (the sequence it saw) is exactly reproducible,
@@ -16,6 +18,7 @@ import {
   barContentHash,
   barKey,
   corporateActionContentHash,
+  corporateActionProvenanceHash,
   normalizeBar,
   normalizeCorporateAction,
   normalizeQuote,
@@ -25,6 +28,7 @@ import {
   validateQuote,
   type PriceRules,
 } from './bar-validation.js';
+import { selectReplayRevision, type ReplayPurpose } from './corporate-actions.js';
 import type {
   BarInterval,
   BarSession,
@@ -86,6 +90,11 @@ export interface CorporateActionQuery {
   asOf: string;
   storedThrough?: number;
   types?: CorporateActionType[];
+  /**
+   * information (default): what was provably known by asOf. Strict; the only purpose that may feed strategy, quant or scanner.
+   * economic: what happened, ex-post, labelled by provenance. For accounting only.
+   */
+  purpose?: ReplayPurpose;
 }
 
 export interface MarketDataStore {
@@ -306,6 +315,14 @@ export function corporateActionKey(a: Pick<CorporateAction, 'instrumentId' | 'so
   return [a.instrumentId, a.source, a.actionKey].join('|');
 }
 
+/** The planner's view of a corporate action: the record plus its storage time (never a knowledge time). */
+type PlannedCorporateAction = CorporateAction & { availableAt: string };
+
+/**
+ * Storage visibility of a NEW record is its retrieval: NEXUS holds it from then on. Provider claims never set it (the earlier
+ * `min(retrievedAt, exDate)` rule did, and made late-retrieved actions look known on their ex-date: review finding F1).
+ * The shared planner works on that storage time; it is stored as storedAvailableAt and is never used as knowledge.
+ */
 export function planCorporateActions(
   instrument: IngestInstrument,
   actions: readonly CorporateAction[],
@@ -314,20 +331,45 @@ export function planCorporateActions(
   sources: ReadonlySet<string>,
   nextSeq: number,
 ): IngestPlan<StoredCorporateAction> {
-  return planIngest<CorporateAction, StoredCorporateAction>(actions, latest, sources, nextSeq, {
+  const planned: PlannedCorporateAction[] = actions.map((a) => ({ ...a, availableAt: a.retrievedAt }));
+  const latestPlanned = (key: string) => {
+    const prev = latest(key);
+    return prev === undefined ? undefined : { ...prev, availableAt: prev.storedAvailableAt };
+  };
+  return planIngest<PlannedCorporateAction, StoredCorporateAction>(planned, latestPlanned, sources, nextSeq, {
     kind: 'corporate_action',
     instrument,
     receivedAt,
-    validate: (a) => validateCorporateAction(a),
-    normalize: (a) => normalizeCorporateAction(a),
+    validate: (a) => {
+      const issues = validateCorporateAction(a);
+      // The capture cannot be later than the moment NEXUS stored it: that would make its knowledge time a future claim.
+      if (parseUtc(a.retrievedAt) > parseUtc(receivedAt)) issues.push({ code: 'future_timestamp', severity: 'critical', message: 'retrievedAt is after the time the record was received' });
+      return issues;
+    },
+    normalize: (a) => {
+      const n = normalizeCorporateAction(a);
+      return { ...n, availableAt: n.retrievedAt };
+    },
     instrumentOf: (a) => a.instrumentId,
     sourceOf: (a) => a.source,
     keyOf: corporateActionKey,
     hashOf: corporateActionContentHash,
     isFinal: () => true,
     sortValue: (a) => Date.parse(a.exDate + 'T00:00:00Z'),
-    build: (a, revision, availableAt, contentHash, ingestSeq) => ({ ...a, availableAt, revision, contentHash, ingestSeq }),
+    build: (a, revision, storageAt, contentHash, ingestSeq) => storedCorporateAction(a, storageAt, revision, contentHash, ingestSeq),
   });
+}
+
+function storedCorporateAction(planned: PlannedCorporateAction, storedAvailableAt: string, revision: number, contentHash: string, ingestSeq: number): StoredCorporateAction {
+  const { availableAt: _storageInput, ...economic } = planned;
+  const stored: StoredCorporateAction = { ...economic, storedAvailableAt, revision, contentHash, ingestSeq, provenanceHash: null };
+  return { ...stored, provenanceHash: corporateActionProvenanceHash(stored) };
+}
+
+/** Integrity of the retrieval and knowledge fields of a stored record. Legacy rows (no provenance hash) have nothing to verify. */
+export function assertProvenanceIntact(a: StoredCorporateAction): void {
+  if (a.provenanceHash === null) return;
+  assertIntact('corporate action provenance', corporateActionKey(a), corporateActionProvenanceHash(a), a.provenanceHash);
 }
 
 /** Keeps only the MarketBar fields (callers may pass StoredBar or richer objects). */
@@ -482,7 +524,10 @@ export class InMemoryMarketDataStore implements MarketDataStore {
   ingestCorporateActions(instrument: IngestInstrument, actions: readonly CorporateAction[], receivedAt: string): Promise<IngestSummary> {
     return this.exclusive(() => {
       const d = this.of(instrument.instrumentId);
-      const plan = planCorporateActions(instrument, actions, receivedAt, (key) => withFinal(d.actions.get(key)?.at(-1)), new Set(this.sources.keys()), d.seq);
+      const plan = planCorporateActions(instrument, actions, receivedAt, (key) => {
+        const prev = d.actions.get(key)?.at(-1);
+        return prev === undefined ? undefined : { ...prev, isFinal: true };
+      }, new Set(this.sources.keys()), d.seq);
       return this.commit(d.actions, d, plan);
     });
   }
@@ -490,13 +535,13 @@ export class InMemoryMarketDataStore implements MarketDataStore {
   async readCorporateActions(q: CorporateActionQuery): Promise<StoredCorporateAction[]> {
     const d = this.data.get(q.instrumentId);
     if (!d) return [];
-    const asOf = parseUtc(q.asOf);
     const out: StoredCorporateAction[] = [];
     for (const revisions of d.actions.values()) {
       if (q.source !== undefined && revisions[0]!.source !== q.source) continue;
-      const v = visibleRevision(revisions, asOf, q.storedThrough ?? Number.POSITIVE_INFINITY);
+      const v = selectReplayRevision(revisions, { asOf: q.asOf, storedThrough: q.storedThrough ?? Number.POSITIVE_INFINITY, purpose: q.purpose ?? 'information' });
       if (!v || (q.types && !q.types.includes(v.type))) continue;
       assertIntact('corporate action', corporateActionKey(v), corporateActionContentHash(v), v.contentHash);
+      assertProvenanceIntact(v);
       out.push(v);
     }
     return out.sort((a, b) => (a.exDate < b.exDate ? -1 : a.exDate > b.exDate ? 1 : a.actionKey < b.actionKey ? -1 : 1));

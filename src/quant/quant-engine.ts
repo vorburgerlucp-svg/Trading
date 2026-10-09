@@ -76,6 +76,8 @@ export interface QuantInput {
   includeInProgress?: boolean;
   sourceInfo?: MarketDataSource | null;
   useCase?: FreshnessUseCase;
+  /** Versioned derivation the bars came from (e.g. the split-adjustment policy). Undefined for raw series: their identities are unchanged. */
+  derivation?: Readonly<Record<string, string>>;
 }
 
 export function resolveParameters(overrides: Partial<QuantParameters> = {}): QuantParameters {
@@ -294,6 +296,7 @@ export function computeQuant(input: QuantInput, options: { createdAt: string }):
   const inputFingerprint = hashOf({
     engine: QUANT_ENGINE_VERSION,
     algorithms: ALGORITHM_VERSIONS,
+    derivation: input.derivation,
     parameters: p,
     instrumentId: input.instrument.instrumentId,
     series: input.series,
@@ -312,7 +315,7 @@ export function computeQuant(input: QuantInput, options: { createdAt: string }):
     useCase,
     inputFingerprint,
     dataQuality: quality,
-    algorithmVersions: { ...ALGORITHM_VERSIONS },
+    algorithmVersions: { ...ALGORITHM_VERSIONS, ...(input.derivation ?? {}) },
     parameters: p,
     createdAt: options.createdAt,
   } as const;

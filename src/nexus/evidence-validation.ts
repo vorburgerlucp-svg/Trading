@@ -10,6 +10,7 @@
 
 import type { BacktestRunStore } from '../backtest/backtest-store.js';
 import type { BacktestRunResult } from '../backtest/backtest-types.js';
+import { SPLIT_ADJUSTMENT_VERSION } from '../market-data/corporate-actions.js';
 import { parseUtc } from '../market-data/time.js';
 import type { EvidenceSeal, EvidenceSealKind, Sealed } from '../persistence/evidence-seal.js';
 import type { QuantRunStore } from '../quant/quant-run-store.js';
@@ -60,6 +61,7 @@ export const EVIDENCE_REASON_CODES = [
   'RESULT_RECORDED_AFTER_ASOF',
   'RESULT_AVAILABILITY_UNPROVEN',
   'DATA_AVAILABILITY_UNPROVEN',
+  'CORPORATE_ACTION_TIMING_UNPROVEN',
   'SCANNER_QUANT_LINEAGE_MISMATCH',
   'SCANNER_RANKING_INCOMPLETE',
   'BACKTEST_INVALID',
@@ -229,6 +231,14 @@ export async function validateEvidenceReferences(request: EvidenceRequest, reade
     const id = quant.record.result.quantRunId;
     checkResultAvailability('quant_run', id, quant.seal, request.asOf, asOfMs, blocking, seals);
     if (Date.parse(quant.record.result.asOf) > asOfMs) block('EVIDENCE_FROM_FUTURE', id, 'quant asOf ' + quant.record.result.asOf + ' is after decision asOf ' + request.asOf);
+    // A split-adjusted series is only point-in-time under the information gate of the current derivation. A run without that
+    // derivation version (stored before it was versioned, or computed under another policy) cannot show when its splits were known.
+    if (quant.record.result.series.adjustment === 'split_adjusted') {
+      const version = quant.record.result.algorithmVersions['split-adjust'];
+      if (version !== SPLIT_ADJUSTMENT_VERSION) {
+        block('CORPORATE_ACTION_TIMING_UNPROVEN', id, 'split-adjusted quant run has split-adjust version ' + (version ?? 'none') + ', not ' + SPLIT_ADJUSTMENT_VERSION + ': when its splits were known cannot be shown');
+      }
+    }
   }
 
   // Scanner run and lineage: the candidate must come from exactly the cited quant run.

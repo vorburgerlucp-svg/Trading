@@ -251,7 +251,7 @@ describe('Paging, leere Fenster, Quotes, Corporate Actions', () => {
     expect(quote.last.toString()).toBe('250.4');
   });
 
-  it('Splits und Dividenden: Typ, exakte Faktoren, unadjustierte Dividende, availableAt-Regel', async () => {
+  it('Splits und Dividenden: Typ, exakte Faktoren, unadjustierte Dividende, Wissenszeit = eigener Abruf (kein Ex-Datum)', async () => {
     const h = harness((url) =>
       url.pathname === '/splits'
         ? { body: { meta: { symbol: 'AAPL', name: 'Apple Inc', currency: 'USD', exchange: 'NASDAQ', mic_code: 'XNAS', exchange_timezone: 'America/New_York' }, splits: [{ date: '2020-08-31', description: '4-for-1 split', ratio: 4, from_factor: 1, to_factor: 4 }, { date: '2026-11-20', description: '1-for-10 reverse split', ratio: 0.1, from_factor: 10, to_factor: 1 }] } }
@@ -260,10 +260,13 @@ describe('Paging, leere Fenster, Quotes, Corporate Actions', () => {
     const { actions } = await h.provider.getCorporateActions!({ instrument: AAPL, mapping: mapping(AAPL.instrumentId, 'AAPL'), from: '2020-01-01T00:00:00Z', to: '2026-12-31T00:00:00Z' });
     expect(h.calls.find((c) => c.url.pathname === '/dividends')!.url.searchParams.get('adjust')).toBe('false');
     const [split, reverse, dividend] = actions;
-    expect(split).toMatchObject({ type: 'split', exDate: '2020-08-31', availableAt: '2020-08-31T04:00:00.000Z' }); // backfill: known by ex-date
+    // A historical split from 2020 is first known to NEXUS now: its knowledge is the capture, never the 2020 ex-date (finding F1).
+    const captured = { provenance: 'captured_by_nexus', knowledgeAt: '2026-10-07T13:57:30.000Z' };
+    expect(split).toMatchObject({ type: 'split', exDate: '2020-08-31', retrievedAt: '2026-10-07T13:57:30.000Z', knowledge: captured });
+    expect(split).not.toHaveProperty('availableAt');
     expect([split!.ratioFrom!.toString(), split!.ratioTo!.toString()]).toEqual(['1', '4']);
-    expect(reverse).toMatchObject({ type: 'reverse_split', availableAt: '2026-10-07T13:57:30.000Z' }); // announced future split: known from retrieval
-    expect(dividend).toMatchObject({ type: 'cash_dividend', currency: 'USD' });
+    expect(reverse).toMatchObject({ type: 'reverse_split', exDate: '2026-11-20', knowledge: captured });
+    expect(dividend).toMatchObject({ type: 'cash_dividend', exDate: '2026-08-11', currency: 'USD', knowledge: captured });
     expect(dividend!.cashAmount!.toString()).toBe('0.26');
   });
 });

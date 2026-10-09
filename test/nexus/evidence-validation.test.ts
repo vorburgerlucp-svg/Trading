@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { InMemoryBacktestRunStore } from '../../src/backtest/backtest-store.js';
+import { SPLIT_ADJUSTMENT_VERSION } from '../../src/market-data/corporate-actions.js';
 import type { BacktestFill, BacktestRunResult, BacktestTrade } from '../../src/backtest/backtest-types.js';
 import type { CostModelConfig } from '../../src/backtest/cost-model.js';
 import {
@@ -431,5 +432,30 @@ describe('Evidence reference validation (NEXUS Brain, read-only, fail closed)', 
     const second = await setupBrain({ adapters: council(), evidenceReaders: other });
     const d2 = await second.brain.decide(decisionRequest(task({ id: 'task-fingerprint' }), { quant: { ...cited, backtestRunIds: [backtestId('5')] } }));
     expect(second.brain.record(d2.decisionId)!.inputFingerprint).not.toBe(fp1);
+  });
+});
+
+describe('Split-adjusted quant evidence: the corporate-action timing must be versioned (CORPORATE_ACTION_TIMING_UNPROVEN)', () => {
+  const splitAdjusted = (versions: Record<string, string>): QuantRunRecord =>
+    ({ result: { quantRunId: quantId('1'), instrumentId: 'AAPL', asOf: T0, series: { interval: '1d', adjustment: 'split_adjusted' }, algorithmVersions: versions }, resultHash: 'test', storedThrough: 7, createdAt: T0 }) as unknown as QuantRunRecord;
+  const check = async (quant: QuantRunRecord) =>
+    validateEvidenceReferences({ asOf: T0, quantRunId: quantId('1'), scannerRunId: undefined, backtestRunIds: undefined, opportunityInstrumentId: undefined, requiresCompleteUniverse: false }, await readersWith({ quant: [quant] }));
+
+  it('a split-adjusted run computed under the current derivation is not blocked for timing', async () => {
+    const result = await check(splitAdjusted({ 'split-adjust': SPLIT_ADJUSTMENT_VERSION }));
+    expect(result.blocking.map((i) => i.code)).not.toContain('CORPORATE_ACTION_TIMING_UNPROVEN');
+  });
+
+  it.each([
+    ['no derivation version (stored before it was versioned)', {}],
+    ['another derivation version', { 'split-adjust': 'split-adjust:pit:v1' }],
+  ])('a split-adjusted run with %s is blocked: when its splits were known cannot be shown', async (_name, versions) => {
+    const result = await check(splitAdjusted(versions));
+    expect(result).toMatchObject({ passed: false, blocking: [{ code: 'CORPORATE_ACTION_TIMING_UNPROVEN', ref: quantId('1') }] });
+  });
+
+  it('a raw quant run needs no corporate-action derivation and is not blocked for it', async () => {
+    const result = await check(quantRun('1'));
+    expect(result.blocking.map((i) => i.code)).not.toContain('CORPORATE_ACTION_TIMING_UNPROVEN');
   });
 });

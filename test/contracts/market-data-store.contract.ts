@@ -134,11 +134,12 @@ export function marketDataStoreContract(label: string, makeHarness: () => Promis
 
     it('Corporate Actions: separat gespeichert, revisioniert, Point-in-Time', async () => {
       const { store } = await open();
-      const split: CorporateAction = { actionKey: 'split:2026-08-31', instrumentId: AAPL.instrumentId, source: FIXTURE_SOURCE.sourceId, type: 'split', exDate: '2026-08-31', ratioFrom: Decimal.from(1), ratioTo: Decimal.from(4), availableAt: '2026-07-30T20:00:00.000Z', retrievedAt: '2026-07-30T20:00:00.000Z' };
-      const dividend: CorporateAction = { actionKey: 'dividend:2026-05-11', instrumentId: AAPL.instrumentId, source: FIXTURE_SOURCE.sourceId, type: 'cash_dividend', exDate: '2026-05-11', cashAmount: Decimal.from('0.26'), currency: 'USD', availableAt: '2026-05-01T20:00:00.000Z', retrievedAt: '2026-05-01T20:00:00.000Z' };
+      const split: CorporateAction = { actionKey: 'split:2026-08-31', instrumentId: AAPL.instrumentId, source: FIXTURE_SOURCE.sourceId, type: 'split', exDate: '2026-08-31', ratioFrom: Decimal.from(1), ratioTo: Decimal.from(4), retrievedAt: '2026-07-30T20:00:00.000Z', knowledge: { provenance: 'captured_by_nexus', knowledgeAt: '2026-07-30T20:00:00.000Z' } };
+      const dividend: CorporateAction = { actionKey: 'dividend:2026-05-11', instrumentId: AAPL.instrumentId, source: FIXTURE_SOURCE.sourceId, type: 'cash_dividend', exDate: '2026-05-11', cashAmount: Decimal.from('0.26'), currency: 'USD', retrievedAt: '2026-05-01T20:00:00.000Z', knowledge: { provenance: 'captured_by_nexus', knowledgeAt: '2026-05-01T20:00:00.000Z' } };
       expect(await store.ingestCorporateActions(AAPL, [split, dividend], '2026-08-01T00:00:00Z')).toMatchObject({ inserted: 2 });
       expect((await store.readCorporateActions({ instrumentId: AAPL.instrumentId, asOf: '2026-06-01T00:00:00Z' })).map((a) => a.actionKey)).toEqual(['dividend:2026-05-11']);
-      const corrected = { ...dividend, cashAmount: Decimal.from('0.27'), retrievedAt: '2026-09-01T00:00:00.000Z' };
+      // A correction is first known when NEXUS retrieves it: its knowledge is that retrieval, not the original capture.
+      const corrected: CorporateAction = { ...dividend, cashAmount: Decimal.from('0.27'), retrievedAt: '2026-09-01T00:00:00.000Z', knowledge: { provenance: 'captured_by_nexus', knowledgeAt: '2026-09-01T00:00:00.000Z' } };
       await store.ingestCorporateActions(AAPL, [corrected], '2026-09-01T00:00:00Z');
       const before = await store.readCorporateActions({ instrumentId: AAPL.instrumentId, asOf: '2026-08-15T00:00:00Z', types: ['cash_dividend'] });
       const after = await store.readCorporateActions({ instrumentId: AAPL.instrumentId, asOf: LATE, types: ['cash_dividend'] });

@@ -7,9 +7,11 @@
 import { Decimal } from '../../money/decimal.js';
 import { encodeJson } from '../json-codec.js';
 import { barContentHash, barKey, corporateActionContentHash, quoteContentHash } from '../../market-data/bar-validation.js';
+import { selectReplayRevision } from '../../market-data/corporate-actions.js';
 import {
   MarketDataStoreError,
   assertIntact,
+  assertProvenanceIntact,
   corporateActionKey,
   planBars,
   planCorporateActions,
@@ -25,7 +27,7 @@ import {
   type MarketDataStore,
   type QuoteQuery,
 } from '../../market-data/market-data-store.js';
-import type { CorporateAction, MarketBar, MarketDataSource, MarketQuote, QuarantineRecord, StoredBar, StoredCorporateAction, StoredQuote } from '../../market-data/market-data-types.js';
+import type { CorporateAction, CorporateActionKnowledgeProvenance, MarketBar, MarketDataSource, MarketQuote, QuarantineRecord, StoredBar, StoredCorporateAction, StoredQuote } from '../../market-data/market-data-types.js';
 import { canonicalUtc } from '../../market-data/time.js';
 import type { PgClient, PgPool } from './pool.js';
 
@@ -140,8 +142,12 @@ interface ActionRow {
   retrieved_at: Date;
   ingest_seq_text: string;
   content_hash: string;
+  knowledge_provenance: string | null;
+  knowledge_at: Date | null;
+  provenance_hash: string | null;
 }
 
+/** A NULL provenance is a row stored before provenance existed: its knowledge is unproven, and nothing is inferred for it. */
 function toAction(r: ActionRow): StoredCorporateAction {
   const a: StoredCorporateAction = {
     actionKey: r.action_key,
@@ -149,11 +155,16 @@ function toAction(r: ActionRow): StoredCorporateAction {
     source: r.source_id,
     type: r.type,
     exDate: r.ex_date_text,
-    availableAt: ts(r.available_at),
     retrievedAt: ts(r.retrieved_at),
+    knowledge: {
+      provenance: (r.knowledge_provenance ?? 'legacy_unproven') as CorporateActionKnowledgeProvenance,
+      knowledgeAt: r.knowledge_at === null ? null : ts(r.knowledge_at),
+    },
     revision: r.revision,
     ingestSeq: Number(r.ingest_seq_text),
     contentHash: r.content_hash,
+    storedAvailableAt: ts(r.available_at),
+    provenanceHash: r.provenance_hash,
   };
   const from = dec(r.ratio_from);
   const to = dec(r.ratio_to);
@@ -170,7 +181,7 @@ function toAction(r: ActionRow): StoredCorporateAction {
 
 const BAR_COLUMNS = 'instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq::text AS ingest_seq_text, content_hash';
 const QUOTE_COLUMNS = 'instrument_id, source_id, observed_at, revision, last_price, bid, ask, open, high, low, previous_close, volume, currency, market_open, available_at, retrieved_at, ingest_seq::text AS ingest_seq_text, content_hash';
-const ACTION_COLUMNS = "instrument_id, source_id, action_key, revision, type, to_char(ex_date, 'YYYY-MM-DD') AS ex_date_text, ratio_from, ratio_to, cash_amount, currency, old_symbol, new_symbol, announced_at, available_at, retrieved_at, ingest_seq::text AS ingest_seq_text, content_hash";
+const ACTION_COLUMNS = "instrument_id, source_id, action_key, revision, type, to_char(ex_date, 'YYYY-MM-DD') AS ex_date_text, ratio_from, ratio_to, cash_amount, currency, old_symbol, new_symbol, announced_at, available_at, retrieved_at, ingest_seq::text AS ingest_seq_text, content_hash, knowledge_provenance, knowledge_at, provenance_hash";
 
 function mapDbError(error: unknown): unknown {
   const code = (error as { code?: unknown })?.code;
@@ -417,7 +428,7 @@ export class PostgresMarketDataStore implements MarketDataStore {
       async (client, rows) => {
         for (const a of rows) {
           await client.query(
-            'INSERT INTO corporate_actions (instrument_id, source_id, action_key, revision, type, ex_date, ratio_from, ratio_to, cash_amount, currency, old_symbol, new_symbol, announced_at, available_at, retrieved_at, ingest_seq, content_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)',
+            'INSERT INTO corporate_actions (instrument_id, source_id, action_key, revision, type, ex_date, ratio_from, ratio_to, cash_amount, currency, old_symbol, new_symbol, announced_at, available_at, retrieved_at, ingest_seq, content_hash, knowledge_provenance, knowledge_at, provenance_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)',
             [
               a.instrumentId,
               a.source,
@@ -432,10 +443,13 @@ export class PostgresMarketDataStore implements MarketDataStore {
               a.oldSymbol ?? null,
               a.newSymbol ?? null,
               a.announcedAt ?? null,
-              a.availableAt,
+              a.storedAvailableAt,
               a.retrievedAt,
               String(a.ingestSeq),
               a.contentHash,
+              a.knowledge.provenance,
+              a.knowledge.knowledgeAt,
+              a.provenanceHash,
             ],
           );
         }
@@ -444,19 +458,30 @@ export class PostgresMarketDataStore implements MarketDataStore {
   }
 
   async readCorporateActions(q: CorporateActionQuery): Promise<StoredCorporateAction[]> {
+    // Every revision within the ingest anchor, then the same replay rule as the in-memory store (one implementation, two backends).
     const { rows } = await this.pool.query<ActionRow>(
-      `SELECT * FROM (
-         SELECT DISTINCT ON (source_id, action_key) ${ACTION_COLUMNS} FROM corporate_actions
-          WHERE instrument_id = $1 AND ($2::text IS NULL OR source_id = $2::text) AND available_at <= $3 AND ($4::bigint IS NULL OR ingest_seq <= $4::bigint)
-          ORDER BY source_id, action_key, revision DESC
-       ) v WHERE ($5::text[] IS NULL OR v.type = ANY($5::text[])) ORDER BY v.ex_date_text, v.action_key`,
-      [q.instrumentId, q.source ?? null, canonicalUtc(q.asOf), q.storedThrough ?? null, q.types ?? null],
+      `SELECT ${ACTION_COLUMNS} FROM corporate_actions
+        WHERE instrument_id = $1 AND ($2::text IS NULL OR source_id = $2::text) AND ($3::bigint IS NULL OR ingest_seq <= $3::bigint)
+        ORDER BY source_id, action_key, revision`,
+      [q.instrumentId, q.source ?? null, q.storedThrough ?? null],
     );
-    return rows.map((r) => {
+    const byKey = new Map<string, StoredCorporateAction[]>();
+    for (const r of rows) {
       const a = toAction(r);
-      assertIntact('corporate action', corporateActionKey(a), corporateActionContentHash(a), a.contentHash);
-      return a;
-    });
+      const key = corporateActionKey(a);
+      const group = byKey.get(key);
+      if (group) group.push(a);
+      else byKey.set(key, [a]);
+    }
+    const out: StoredCorporateAction[] = [];
+    for (const revisions of byKey.values()) {
+      const v = selectReplayRevision(revisions, { asOf: q.asOf, storedThrough: q.storedThrough ?? Number.POSITIVE_INFINITY, purpose: q.purpose ?? 'information' });
+      if (!v || (q.types && !q.types.includes(v.type))) continue;
+      assertIntact('corporate action', corporateActionKey(v), corporateActionContentHash(v), v.contentHash);
+      assertProvenanceIntact(v);
+      out.push(v);
+    }
+    return out.sort((a, b) => (a.exDate < b.exDate ? -1 : a.exDate > b.exDate ? 1 : a.actionKey < b.actionKey ? -1 : 1));
   }
 
   async quarantined(instrumentId?: string): Promise<QuarantineRecord[]> {

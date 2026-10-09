@@ -381,19 +381,21 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
     const retrievedMs = this.clock().getTime();
     const retrievedAt = toUtcIso(retrievedMs);
     const source = this.source('corporate_actions');
-    // Known by ex-date at the latest; if NEXUS learned it earlier (announced split), from then on.
-    const availableAt = (exDate: string) => toUtcIso(Math.min(retrievedMs, zonedToUtc(exDate, '00:00', tz)));
+    // Provenance: the provider publishes no announcement or publication time for splits or dividends, so none is invented.
+    // The only proven knowledge is NEXUS's own first capture of the record: known exactly at retrievedAt. The ex-date is an
+    // economic effective time and is never used as a knowledge time (review finding F1).
+    const knowledge = { provenance: 'captured_by_nexus' as const, knowledgeAt: retrievedAt };
     const actions: CorporateAction[] = [];
     const splits = parseSplits(await this.request('/splits', params));
     for (const s of splits.splits) {
       const ratioFrom = Decimal.from(s.fromFactor);
       const ratioTo = Decimal.from(s.toFactor);
-      actions.push({ actionKey: 'split:' + s.date, instrumentId: instrument.instrumentId, source: source.sourceId, type: ratioTo.lt(ratioFrom) ? 'reverse_split' : 'split', exDate: s.date, ratioFrom, ratioTo, availableAt: availableAt(s.date), retrievedAt });
+      actions.push({ actionKey: 'split:' + s.date, instrumentId: instrument.instrumentId, source: source.sourceId, type: ratioTo.lt(ratioFrom) ? 'reverse_split' : 'split', exDate: s.date, ratioFrom, ratioTo, retrievedAt, knowledge });
     }
     const dividends = parseDividends(await this.request('/dividends', { ...params, adjust: 'false' }));
     for (const d of dividends.dividends) {
       const currency = dividends.currency && ISO_CURRENCY.test(dividends.currency) ? dividends.currency : instrument.currency;
-      actions.push({ actionKey: 'dividend:' + d.exDate, instrumentId: instrument.instrumentId, source: source.sourceId, type: 'cash_dividend', exDate: d.exDate, cashAmount: Decimal.from(d.amount), currency, availableAt: availableAt(d.exDate), retrievedAt });
+      actions.push({ actionKey: 'dividend:' + d.exDate, instrumentId: instrument.instrumentId, source: source.sourceId, type: 'cash_dividend', exDate: d.exDate, cashAmount: Decimal.from(d.amount), currency, retrievedAt, knowledge });
     }
     return { source, actions };
   }

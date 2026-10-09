@@ -117,13 +117,32 @@ export interface StoredQuote extends MarketQuote {
 
 export type CorporateActionType = 'split' | 'reverse_split' | 'cash_dividend' | 'symbol_change';
 
+/**
+ * How NEXUS can prove when a corporate-action record was known. A knowledge time is never derived from the ex-date.
+ *   provider_published_at               the provider states a publication time; knowledgeAt = that time (<= retrievedAt)
+ *   provider_announced_at               the provider states an announcement time; knowledgeAt = announcedAt
+ *   captured_by_nexus                   NEXUS first retrieved this record; knowledgeAt = retrievedAt
+ *   historical_effective_date_inference imported without proof; knowledgeAt = null. Economic reconstruction only.
+ *   legacy_unproven                     stored before provenance existed; knowledgeAt = null. Economic reconstruction only.
+ */
+export type CorporateActionKnowledgeProvenance = 'provider_published_at' | 'provider_announced_at' | 'captured_by_nexus' | 'historical_effective_date_inference' | 'legacy_unproven';
+
+/** Provenances that prove a knowledge time. Only these may support information (strategy, quant, scanner) knowledge. */
+export const PROVEN_KNOWLEDGE_PROVENANCE: readonly CorporateActionKnowledgeProvenance[] = ['provider_published_at', 'provider_announced_at', 'captured_by_nexus'];
+
+export interface CorporateActionKnowledge {
+  provenance: CorporateActionKnowledgeProvenance;
+  /** ISO UTC instant from which the record is provably known. null unless the provenance proves it. */
+  knowledgeAt: string | null;
+}
+
 export interface CorporateAction {
   /** Stable key per source, e.g. "split:2020-08-31". */
   actionKey: string;
   instrumentId: string;
   source: string;
   type: CorporateActionType;
-  /** Ex-date as local trading date of the instrument's venue. */
+  /** ECONOMIC effective time: the ex-date, a local trading date of the venue. Positions and prices change on it. Not evidence of knowledge. */
   exDate: string;
   /** Shares before → after (4-for-1 split: 1 → 4; 1-for-10 reverse split: 10 → 1). */
   ratioFrom?: Decimal;
@@ -132,15 +151,23 @@ export interface CorporateAction {
   currency?: string;
   oldSymbol?: string;
   newSymbol?: string;
+  /** Provider-stated announcement time when given. Data only: it proves knowledge only with provenance provider_announced_at. */
   announcedAt?: string;
-  availableAt: string;
+  /** NEXUS capture time of this record (a retrieval fact). Not knowledge of the market. */
   retrievedAt: string;
+  /** INFORMATION time: when the record is provably known. Separate from exDate and from retrievedAt. */
+  knowledge: CorporateActionKnowledge;
 }
 
 export interface StoredCorporateAction extends CorporateAction {
   revision: number;
   ingestSeq: number;
+  /** Economic content identity (change detection between revisions). */
   contentHash: string;
+  /** Storage visibility (database available_at). Equals retrievedAt for records stored after provenance existed. Not knowledge. */
+  storedAvailableAt: string;
+  /** Integrity of retrievedAt and knowledge fields. null for legacy rows, where there was nothing to protect. */
+  provenanceHash: string | null;
 }
 
 export type SourceEnvironment = 'production' | 'demo' | 'test_fixture';

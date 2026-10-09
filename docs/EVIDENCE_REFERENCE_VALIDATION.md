@@ -85,6 +85,7 @@ wired into `src/nexus/nexus-brain.ts` (`decide`, `trace`, `rejection`).
 | Result availability not provable at `asOf` (no seal, or commit bound after `asOf`) | blocking `RESULT_AVAILABILITY_UNPROVEN` |
 | Scanner, quant or backtest data later than `asOf` | blocking `EVIDENCE_FROM_FUTURE` |
 | Scanner without input availability time | blocking `DATA_AVAILABILITY_UNPROVEN` |
+| Split-adjusted quant run without the current `split-adjust` derivation version (stored earlier, or under another policy) | blocking `CORPORATE_ACTION_TIMING_UNPROVEN`: when its splits were known cannot be shown. Raw quant runs are not affected (see `CORPORATE_ACTION_PROVENANCE.md`) |
 | Scanner candidate must carry the cited quant run; quant asOf must equal scanner asOf | blocking `SCANNER_QUANT_LINEAGE_MISMATCH` |
 | Scanner ranking incomplete | warning; blocking if `requiresCompleteUniverse` (`SCANNER_RANKING_INCOMPLETE`) |
 | Backtest quality INVALID | blocking `BACKTEST_INVALID` |

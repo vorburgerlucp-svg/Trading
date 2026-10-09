@@ -102,7 +102,7 @@ describe.skipIf(!pgAvailable)('PostgreSQL market data' + (pgAvailable ? '' : ' (
       await expect(db.pool.query('DELETE FROM quant_runs')).rejects.toThrow(/NEXUS_APPEND_ONLY|append-only|immutable/i);
       await expect(db.pool.query("UPDATE quant_runs SET insufficient_data = NOT insufficient_data")).rejects.toThrow(/NEXUS_APPEND_ONLY|append-only|immutable/i);
 
-      // Backfill of the missing day, with an OLD availableAt (it was "available" long ago).
+      // Backfill of the missing day: NEXUS first retrieved it now, so its storage time is now (no invented old availability).
       await store.ingestBars(AAPL, [all[100]!], '2026-10-03T00:00:00Z');
 
       // A fresh process replays the stored run: same bars (pinned by storedThrough), same result.
