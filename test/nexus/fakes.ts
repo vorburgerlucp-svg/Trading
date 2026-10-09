@@ -17,6 +17,7 @@ import type { EvidenceRef } from '../../src/evidence/evidence-types.js';
 import { NexusMemory } from '../../src/memory/nexus-memory.js';
 import { chf } from '../../src/money/money.js';
 import { NexusBrain, readOnlyCapital, type CapitalReader, type DecisionRequest } from '../../src/nexus/nexus-brain.js';
+import type { EvidenceReaders } from '../../src/nexus/evidence-validation.js';
 import type { AiTask, QuantAssessment } from '../../src/nexus/nexus-types.js';
 import { loadSafetyConfig, type SafetyConfig } from '../../src/nexus/safety.js';
 import { createOpportunity } from '../../src/opportunities/opportunity-engine.js';
@@ -129,6 +130,8 @@ export interface BrainSetup {
   modelTimeoutMs?: number;
   /** Replaces the capital reader (e.g. to simulate a corrupted ledger). */
   capital?: CapitalReader;
+  /** Read-only lookups for cited quant/scanner/backtest runs. */
+  evidenceReaders?: EvidenceReaders;
 }
 
 export async function setupBrain(setup: BrainSetup = {}) {
@@ -168,6 +171,7 @@ export async function setupBrain(setup: BrainSetup = {}) {
     allocationPolicy,
     safety: setup.safety ?? loadSafetyConfig({ TRADING_MODE: 'paper', ALLOW_LIVE_TRADING: 'false' }),
     modelTimeoutMs: setup.modelTimeoutMs ?? 1_000,
+    evidenceReaders: setup.evidenceReaders,
   });
   return { brain, engine, evidence, blackboard, memory, audit, decisions, performance, registry, champions, adapters, allocationPolicy };
 }

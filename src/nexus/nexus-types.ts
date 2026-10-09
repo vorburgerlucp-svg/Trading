@@ -1,6 +1,7 @@
 import type { DecisionRecord, FinalAction } from '../audit/decision-records.js';
 import type { ModelCapability, CouncilRole, Domain, ModelKey, ModelOpinion, Recommendation, RiskFlag, Stance, Subtask } from '../ai/model-types.js';
 import type { Rappen } from '../money/money.js';
+import type { EvidenceIssue, EvidenceLineage } from './evidence-validation.js';
 
 export type Importance = 'low' | 'medium' | 'high' | 'critical';
 
@@ -175,6 +176,8 @@ export interface NexusDecision {
   execution: ExecutionGateResult;
   reasons: string[];
   consensus: ConsensusResult;
+  /** Validated evidence lineage and non-blocking warnings (weak backtests, incomplete universe). */
+  evidence: { lineage: EvidenceLineage; warnings: EvidenceIssue[] };
 }
 
 /**
@@ -195,6 +198,8 @@ export interface DecisionTrace {
     capitalStateRef: string;
     capitalEvidenceId: string;
     quant: QuantAssessment | null;
+    /** Structured evidence lineage from the TASK_CREATED audit event (empty when no evidence was cited). */
+    evidenceLineage: EvidenceLineage;
   };
   routing: { stepId: string; primaries: ModelKey[]; fallbacks: ModelKey[]; shadow: ModelKey[]; rejected: { modelKey: ModelKey; reasons: string[] }[] }[];
   attempts: AttemptRecord[];

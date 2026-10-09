@@ -1,0 +1,277 @@
+// Read-only evidence reference validation (fail closed).
+//
+// A decision may cite a quant run, a scanner run and backtest runs by id. A well-formed id proves
+// nothing. Before any cited evidence reaches a model or a decision, every reference must exist in its
+// own store, be admissible at the decision asOf, match one instrument and match its lineage.
+// The Brain reads through the narrow interfaces below. It never saves, deletes or recomputes a run.
+
+import type { BacktestRunStore } from '../backtest/backtest-store.js';
+import type { BacktestRunResult } from '../backtest/backtest-types.js';
+import type { QuantRunStore } from '../quant/quant-run-store.js';
+import type { QuantRunRecord } from '../quant/quant-types.js';
+import { parseUtc } from '../market-data/time.js';
+import type { ScannerRunStore } from '../scanner/scanner-store.js';
+import type { ScannerCandidate, ScannerRun } from '../scanner/scanner-types.js';
+
+export interface ScannerEvidenceReader {
+  get(scannerRunId: string): Promise<ScannerRun | null>;
+}
+export interface BacktestEvidenceReader {
+  get(backtestRunId: string): Promise<BacktestRunResult | null>;
+}
+export interface QuantEvidenceReader {
+  get(quantRunId: string): Promise<QuantRunRecord | null>;
+}
+
+export interface EvidenceReaders {
+  scanner?: ScannerEvidenceReader;
+  backtest?: BacktestEvidenceReader;
+  quant?: QuantEvidenceReader;
+}
+
+/** Only `get` is exposed: nothing reachable through these can save, delete or recompute a run. */
+export function readOnlyScannerEvidence(store: Pick<ScannerRunStore, 'get'>): ScannerEvidenceReader {
+  return Object.freeze({ get: (scannerRunId: string) => store.get(scannerRunId) });
+}
+export function readOnlyBacktestEvidence(store: Pick<BacktestRunStore, 'get'>): BacktestEvidenceReader {
+  return Object.freeze({ get: (backtestRunId: string) => store.get(backtestRunId) });
+}
+export function readOnlyQuantEvidence(store: Pick<QuantRunStore, 'get'>): QuantEvidenceReader {
+  return Object.freeze({ get: (quantRunId: string) => store.get(quantRunId) });
+}
+
+/** Machine-readable reason codes. Blocking codes fail the decision; warnings are kept in the audit trail. */
+export const EVIDENCE_REASON_CODES = [
+  'EVIDENCE_READER_NOT_CONFIGURED',
+  'QUANT_EVIDENCE_NOT_FOUND',
+  'QUANT_EVIDENCE_INTEGRITY_FAILED',
+  'SCANNER_EVIDENCE_NOT_FOUND',
+  'SCANNER_EVIDENCE_INTEGRITY_FAILED',
+  'BACKTEST_EVIDENCE_NOT_FOUND',
+  'BACKTEST_EVIDENCE_INTEGRITY_FAILED',
+  'EVIDENCE_FROM_FUTURE',
+  'SCANNER_QUANT_LINEAGE_MISMATCH',
+  'SCANNER_RANKING_INCOMPLETE',
+  'BACKTEST_INVALID',
+  'BACKTEST_AVAILABILITY_UNVERIFIABLE',
+  'BACKTEST_RECORDING_TIME_NOT_RECORDED',
+  'BACKTEST_WEAK_EVIDENCE',
+  'BACKTEST_INSUFFICIENT_SAMPLE',
+  'EVIDENCE_INSTRUMENT_UNKNOWN',
+  'CROSS_INSTRUMENT_EVIDENCE',
+] as const;
+export type EvidenceReasonCode = (typeof EVIDENCE_REASON_CODES)[number];
+
+export interface EvidenceIssue {
+  code: EvidenceReasonCode;
+  ref: string;
+  detail: string;
+}
+
+export interface EvidenceRequest {
+  asOf: string;
+  quantRunId: string | undefined;
+  scannerRunId: string | undefined;
+  backtestRunIds: readonly string[] | undefined;
+  /** opportunity.links.instrumentId, when the opportunity is linked to one. */
+  opportunityInstrumentId: string | undefined;
+  /** The decision needs the complete universe; an incomplete scanner ranking then blocks it. */
+  requiresCompleteUniverse: boolean;
+}
+
+/** Structured lineage: Decision → QuantRun → ScannerRun → ScannerCandidate → BacktestRuns. IDs and fingerprints only. */
+export interface EvidenceLineage {
+  asOf: string;
+  instrumentId: string | null;
+  quant: { quantRunId: string; instrumentId: string; asOf: string } | null;
+  scanner: {
+    scannerRunId: string;
+    asOf: string;
+    rankingComplete: boolean;
+    inputFingerprint: string;
+    candidate: { instrumentId: string; rank: number; quantRunId: string } | null;
+  } | null;
+  backtests: {
+    backtestRunId: string;
+    instrumentId: string;
+    strategyId: string;
+    strategyVersion: string;
+    strategyFingerprint: string;
+    inputFingerprint: string;
+    grade: BacktestRunResult['quality']['grade'];
+    insufficientSample: boolean;
+    /** 'strong' only for grade A without insufficient sample. Everything else is weak evidence. */
+    strength: 'strong' | 'weak';
+    /** Last market availability time the backtest used (last equity point). */
+    dataCutoff: string | null;
+  }[];
+}
+
+export interface EvidenceValidation {
+  passed: boolean;
+  blocking: EvidenceIssue[];
+  warnings: EvidenceIssue[];
+  lineage: EvidenceLineage;
+}
+
+/** Thrown when a decision cites evidence that does not hold up. Nothing has been written for the decision. */
+export class EvidenceReferenceError extends Error {
+  override readonly name = 'EvidenceReferenceError';
+  readonly codes: EvidenceReasonCode[];
+
+  constructor(readonly validation: EvidenceValidation) {
+    super('evidence references rejected (fail closed): ' + validation.blocking.map((i) => i.code + ' ' + i.ref).join('; '));
+    this.codes = [...new Set(validation.blocking.map((i) => i.code))];
+  }
+}
+
+const byCodeAndRef = (a: EvidenceIssue, b: EvidenceIssue): number => (a.code < b.code ? -1 : a.code > b.code ? 1 : a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0);
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Loads one run through its read-only reader. Missing, unreadable, or mis-keyed runs are blocking issues, never silent. */
+async function fetchRun<T>(
+  ref: string,
+  codes: { notFound: EvidenceReasonCode; integrity: EvidenceReasonCode; kind: string },
+  reader: { get(id: string): Promise<T | null> } | undefined,
+  idOf: (run: T) => string,
+  blocking: EvidenceIssue[],
+): Promise<T | null> {
+  if (reader === undefined) {
+    blocking.push({ code: 'EVIDENCE_READER_NOT_CONFIGURED', ref, detail: codes.kind + ' evidence is referenced but no read-only reader is configured' });
+    return null;
+  }
+  let run: T | null;
+  try {
+    run = await reader.get(ref);
+  } catch (error) {
+    blocking.push({ code: codes.integrity, ref, detail: 'stored ' + codes.kind + ' evidence failed its integrity check: ' + errorMessage(error) });
+    return null;
+  }
+  if (run === null) {
+    blocking.push({ code: codes.notFound, ref, detail: codes.kind + ' evidence ' + ref + ' does not exist' });
+    return null;
+  }
+  if (idOf(run) !== ref) {
+    blocking.push({ code: codes.integrity, ref, detail: 'store returned ' + codes.kind + ' evidence under a different id' });
+    return null;
+  }
+  return run;
+}
+
+/**
+ * Validates every evidence reference a decision cites. Pure with respect to the decision: it reads
+ * the stores, never writes, and its result depends only on the stored runs and the request asOf.
+ */
+export async function validateEvidenceReferences(request: EvidenceRequest, readers: EvidenceReaders): Promise<EvidenceValidation> {
+  const blocking: EvidenceIssue[] = [];
+  const warnings: EvidenceIssue[] = [];
+  const block = (code: EvidenceReasonCode, ref: string, detail: string) => void blocking.push({ code, ref, detail });
+  const warn = (code: EvidenceReasonCode, ref: string, detail: string) => void warnings.push({ code, ref, detail });
+  // Decision time as an instant. Date.parse accepts offsets exactly like the evidence store does. An unreadable asOf
+  // must not make every future check pass silently, so it fails closed.
+  const asOfMs = Date.parse(request.asOf);
+  if (Number.isNaN(asOfMs)) throw new Error('evidence validation needs an ISO asOf, got "' + request.asOf.slice(0, 40) + '"');
+
+  // Quant run: the instrument anchor of the decision.
+  const quant = request.quantRunId === undefined
+    ? null
+    : await fetchRun(request.quantRunId, { notFound: 'QUANT_EVIDENCE_NOT_FOUND', integrity: 'QUANT_EVIDENCE_INTEGRITY_FAILED', kind: 'quant' }, readers.quant, (r) => r.result.quantRunId, blocking);
+  if (quant !== null && parseUtc(quant.result.asOf) > asOfMs) block('EVIDENCE_FROM_FUTURE', quant.result.quantRunId, 'quant asOf ' + quant.result.asOf + ' is after decision asOf ' + request.asOf);
+
+  // Scanner run and lineage: the candidate must come from exactly the cited quant run.
+  const scanner = request.scannerRunId === undefined
+    ? null
+    : await fetchRun(request.scannerRunId, { notFound: 'SCANNER_EVIDENCE_NOT_FOUND', integrity: 'SCANNER_EVIDENCE_INTEGRITY_FAILED', kind: 'scanner' }, readers.scanner, (r) => r.scannerRunId, blocking);
+  let candidate: ScannerCandidate | null = null;
+  if (scanner !== null) {
+    if (parseUtc(scanner.asOf) > asOfMs) block('EVIDENCE_FROM_FUTURE', scanner.scannerRunId, 'scanner asOf ' + scanner.asOf + ' is after decision asOf ' + request.asOf);
+    if (!scanner.rankingComplete) {
+      const detail = 'ranking covers ' + scanner.coverage.evaluatedInstruments + ' of ' + scanner.coverage.universeMembers + ' universe members; it is not a ranking of the full universe';
+      if (request.requiresCompleteUniverse) block('SCANNER_RANKING_INCOMPLETE', scanner.scannerRunId, detail);
+      else warn('SCANNER_RANKING_INCOMPLETE', scanner.scannerRunId, detail);
+    }
+    if (request.quantRunId !== undefined) {
+      candidate = scanner.candidates.find((c) => c.quantRunId === request.quantRunId) ?? null;
+      if (candidate === null) block('SCANNER_QUANT_LINEAGE_MISMATCH', scanner.scannerRunId, 'no candidate of this scanner run was produced by quant run ' + request.quantRunId);
+      if (quant !== null && parseUtc(quant.result.asOf) !== parseUtc(scanner.asOf)) {
+        block('SCANNER_QUANT_LINEAGE_MISMATCH', scanner.scannerRunId, 'quant run asOf ' + quant.result.asOf + ' differs from scanner asOf ' + scanner.asOf);
+      }
+    }
+  }
+
+  // Instrument identity: only from persisted lineage or the opportunity link. Never guessed.
+  const claims: { source: string; instrumentId: string }[] = [];
+  if (quant !== null) claims.push({ source: 'quant run', instrumentId: quant.result.instrumentId });
+  if (candidate !== null) claims.push({ source: 'scanner candidate', instrumentId: candidate.instrumentId });
+  if (request.opportunityInstrumentId !== undefined) claims.push({ source: 'opportunity', instrumentId: request.opportunityInstrumentId });
+  const knownInstruments = [...new Set(claims.map((c) => c.instrumentId))].sort();
+  if (knownInstruments.length > 1) {
+    block('CROSS_INSTRUMENT_EVIDENCE', request.quantRunId ?? request.scannerRunId ?? 'decision', 'instrument claims disagree: ' + claims.map((c) => c.source + '=' + c.instrumentId).join(', '));
+  }
+  const instrumentId = knownInstruments.length === 1 ? (knownInstruments[0] ?? null) : null;
+
+  // Backtests: each run must exist, be valid, be admissible at asOf and belong to the decision instrument.
+  const backtests: EvidenceLineage['backtests'] = [];
+  for (const ref of [...new Set(request.backtestRunIds ?? [])].sort()) {
+    const run = await fetchRun(ref, { notFound: 'BACKTEST_EVIDENCE_NOT_FOUND', integrity: 'BACKTEST_EVIDENCE_INTEGRITY_FAILED', kind: 'backtest' }, readers.backtest, (r) => r.backtestRunId, blocking);
+    if (run === null) continue;
+    const grade = run.quality.grade;
+    if (grade === 'INVALID') block('BACKTEST_INVALID', ref, 'quality INVALID cannot support a decision: ' + run.quality.reasons.join('; '));
+    const dataCutoff = run.equityCurve.at(-1)?.at ?? null;
+    if (dataCutoff === null) block('BACKTEST_AVAILABILITY_UNVERIFIABLE', ref, 'backtest has no equity series, so its data window cannot be placed in time');
+    else if (parseUtc(dataCutoff) > asOfMs) block('EVIDENCE_FROM_FUTURE', ref, 'backtest data runs to ' + dataCutoff + ', after decision asOf ' + request.asOf);
+    // The domain result has no createdAt/availableAt. Its data window is checked above; when it was computed is not provable.
+    warn('BACKTEST_RECORDING_TIME_NOT_RECORDED', ref, 'the run carries no creation or availability time; that it existed before asOf cannot be proven');
+    if (run.quality.insufficientSample) warn('BACKTEST_INSUFFICIENT_SAMPLE', ref, run.metrics.numberOfTrades + ' trade(s): weak evidence only, no probability may be derived from it');
+    const strong = grade === 'A' && !run.quality.insufficientSample;
+    if (!strong && grade !== 'INVALID') warn('BACKTEST_WEAK_EVIDENCE', ref, 'quality ' + grade + ': supporting evidence only, never strong proof');
+    backtests.push({
+      backtestRunId: run.backtestRunId,
+      instrumentId: run.instrumentId,
+      strategyId: run.strategyId,
+      strategyVersion: run.strategyVersion,
+      strategyFingerprint: run.strategyFingerprint,
+      inputFingerprint: run.inputFingerprint,
+      grade,
+      insufficientSample: run.quality.insufficientSample,
+      strength: strong ? 'strong' : 'weak',
+      dataCutoff,
+    });
+  }
+  if (backtests.length > 0) {
+    const backtestInstruments = [...new Set(backtests.map((b) => b.instrumentId))].sort();
+    if (backtestInstruments.length > 1) block('CROSS_INSTRUMENT_EVIDENCE', 'backtests', 'backtests belong to different instruments: ' + backtestInstruments.join(', '));
+    if (instrumentId === null) {
+      block('EVIDENCE_INSTRUMENT_UNKNOWN', 'backtests', 'backtest evidence needs a decision instrument to be matched; it comes from a quant run, scanner candidate lineage or an opportunity link');
+    } else {
+      for (const b of backtests) {
+        if (b.instrumentId !== instrumentId) block('CROSS_INSTRUMENT_EVIDENCE', b.backtestRunId, 'backtest is for ' + b.instrumentId + ' but the decision is for ' + instrumentId);
+      }
+    }
+  }
+
+  const lineage: EvidenceLineage = {
+    asOf: request.asOf,
+    instrumentId,
+    quant: quant === null ? null : { quantRunId: quant.result.quantRunId, instrumentId: quant.result.instrumentId, asOf: quant.result.asOf },
+    scanner: scanner === null
+      ? null
+      : {
+          scannerRunId: scanner.scannerRunId,
+          asOf: scanner.asOf,
+          rankingComplete: scanner.rankingComplete,
+          inputFingerprint: scanner.inputFingerprint,
+          candidate: candidate === null ? null : { instrumentId: candidate.instrumentId, rank: candidate.rank, quantRunId: candidate.quantRunId },
+        },
+    backtests: backtests.sort((a, b) => (a.backtestRunId < b.backtestRunId ? -1 : a.backtestRunId > b.backtestRunId ? 1 : 0)),
+  };
+  return {
+    passed: blocking.length === 0,
+    blocking: blocking.sort(byCodeAndRef),
+    warnings: warnings.sort(byCodeAndRef),
+    lineage,
+  };
+}

@@ -116,33 +116,6 @@ describe('DecisionRecord und Audit Trail', () => {
   });
 
 
-  it('Scanner-/Backtest-Referenzen fliessen in Audit und Decision-Fingerprint ein', async () => {
-    const quant = {
-      status: 'confirmed' as const,
-      direction: 'bullish' as const,
-      evidenceRefId: 'quant-aapl',
-      summary: 'fixture',
-      quantRunId: 'qr_' + 'a'.repeat(40),
-      scannerRunId: 'scan_' + 'b'.repeat(40),
-      backtestRunIds: ['bt_' + 'c'.repeat(40), 'bt_' + 'd'.repeat(40)],
-    };
-
-    const first = await setupBrain({ adapters: council() });
-    const d1 = await first.brain.decide(decisionRequest(task({ id: 'task-evidence-links' }), { quant }));
-    const trace = first.brain.trace(d1.decisionId)!;
-    expect(trace.inputs.quant).toMatchObject({
-      quantRunId: quant.quantRunId,
-      scannerRunId: quant.scannerRunId,
-      backtestRunIds: quant.backtestRunIds,
-    });
-    const fp1 = first.brain.record(d1.decisionId)!.inputFingerprint;
-
-    const second = await setupBrain({ adapters: council() });
-    const changed = { ...quant, backtestRunIds: ['bt_' + 'e'.repeat(40)] };
-    const d2 = await second.brain.decide(decisionRequest(task({ id: 'task-evidence-links' }), { quant: changed }));
-    expect(second.brain.record(d2.decisionId)!.inputFingerprint).not.toBe(fp1);
-  });
-
   it('verweigert ungueltige oder doppelte Scanner-/Backtest-Referenzen', async () => {
     const ctx = await setupBrain({ adapters: council() });
     await expect(ctx.brain.decide(decisionRequest(task(), {

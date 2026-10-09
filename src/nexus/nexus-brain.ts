@@ -36,6 +36,7 @@ import { toUntrustedBlock } from '../security/untrusted-input.js';
 import { AiRouter, DEFAULT_ROUTER_CONFIG, type RouterConfig } from './ai-router.js';
 import { buildConsensus } from './consensus-engine.js';
 import { assessRiskFlags } from './critic.js';
+import { EvidenceReferenceError, validateEvidenceReferences, type EvidenceReaders, type EvidenceValidation } from './evidence-validation.js';
 import type { AiTask, AttemptRecord, AuthoredRiskFlag, CapitalDecision, ConsensusResult, DecisionOutcome, DecisionTrace, NexusDecision, QuantAssessment, TaskPlan } from './nexus-types.js';
 import { executionGate, isFinancialBucket, type SafetyConfig } from './safety.js';
 import { TaskManager } from './task-manager.js';
@@ -78,6 +79,8 @@ export interface NexusBrainDeps {
   modelTimeoutMs?: number;
   /** Documented calibration model; without one, calibratedProbability stays null. */
   calibration?: CalibrationModel | null;
+  /** Read-only lookups for cited quant/scanner/backtest runs. A cited run without its reader fails closed. */
+  evidenceReaders?: EvidenceReaders;
 }
 
 export interface DecisionRequest {
@@ -93,6 +96,8 @@ export interface DecisionRequest {
   quant?: QuantAssessment;
   /** Default: required for financial-market opportunities. */
   requiresQuant?: boolean;
+  /** The decision assumes a ranking of the full universe; an incomplete scanner ranking then fails closed. */
+  requiresCompleteUniverse?: boolean;
 }
 
 export class NexusBrainError extends Error {
@@ -133,6 +138,25 @@ export class NexusBrain {
       await audit.record(event);
       return eventId;
     };
+
+    // 0b. Referential evidence, read-only and fail closed. Cited runs are checked against their own stores before
+    //     anything is written: a phantom, future, invalid or incompatible run never reaches a model or a decision.
+    const evidenceValidation = await validateEvidenceReferences(
+      {
+        asOf,
+        quantRunId: request.quant?.quantRunId,
+        scannerRunId: request.quant?.scannerRunId,
+        backtestRunIds: request.quant?.backtestRunIds,
+        opportunityInstrumentId: request.opportunity?.links?.instrumentId,
+        requiresCompleteUniverse: request.requiresCompleteUniverse === true,
+      },
+      this.deps.evidenceReaders ?? {},
+    );
+    if (!evidenceValidation.passed) {
+      // Refused before any write. The task and the blocking reasons stay in the audit trail.
+      await emit('TASK_CREATED', { task, question: request.question, outcome: 'REJECTED_EVIDENCE', evidenceValidation });
+      throw new EvidenceReferenceError(evidenceValidation);
+    }
 
     // 1. Inputs, point-in-time. Look-ahead evidence is excluded; external text is quoted / quarantined.
     const keyIds = request.keyEvidenceIds ?? [];
@@ -218,6 +242,7 @@ export class NexusBrain {
       potentialCapitalImpactChf,
       opportunity: opportunity ? { id: opportunity.id, type: opportunity.type, bucket: opportunity.bucket, status: opportunity.status } : null,
       security,
+      evidenceReferences: { lineage: evidenceValidation.lineage, warnings: evidenceValidation.warnings },
     });
 
     let quantResultRef: string | undefined;
@@ -376,6 +401,7 @@ export class NexusBrain {
       execution: execGate,
       reasons,
       consensus,
+      evidence: { lineage: evidenceValidation.lineage, warnings: evidenceValidation.warnings },
     };
     await emit('DECISION_RECORDED', decision);
 
@@ -387,6 +413,7 @@ export class NexusBrain {
       evidence: inputEvidence.map((e) => ({ id: e.id, version: e.version, status: e.status })),
       capitalStateRef,
       quant: request.quant ?? null,
+      evidenceLineage: evidenceValidation.lineage,
       opportunity: opportunity
         ? { id: opportunity.id, type: opportunity.type, requiredCapitalChf: opportunity.requiredCapitalChf, sizing: opportunity.sizing, expectedNetProfitChf: opportunity.expectedNetProfitChf, downsideChf: opportunity.downsideChf, scores: opportunity.scores }
         : null,
@@ -439,7 +466,7 @@ export class NexusBrain {
     const events = this.deps.audit.byDecision(decisionId);
     const one = <P>(type: AuditEventType): P | undefined => events.find((e) => e.type === type)?.payload as P | undefined;
     const all = <P>(type: AuditEventType): P[] => events.filter((e) => e.type === type).map((e) => e.payload as P);
-    const created = one<{ task: AiTask; question: string; plan: TaskPlan; inputs: Omit<DecisionTrace['inputs'], 'quant'>; security: DecisionTrace['security'] }>('TASK_CREATED');
+    const created = one<{ task: AiTask; question: string; plan: TaskPlan; inputs: Omit<DecisionTrace['inputs'], 'quant' | 'evidenceLineage'>; security: DecisionTrace['security']; evidenceReferences: Pick<EvidenceValidation, 'lineage' | 'warnings'> }>('TASK_CREATED');
     const decision = one<NexusDecision>('DECISION_RECORDED');
     if (!created || !decision) throw new NexusBrainError('incomplete audit trail for ' + decisionId);
     const risk = one<{ risk: DecisionTrace['risk'] }>('RISK_DECISION');
@@ -450,7 +477,7 @@ export class NexusBrain {
       task: created.task,
       question: created.question,
       plan: created.plan,
-      inputs: { ...created.inputs, quant: one<QuantAssessment>('QUANT_RESULT') ?? null },
+      inputs: { ...created.inputs, quant: one<QuantAssessment>('QUANT_RESULT') ?? null, evidenceLineage: created.evidenceReferences.lineage },
       routing: all<DecisionTrace['routing'][number]>('MODEL_SELECTED').map((r) => ({ stepId: r.stepId, primaries: r.primaries, fallbacks: r.fallbacks, shadow: r.shadow, rejected: r.rejected })),
       attempts: all<AttemptRecord>('MODEL_RESPONSE_RECEIVED'),
       blackboardEntryIds: all<{ entryId: string }>('BLACKBOARD_ENTRY').map((e) => e.entryId),
