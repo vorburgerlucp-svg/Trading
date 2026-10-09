@@ -91,6 +91,33 @@ export interface BacktestRunResult {
   metrics: BacktestMetrics;
   quality: BacktestQuality;
   ambiguousBars: number;
+  /**
+   * Warm-up semantics of this run, fully reconstructible (see docs/BACKTEST_WARMUP_ENFORCEMENT.md).
+   * Absent only in backtest-engine:v1 runs, which had no warm-up gate and therefore cannot prove one.
+   */
+  warmup?: BacktestWarmupResult;
+}
+
+export interface BacktestWarmupResult {
+  algorithmVersion: string;
+  requiredBars: number;
+  preferredBars: number;
+  /** The hard gate: at least requiredBars bars were available at some event. */
+  requiredWarmupMet: boolean;
+  /** Every strategy evaluation had at least preferredBars of history, and there was at least one evaluation. */
+  preferredWarmupMet: boolean;
+  /** availableAt of the first event the strategy was evaluated on; null if it never was. */
+  firstStrategyEvaluationAt: string | null;
+  /** availableAt of the first event whose history reached preferredBars; null if it never did. */
+  preferredWarmupCompleteAt: string | null;
+  /** Events below the hard gate. Visible in equityCurve, never evaluated. */
+  warmupBars: number;
+  /** Events at or after the hard gate. Exposure is measured over these. */
+  tradableBars: number;
+  /** evaluate() calls. Equals tradableBars by construction. */
+  strategyEvaluations: number;
+  /** Evaluations made with fewer than preferredBars of history. */
+  evaluationsBelowPreferred: number;
 }
 
 export interface BacktestQualityContext {

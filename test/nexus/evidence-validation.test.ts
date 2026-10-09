@@ -132,6 +132,8 @@ function backtestRun(o: { c: string; instrumentId?: string; grade?: BacktestRunR
     },
     quality: { grade, reasons: grade === 'INVALID' ? ['market data is incomplete'] : [], insufficientSample: o.insufficientSample ?? false },
     ambiguousBars: 0,
+    // One evaluation on the single bar, before any fixture fill, with the whole history at preferredBars = requiredBars = 1.
+    warmup: { algorithmVersion: 'test-warmup:v1', requiredBars: 1, preferredBars: 1, requiredWarmupMet: true, preferredWarmupMet: true, firstStrategyEvaluationAt: '2026-09-01T00:00:00.000Z', preferredWarmupCompleteAt: '2026-09-01T00:00:00.000Z', warmupBars: 0, tradableBars: 1, strategyEvaluations: 1, evaluationsBelowPreferred: 0 },
   };
 }
 
@@ -395,6 +397,16 @@ describe('Evidence reference validation (NEXUS Brain, read-only, fail closed)', 
     const { readers, cited } = await validLineage();
     const result = await validateEvidenceReferences({ asOf: T0, quantRunId: cited.quantRunId, scannerRunId: cited.scannerRunId, backtestRunIds: cited.backtestRunIds, opportunityInstrumentId: undefined, requiresCompleteUniverse: false }, readers);
     expect(evidenceDecisionImpact(result.lineage, true)).toEqual([]);
+  });
+
+  it('O3: ein v1-Backtest ohne Warm-up-Gate ist nicht beweisbar; verfehltes Preferred-Warm-up bleibt zulässig, wird aber markiert', async () => {
+    const base = backtestRun({ c: '4', trades: 30 });
+    const legacy = { ...base, engineVersion: 'backtest-engine:v1', warmup: undefined };
+    const preferredMissed = { ...backtestRun({ c: '5', trades: 30 }), warmup: { ...base.warmup!, preferredBars: 2, preferredWarmupMet: false, evaluationsBelowPreferred: 1 } };
+    const readers = await readersWith({ backtests: [legacy, preferredMissed], quant: [quantRun('1')] });
+    const result = await validateEvidenceReferences({ asOf: T0, quantRunId: undefined, scannerRunId: undefined, backtestRunIds: [backtestId('4'), backtestId('5')], opportunityInstrumentId: 'AAPL', requiresCompleteUniverse: false }, readers);
+    expect(result.blocking).toEqual([expect.objectContaining({ code: 'BACKTEST_WARMUP_UNPROVEN', ref: backtestId('4') })]);
+    expect(result.warnings).toEqual([expect.objectContaining({ code: 'BACKTEST_PREFERRED_WARMUP_NOT_MET', ref: backtestId('5') })]);
   });
 
   it('Gleiche Eingaben liefern dieselbe Validierung (deterministisch)', async () => {

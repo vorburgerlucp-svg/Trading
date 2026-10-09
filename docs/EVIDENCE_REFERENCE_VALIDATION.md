@@ -93,6 +93,8 @@ wired into `src/nexus/nexus-brain.ts` (`decide`, `trace`, `rejection`).
 | Backtests without any instrument anchor | blocking `EVIDENCE_INSTRUMENT_UNKNOWN` |
 | Backtest strength | `strong` only for grade A without insufficient sample; otherwise `weak` plus `BACKTEST_WEAK_EVIDENCE` |
 | Insufficient sample (e.g. 3 trades, 100 % win rate) | warning `BACKTEST_INSUFFICIENT_SAMPLE`, strength `weak` |
+| Backtest from `backtest-engine:v1` (no warm-up gate) | blocking `BACKTEST_WARMUP_UNPROVEN`: early decisions cannot be shown to have had enough history (O3) |
+| Backtest with `preferredWarmupMet = false` | warning `BACKTEST_PREFERRED_WARMUP_NOT_MET`; admissible, marked, strength unchanged (O3) |
 
 ## 4. Weak evidence: effect on the decision
 

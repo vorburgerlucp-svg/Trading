@@ -31,3 +31,18 @@ export function warmupPlan(parameters: QuantParameters): WarmupPlan {
 export function isWarm(parameters: QuantParameters, availableBars: number): boolean {
   return availableBars >= warmupPlan(parameters).requiredBars;
 }
+
+export class WarmupPlanError extends Error {
+  override readonly name = 'WarmupPlanError';
+}
+
+/**
+ * A strategy must declare its history requirement. Nothing defaults to 1: a missing or malformed plan is a
+ * programming error and refuses the run instead of quietly trading on too little history.
+ */
+export function validateWarmupPlan(plan: WarmupPlan): WarmupPlan {
+  if (!Number.isSafeInteger(plan.requiredBars) || plan.requiredBars < 1) throw new WarmupPlanError('requiredBars must be an integer >= 1');
+  if (!Number.isSafeInteger(plan.preferredBars) || plan.preferredBars < plan.requiredBars) throw new WarmupPlanError('preferredBars must be an integer >= requiredBars');
+  if (typeof plan.algorithmVersion !== 'string' || plan.algorithmVersion.trim() === '') throw new WarmupPlanError('warm-up algorithmVersion is required');
+  return plan;
+}

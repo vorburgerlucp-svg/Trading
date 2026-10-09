@@ -13,7 +13,10 @@ export function backtestMetrics(input: {
   trades: readonly BacktestTrade[];
   equityCurve: readonly BacktestEquityPoint[];
   totalFees: Decimal;
+  /** Tradable events (at or after the warm-up gate) with an open position. */
   exposedPoints: number;
+  /** Tradable events: the evaluation period. Warm-up events are excluded from exposure; return and drawdown still use the full equity curve. */
+  tradablePoints: number;
 }): BacktestMetrics {
   const pnl = input.endingEquity.minus(input.startingCapital);
   const returnPct = input.startingCapital.isZero() ? 0 : pnl.dividedBy(input.startingCapital, 12, 'half_even').times(100).toNumber();
@@ -47,6 +50,6 @@ export function backtestMetrics(input: {
     profitFactor: grossLossAbs.isZero() ? null : grossProfit.dividedBy(grossLossAbs, 12, 'half_even').toNumber(),
     expectancy: average(input.trades.map((t) => t.pnl)),
     totalFees: input.totalFees,
-    exposurePct: input.equityCurve.length === 0 ? 0 : (input.exposedPoints / input.equityCurve.length) * 100,
+    exposurePct: input.tradablePoints === 0 ? 0 : (input.exposedPoints / input.tradablePoints) * 100,
   };
 }

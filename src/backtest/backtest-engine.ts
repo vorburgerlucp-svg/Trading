@@ -1,11 +1,13 @@
-// Single-instrument deterministic Backtest Engine V1 core.
+// Single-instrument deterministic Backtest Engine core (backtest-engine:v2).
 //
 // Event convention per final bar becoming available:
 //   1. process a market order created from an earlier bar at this bar's OPEN
 //   2. process protective stop/take-profit over this bar
 //   3. mark the portfolio at this bar's CLOSE, now that the bar is available
-//   4. evaluate the strategy using only bars with availableAt <= this event time
-//   5. create (but never fill) new market orders for a later bar
+//   4. warm-up gate: while fewer than requiredBars bars are available at this event, stop here.
+//      The strategy is not called, so warm-up can create no decision, no order and no fill.
+//   5. evaluate the strategy using only bars with availableAt <= this event time
+//   6. create (but never fill) new market orders for a later bar
 //
 // This intentionally forbids same-bar execution from final-close decisions.
 
@@ -19,10 +21,11 @@ import { backtestMetrics } from './performance.js';
 import { PointInTimeBarState, buildBarAvailabilityQueue } from './point-in-time.js';
 import { assessBacktestQuality } from './quality.js';
 import { desiredLongQuantity } from './sizing.js';
-import type { BacktestFill, BacktestInput, BacktestPosition, BacktestRunResult, BacktestTrade } from './backtest-types.js';
+import type { BacktestFill, BacktestInput, BacktestPosition, BacktestQuality, BacktestRunResult, BacktestTrade, BacktestWarmupResult } from './backtest-types.js';
 import type { BacktestStrategy, StrategyDecision } from './strategy.js';
+import { validateWarmupPlan, type WarmupPlan } from './warmup.js';
 
-export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v1';
+export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v2';
 
 interface PendingOrder {
   side: 'buy' | 'sell';
@@ -61,9 +64,37 @@ function assertChronologicalAvailability(bars: readonly MarketBar[]): void {
   }
 }
 
+/** The warm-up plan as it enters the input fingerprint: exactly these fields, nothing the strategy adds. */
+function warmupPlanOf(plan: WarmupPlan): WarmupPlan {
+  return { algorithmVersion: plan.algorithmVersion, requiredBars: plan.requiredBars, preferredBars: plan.preferredBars };
+}
+
+/**
+ * Warm-up never widens a result. Too little history makes the run INVALID (fail closed, still stored for audit).
+ * A reached requiredBars with an unmet preferredBars is a visible hint only: the grade is not changed, because the
+ * preferred history is a stability goal and not a validity rule.
+ */
+function applyWarmupToQuality(base: BacktestQuality, w: { requiredWarmupMet: boolean; preferredWarmupMet: boolean; barsProcessed: number; requiredBars: number; preferredBars: number; strategyEvaluations: number; evaluationsBelowPreferred: number }): BacktestQuality {
+  if (!w.requiredWarmupMet) {
+    return {
+      grade: 'INVALID',
+      reasons: ['INSUFFICIENT_WARMUP_HISTORY: ' + w.barsProcessed + ' bar(s) available, requiredBars ' + w.requiredBars + '; the strategy was never evaluated, so no order or fill exists', ...base.reasons],
+      insufficientSample: base.insufficientSample,
+    };
+  }
+  if (!w.preferredWarmupMet) {
+    return {
+      ...base,
+      reasons: [...base.reasons, 'PREFERRED_WARMUP_NOT_MET: ' + w.evaluationsBelowPreferred + ' of ' + w.strategyEvaluations + ' evaluation(s) had fewer than preferredBars ' + w.preferredBars + ' bars'],
+    };
+  }
+  return base;
+}
+
 export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy }): BacktestRunResult {
   if (!input.initialCapital.isPositive()) throw new Error('initial capital must be positive');
   if (input.bars.length === 0) throw new Error('backtest requires bars');
+  const warmup = validateWarmupPlan(input.strategy.warmup);
   const instrumentId = input.bars[0]!.instrumentId;
   if (input.bars.some((b) => b.instrumentId !== instrumentId)) throw new Error('V1 backtest is single-instrument');
   if (input.bars.some((b) => !b.isFinal)) throw new Error('backtest accepts final bars only');
@@ -91,6 +122,12 @@ export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy 
   let totalFees = Decimal.ZERO;
   let ambiguousBars = 0;
   let exposedPoints = 0;
+  let warmupBars = 0;
+  let tradableBars = 0;
+  let strategyEvaluations = 0;
+  let evaluationsBelowPreferred = 0;
+  let firstStrategyEvaluationAt: string | null = null;
+  let preferredWarmupCompleteAt: string | null = null;
   let fillSequence = 0;
   let tradeSequence = 0;
   const fills: BacktestFill[] = [];
@@ -153,10 +190,23 @@ export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy 
 
     const marketValue = position ? position.quantity.times(bar.close) : Decimal.ZERO;
     const equity = cash.plus(marketValue);
-    if (position) exposedPoints++;
     equityCurve.push({ at: event.availableAt, cash, marketValue, equity });
 
+    // 4. Warm-up gate (hard). Warm-up events stay in the equity history but never reach the strategy.
     const history = state.historyAt(instrumentId, event.availableAt);
+    if (history.length < warmup.requiredBars) {
+      warmupBars++;
+      continue;
+    }
+
+    // 5. Evaluation. Each tradable event is evaluated exactly once.
+    tradableBars++;
+    if (position) exposedPoints++;
+    strategyEvaluations++;
+    firstStrategyEvaluationAt ??= event.availableAt;
+    if (history.length < warmup.preferredBars) evaluationsBelowPreferred++;
+    else preferredWarmupCompleteAt ??= event.availableAt;
+
     const decision = input.strategy.evaluate({ instrumentId, asOf: event.availableAt, currentBar: bar, history, position });
     if (!pending) {
       if (decision.action === 'ENTER_LONG' && !position) pending = decisionToPending(decision, bar);
@@ -164,13 +214,31 @@ export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy 
     }
   }
 
+  const barsProcessed = events.length;
+  const requiredWarmupMet = barsProcessed >= warmup.requiredBars;
+  const preferredWarmupMet = strategyEvaluations > 0 && evaluationsBelowPreferred === 0;
   const endingEquity = equityCurve.at(-1)?.equity ?? cash;
-  const metrics = backtestMetrics({ startingCapital: input.initialCapital, endingEquity, trades, equityCurve, totalFees, exposedPoints });
-  const quality = assessBacktestQuality(input.quality, trades.length, ambiguousBars, costModel.isZeroCost());
+  const metrics = backtestMetrics({ startingCapital: input.initialCapital, endingEquity, trades, equityCurve, totalFees, exposedPoints, tradablePoints: tradableBars });
+  const assessed = assessBacktestQuality(input.quality, trades.length, ambiguousBars, costModel.isZeroCost());
+  const quality = applyWarmupToQuality(assessed, { requiredWarmupMet, preferredWarmupMet, barsProcessed, requiredBars: warmup.requiredBars, preferredBars: warmup.preferredBars, strategyEvaluations, evaluationsBelowPreferred });
+  const warmupResult: BacktestWarmupResult = {
+    algorithmVersion: warmup.algorithmVersion,
+    requiredBars: warmup.requiredBars,
+    preferredBars: warmup.preferredBars,
+    requiredWarmupMet,
+    preferredWarmupMet,
+    firstStrategyEvaluationAt,
+    preferredWarmupCompleteAt,
+    warmupBars,
+    tradableBars,
+    strategyEvaluations,
+    evaluationsBelowPreferred,
+  };
   const strategyFingerprint = hashOf({ id: input.strategy.id, version: input.strategy.version, definition: input.strategy.definition });
   const inputFingerprint = hashOf({
     engine: BACKTEST_ENGINE_VERSION,
     strategyFingerprint,
+    warmup: warmupPlanOf(warmup),
     initialCapital: input.initialCapital,
     sizing: input.sizing,
     costModel: costModel.config,
@@ -192,7 +260,7 @@ export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy 
     costModel: costModel.config,
     sizing: input.sizing,
     intrabarPolicy,
-    barsProcessed: events.length,
+    barsProcessed,
     fills,
     trades,
     equityCurve,
@@ -200,5 +268,6 @@ export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy 
     metrics,
     quality,
     ambiguousBars,
+    warmup: warmupResult,
   };
 }

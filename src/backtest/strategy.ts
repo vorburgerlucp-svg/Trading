@@ -1,6 +1,7 @@
 import type { MarketBar } from '../market-data/market-data-types.js';
 import type { Decimal } from '../money/decimal.js';
 import type { BacktestPosition } from './backtest-types.js';
+import type { WarmupPlan } from './warmup.js';
 
 export type StrategyDecision =
   | { action: 'NONE'; reasons: string[] }
@@ -21,5 +22,10 @@ export interface BacktestStrategy {
   readonly version: string;
   /** Canonical declarative parameters/config. Changing these changes the backtest fingerprint. */
   readonly definition: Readonly<Record<string, unknown>>;
+  /**
+   * Explicit history requirement. There is no default. evaluate() is not called before requiredBars bars are
+   * available at the current event; warm-up bars never create a decision, an order or a fill.
+   */
+  readonly warmup: WarmupPlan;
   evaluate(context: StrategyContext): StrategyDecision;
 }

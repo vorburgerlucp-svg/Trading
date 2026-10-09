@@ -30,12 +30,15 @@ function bar(index: number, o: string, h: string, l: string, c: string): MarketB
 
 const quality = { pointInTimeUniverse: true, dataComplete: true, corporateActions: 'not_modeled' as const, providerProduction: true, minimumTrades: 1 };
 const zeroCost = { commissionBps: 0, spreadBps: 0, slippageBps: 0, minCommission: '0' };
+/** Explicit test warm-up: the strategy may act from the first bar. Every strategy declares its own plan. */
+const firstBarWarmup = { requiredBars: 1, preferredBars: 1, algorithmVersion: 'test-warmup:v1' };
 
 function enterThenExit(entryHistoryLength: number, exitHistoryLength: number, stops?: { stop: string; tp: string }): BacktestStrategy {
   return {
     id: 'enter-exit',
     version: '1',
     definition: { entryHistoryLength, exitHistoryLength, stops: stops ?? null },
+    warmup: firstBarWarmup,
     evaluate(ctx) {
       if (!ctx.position && ctx.history.length === entryHistoryLength) {
         return {

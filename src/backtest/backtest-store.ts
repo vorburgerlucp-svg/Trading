@@ -1,3 +1,4 @@
+import { parseUtc } from '../market-data/time.js';
 import { hashOf } from '../persistence/canonical-json.js';
 import { isoMs, sealFor, verifySeal, type EvidenceSeal, type Sealed } from '../persistence/evidence-seal.js';
 import type { BacktestRunResult } from './backtest-types.js';
@@ -9,6 +10,37 @@ export class BacktestRunIntegrityError extends Error {
   override readonly name = 'BacktestRunIntegrityError';
 }
 
+/**
+ * Warm-up metadata must be internally consistent. A run below the hard gate must show no decision, order or fill and
+ * must be INVALID. A run that traded must not have a fill before its first evaluation. backtest-engine:v1 runs have no
+ * warm-up metadata and are accepted only as such: they stay readable, but they cannot prove a warm-up.
+ */
+function verifyWarmup(run: BacktestRunResult): void {
+  const w = run.warmup;
+  if (w === undefined) {
+    if (run.engineVersion !== 'backtest-engine:v1') throw new BacktestRunIntegrityError('warm-up metadata is missing');
+    return;
+  }
+  if (typeof w.algorithmVersion !== 'string' || w.algorithmVersion.trim() === '') throw new BacktestRunIntegrityError('warm-up algorithmVersion is missing');
+  if (!Number.isSafeInteger(w.requiredBars) || w.requiredBars < 1 || !Number.isSafeInteger(w.preferredBars) || w.preferredBars < w.requiredBars) {
+    throw new BacktestRunIntegrityError('warm-up plan is malformed');
+  }
+  if (w.requiredWarmupMet !== (run.barsProcessed >= w.requiredBars)) throw new BacktestRunIntegrityError('requiredWarmupMet does not match barsProcessed');
+  if (w.warmupBars + w.tradableBars !== run.barsProcessed) throw new BacktestRunIntegrityError('warm-up bar counts do not add up to barsProcessed');
+  if (w.strategyEvaluations !== w.tradableBars) throw new BacktestRunIntegrityError('strategy evaluations must equal tradable bars');
+  if (w.preferredWarmupMet !== (w.strategyEvaluations > 0 && w.evaluationsBelowPreferred === 0)) throw new BacktestRunIntegrityError('preferredWarmupMet does not match evaluations');
+  if (!w.requiredWarmupMet) {
+    if (w.strategyEvaluations !== 0 || w.firstStrategyEvaluationAt !== null || run.fills.length !== 0 || run.trades.length !== 0 || run.openPosition !== null) {
+      throw new BacktestRunIntegrityError('run below the warm-up gate shows a decision, order or fill');
+    }
+    if (run.quality.grade !== 'INVALID') throw new BacktestRunIntegrityError('run below the warm-up gate must be INVALID');
+    return;
+  }
+  if (w.firstStrategyEvaluationAt === null) throw new BacktestRunIntegrityError('strategy was evaluated but firstStrategyEvaluationAt is missing');
+  const firstMs = parseUtc(w.firstStrategyEvaluationAt);
+  if (run.fills.some((fill) => parseUtc(fill.at) < firstMs)) throw new BacktestRunIntegrityError('fill before the first strategy evaluation');
+}
+
 export function verifyBacktestRun(run: BacktestRunResult): BacktestRunResult {
   if (!/^[0-9a-f]{64}$/.test(run.inputFingerprint)) throw new BacktestRunIntegrityError('invalid backtest input fingerprint');
   if (!/^[0-9a-f]{64}$/.test(run.strategyFingerprint)) throw new BacktestRunIntegrityError('invalid strategy fingerprint');
@@ -16,6 +48,7 @@ export function verifyBacktestRun(run: BacktestRunResult): BacktestRunResult {
   if (strategyHash !== run.strategyFingerprint) throw new BacktestRunIntegrityError('strategy metadata checksum mismatch');
   if (run.backtestRunId !== 'bt_' + run.inputFingerprint.slice(0, 40)) throw new BacktestRunIntegrityError('backtestRunId does not match input fingerprint');
   if (run.metrics.numberOfTrades !== run.trades.length) throw new BacktestRunIntegrityError('trade count does not match metrics');
+  verifyWarmup(run);
   const fillIds = new Set<string>();
   for (const fill of run.fills) {
     if (fill.instrumentId !== run.instrumentId || fillIds.has(fill.fillId)) throw new BacktestRunIntegrityError('invalid or duplicate fill');

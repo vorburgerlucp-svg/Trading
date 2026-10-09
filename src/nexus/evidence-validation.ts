@@ -63,6 +63,8 @@ export const EVIDENCE_REASON_CODES = [
   'SCANNER_QUANT_LINEAGE_MISMATCH',
   'SCANNER_RANKING_INCOMPLETE',
   'BACKTEST_INVALID',
+  'BACKTEST_WARMUP_UNPROVEN',
+  'BACKTEST_PREFERRED_WARMUP_NOT_MET',
   'BACKTEST_AVAILABILITY_UNVERIFIABLE',
   'BACKTEST_WEAK_EVIDENCE',
   'BACKTEST_INSUFFICIENT_SAMPLE',
@@ -277,6 +279,9 @@ export async function validateEvidenceReferences(request: EvidenceRequest, reade
     checkResultAvailability('backtest_run', ref, sealed.seal, request.asOf, asOfMs, blocking, seals);
     const grade = run.quality.grade;
     if (grade === 'INVALID') block('BACKTEST_INVALID', ref, 'quality INVALID cannot support a decision: ' + run.quality.reasons.join('; '));
+    // A v1 run had no warm-up gate: its first decisions may rest on too little history, so it cannot be shown admissible.
+    if (run.warmup === undefined) block('BACKTEST_WARMUP_UNPROVEN', ref, 'backtest-engine:v1 run without a warm-up gate: its early decisions cannot be shown to have had enough history');
+    else if (!run.warmup.preferredWarmupMet) warn('BACKTEST_PREFERRED_WARMUP_NOT_MET', ref, 'some evaluations had fewer than preferredBars ' + run.warmup.preferredBars + ' bars of history; the result stays admissible but is marked');
     const dataCutoff = run.equityCurve.at(-1)?.at ?? null;
     if (dataCutoff === null) block('BACKTEST_AVAILABILITY_UNVERIFIABLE', ref, 'backtest has no equity series, so its data window cannot be placed in time');
     else if (parseUtc(dataCutoff) > asOfMs) block('EVIDENCE_FROM_FUTURE', ref, 'backtest data runs to ' + dataCutoff + ', after decision asOf ' + request.asOf);
