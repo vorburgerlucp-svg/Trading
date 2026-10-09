@@ -132,6 +132,7 @@ export type CorporateActionReasonCode =
   | 'CORPORATE_ACTION_DOUBLE_ADJUSTMENT_RISK'
   | 'CORPORATE_ACTION_FX_NOT_MODELED'
   | 'CORPORATE_ACTION_REVISION_CONFLICT'
+  | 'CORPORATE_ACTION_SOURCE_CONFLICT'
   | 'CORPORATE_ACTION_PENDING_AT_END'
   | 'CORPORATE_ACTION_CLAIM_NOT_PROVEN'
   | 'DIVIDEND_PAYMENT_DATE_UNKNOWN'
@@ -150,8 +151,10 @@ export interface CorporateActionInput {
 /** A dividend entitlement. An economic asset that is not spendable cash until it is settled (V1: never, see DIVIDEND_PAYMENT_DATE_UNKNOWN). */
 export interface DividendReceivable {
   receivableId: string;
+  /** Identity of the source record: the source and the actionKey together (one backtest takes one source). */
   actionKey: string;
   revision: number;
+  source: string;
   instrumentId: string;
   entitledQuantity: Decimal;
   amountPerShare: Decimal;
@@ -181,16 +184,20 @@ export type CorporateActionTransformation =
   | { kind: 'symbol_change'; oldSymbol: string | null; newSymbol: string | null; economicEffect: 'none' };
 
 export interface AppliedCorporateAction {
+  /** Recovers the source record: source, actionKey, revision, ingestSeq and contentHash together identify it. */
+  source: string;
   actionKey: string;
   revision: number;
   type: CorporateActionType;
   exDate: string;
-  /** The regular session open of exDate (calendar). */
+  /** The economic effective instant: the regular session open of exDate (calendar). */
   effectiveAt: string;
-  /** The usable instant of the event that applied the action (at or after effectiveAt). */
+  /** The simulated instant the accounting transformation takes effect. Always equal to effectiveAt. */
   appliedAt: string;
+  /** The usable instant of the deterministic engine event that processed it. Normally a bar's completion, after appliedAt. */
+  processedAt: string;
   provenance: CorporateActionKnowledgeProvenance;
-  /** When NEXUS provably knew the record; applied only if this was at or before appliedAt. */
+  /** When NEXUS provably knew the record. Applied only if this was at or before effectiveAt (the economic knowledge boundary). */
   knowledgeAt: string | null;
   retrievedAt: string;
   contentHash: string;
@@ -217,9 +224,9 @@ export interface BacktestCorporateActionResult {
   calendar: { calendarId: string; timezone: string; source: string };
   applied: AppliedCorporateAction[];
   /** Actions not applied, with the reason. Only ACTION_BEFORE_SERIES appears here: other refusals fail the run. */
-  rejected: Array<{ actionKey: string; revision: number; code: CorporateActionReasonCode; reason: string }>;
+  rejected: Array<{ actionKey: string; revision: number; source: string; code: CorporateActionReasonCode; reason: string }>;
   /** Effective after the last bar, so not applied. */
-  pending: Array<{ actionKey: string; revision: number; type: CorporateActionType; exDate: string; effectiveAt: string }>;
+  pending: Array<{ actionKey: string; revision: number; source: string; type: CorporateActionType; exDate: string; effectiveAt: string }>;
   dividendReceivables: DividendReceivable[];
   /** Always empty in V1: settlement needs a provider payment date, which is not available. */
   settledDividends: DividendReceivable[];

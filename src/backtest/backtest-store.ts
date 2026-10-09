@@ -64,8 +64,12 @@ function verifyCorporateActions(run: BacktestRunResult, ca: BacktestCorporateAct
   if (ca.pending.length > 0 && !ca.reasons.includes('CORPORATE_ACTION_PENDING_AT_END')) throw new BacktestRunIntegrityError('pending corporate actions are not reported as a limitation');
   for (const a of ca.applied) {
     if (!HEX64.test(a.beforeStateFingerprint) || !HEX64.test(a.afterStateFingerprint)) throw new BacktestRunIntegrityError('applied action ' + a.actionKey + ' has no state fingerprints');
-    if (parseUtc(a.appliedAt) < parseUtc(a.effectiveAt)) throw new BacktestRunIntegrityError('action ' + a.actionKey + ' was applied before its effective instant');
-    if (a.knowledgeAt !== null && parseUtc(a.knowledgeAt) > parseUtc(a.appliedAt)) throw new BacktestRunIntegrityError('action ' + a.actionKey + ' was applied before it was known');
+    if (typeof a.source !== 'string' || a.source.trim() === '') throw new BacktestRunIntegrityError('applied action ' + a.actionKey + ' does not name its source');
+    // The transformation takes effect at the effective instant; the event that processed it is not earlier than that.
+    if (a.appliedAt !== a.effectiveAt) throw new BacktestRunIntegrityError('action ' + a.actionKey + ' is not applied at its effective instant');
+    if (parseUtc(a.processedAt) < parseUtc(a.appliedAt)) throw new BacktestRunIntegrityError('action ' + a.actionKey + ' was processed before it was applied');
+    // The economic knowledge boundary: an action whose state changed at its effective instant must have been known by then.
+    if (a.knowledgeAt === null || parseUtc(a.knowledgeAt) > parseUtc(a.effectiveAt)) throw new BacktestRunIntegrityError('action ' + a.actionKey + ' changed state without knowledge at its effective instant');
   }
   for (const c of ca.valueNeutralityChecks) {
     if (c.neutral !== true) throw new BacktestRunIntegrityError('split ' + c.actionKey + ' is not value-neutral');

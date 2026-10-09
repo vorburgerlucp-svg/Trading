@@ -207,8 +207,8 @@ describe('Backtest warm-up enforcement (O3)', () => {
     expect(() => run(series(10), recorder(plan(0), enterOnFirst).strategy)).toThrow(WarmupPlanError);
   });
 
-  it('engine version: backtest-engine:v5 (v2 warm-up gate; v4 replay mode and knowledge at use; v5 corporate actions)', () => {
-    expect(BACKTEST_ENGINE_VERSION).toBe('backtest-engine:v5');
+  it('engine version: backtest-engine:v6 (v2 warm-up gate; v4 replay mode and knowledge at use; v5 corporate actions; v6 effective-instant knowledge boundary)', () => {
+    expect(BACKTEST_ENGINE_VERSION).toBe('backtest-engine:v6');
   });
 
   it('integrity: a run below the gate that shows a fill, or a flipped warm-up flag, fails verification', () => {

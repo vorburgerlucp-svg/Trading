@@ -241,8 +241,8 @@ describe('O2 strategy view and raw execution (Phase 5)', () => {
 });
 
 describe('O2 timing and point-in-time (Phases 2, 4, 17, 19)', () => {
-  it('an action known exactly at the boundary (the completion of its ex-date bar) is applied', () => {
-    const boundary = toUtcIso(XNAS.dailyBarCompletion('2026-10-08')!);
+  it('an action known exactly at its economic effective instant (the ex-date open) is applied; see corporate-action-timing for the daily and intraday cases', () => {
+    const boundary = toUtcIso(XNAS.session('2026-10-08', 'regular')!.open);
     const r = run(series(SPLIT_ROWS.slice(0, 4)), strategy({ enterAt: 1, exitAt: 100 }), withActions([{ ...SPLIT_4_1, knowledge: { provenance: 'captured_by_nexus', knowledgeAt: boundary }, retrievedAt: boundary, storedAvailableAt: boundary }]));
     expect(r.openPosition!.quantity.toString()).toBe('40');
   });
@@ -258,7 +258,8 @@ describe('O2 timing and point-in-time (Phases 2, 4, 17, 19)', () => {
 
   it('no look-ahead: changing every action unavailable by T leaves every decision and state through T identical', () => {
     const T = toUtcIso(XNAS.dailyBarCompletion('2026-10-09')!);
-    const future = (ratio: string) => ca({ key: 'split:2026-10-12', type: 'split', exDate: '2026-10-12', from: '1', to: ratio, knownAt: '2026-10-12T14:00:00.000Z' });
+    // Unavailable by T (known after T) and still known before its effective instant, so the economics it governs are provable.
+    const future = (ratio: string) => ca({ key: 'split:2026-10-12', type: 'split', exDate: '2026-10-12', from: '1', to: ratio, knownAt: '2026-10-11T20:00:00.000Z' });
     const rows = [...SPLIT_ROWS];
     const logA: Array<{ asOf: string; closes: string[] }> = [];
     const logB: Array<{ asOf: string; closes: string[] }> = [];

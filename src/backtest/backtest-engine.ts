@@ -38,8 +38,11 @@ import type {
 import type { BacktestStrategy, StrategyDecision } from './strategy.js';
 import { validateWarmupPlan, type WarmupPlan } from './warmup.js';
 
-/** v5: corporate actions on open positions, lineage by entry fill id, derived corporate-action quality, receivables in equity. */
-export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v5';
+/**
+ * v6: economic corporate-action knowledge is required at the effective instant (not at the event), audit appliedAt is the effective
+ * instant with processedAt for the event, same-instant splits are one composite, source identity is enforced. v5 runs are not reinterpreted.
+ */
+export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v6';
 
 interface PendingOrder {
   side: 'buy' | 'sell';
