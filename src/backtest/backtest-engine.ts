@@ -91,7 +91,10 @@ function applyWarmupToQuality(base: BacktestQuality, w: { requiredWarmupMet: boo
   return base;
 }
 
-export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy }): BacktestRunResult {
+export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrategy }): BacktestRunResult {
+  // The engine owns its data. Bars are copied into frozen objects before any strategy sees them, so a strategy can
+  // neither change the input nor change the identity computed from it.
+  const input = { ...rawInput, bars: rawInput.bars.map((b) => Object.freeze({ ...b })) };
   if (!input.initialCapital.isPositive()) throw new Error('initial capital must be positive');
   if (input.bars.length === 0) throw new Error('backtest requires bars');
   const warmup = validateWarmupPlan(input.strategy.warmup);
@@ -193,7 +196,7 @@ export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy 
     equityCurve.push({ at: event.availableAt, cash, marketValue, equity });
 
     // 4. Warm-up gate (hard). Warm-up events stay in the equity history but never reach the strategy.
-    const history = state.historyAt(instrumentId, event.availableAt);
+    const history = Object.freeze(state.historyAt(instrumentId, event.availableAt));
     if (history.length < warmup.requiredBars) {
       warmupBars++;
       continue;
@@ -207,7 +210,8 @@ export function runBacktest(input: BacktestInput & { strategy: BacktestStrategy 
     if (history.length < warmup.preferredBars) evaluationsBelowPreferred++;
     else preferredWarmupCompleteAt ??= event.availableAt;
 
-    const decision = input.strategy.evaluate({ instrumentId, asOf: event.availableAt, currentBar: bar, history, position });
+    // A frozen copy of the open position: the strategy reads its levels, the engine alone changes them.
+    const decision = input.strategy.evaluate({ instrumentId, asOf: event.availableAt, currentBar: bar, history, position: position === null ? null : Object.freeze({ ...position }) });
     if (!pending) {
       if (decision.action === 'ENTER_LONG' && !position) pending = decisionToPending(decision, bar);
       else if (decision.action === 'EXIT_LONG' && position) pending = decisionToPending(decision, bar);
