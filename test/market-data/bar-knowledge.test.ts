@@ -14,7 +14,7 @@ import { canonicalJson } from '../../src/persistence/canonical-json.js';
 import { computeQuant } from '../../src/quant/quant-engine.js';
 import { runMarketScanner } from '../../src/scanner/market-scanner.js';
 import type { ScannerDefinition, ScannerSnapshot } from '../../src/scanner/scanner-types.js';
-import { InMemoryInstrumentUniverseStore } from '../../src/scanner/universe.js';
+import { strictSelection } from '../universe/fixtures.js';
 import { AAPL, FIXTURE_SOURCE, PRODUCTION_LIKE_SOURCE, dailyBars, randomOhlcv } from './fixtures.js';
 
 // Bar knowledge and evidence (see docs/BAR_KNOWLEDGE_EVIDENCE.md). Two questions, never one flag:
@@ -176,10 +176,7 @@ describe('D — live scanner: reconstructed warm-up is allowed; the signal bar m
     tradingSeries('2026-10-09', 200, 31, (observedAt, index) => (index === 199 ? received(observedAt, signalRetrieved) : received(observedAt, '2026-10-09T11:00:00.000Z')));
 
   function scannerUniverse(asOf: string) {
-    const store = new InMemoryInstrumentUniverseStore();
-    store.register({ universeId: 'U', version: '1', source: 'fixture', pointInTimeSafe: true });
-    store.addMembership({ universeId: 'U', instrumentId: AAPL.instrumentId, validFrom: '2020-01-01T00:00:00.000Z', availableAt: '2020-01-01T00:00:00.000Z', source: 'fixture' });
-    return store.snapshot('U', asOf);
+    return strictSelection('U', [AAPL.instrumentId], asOf);
   }
   const definition = (useCase?: 'live_trading' | 'research'): ScannerDefinition => ({
     id: 'live',
@@ -357,9 +354,11 @@ describe('H — data quality and backtest grading follow the two questions', () 
   it('backtest grades: strict data grades by the method, reconstruction at most B, legacy at most C; the return never enters', () => {
     const base = { pointInTimeUniverse: true, dataComplete: true, corporateActions: 'modeled' as const, providerProduction: true, minimumTrades: 1 };
     const counts = (k: 'contemporaneous' | 'historical' | 'legacy') => ({ total: 5, knownBeforeUse: k === 'contemporaneous' ? 5 : 0, contemporaneousVintage: k === 'contemporaneous' ? 5 : 0, historicalVintage: k === 'historical' ? 5 : 0, legacy: k === 'legacy' ? 5 : 0 });
-    const strict = assessBacktestQuality(base, 5, 0, false, counts('contemporaneous'));
-    const historical = assessBacktestQuality(base, 5, 0, false, counts('historical'));
-    const legacy = assessBacktestQuality(base, 5, 0, false, counts('legacy'));
+    // The universe is cited as derived evidence (strict here): the grade comes from the bar method, not from a caller flag.
+    const universe = strictSelection('U', [AAPL.instrumentId], '2026-10-09T22:06:00.000Z').evidence;
+    const strict = assessBacktestQuality(base, 5, 0, false, counts('contemporaneous'), [], universe);
+    const historical = assessBacktestQuality(base, 5, 0, false, counts('historical'), [], universe);
+    const legacy = assessBacktestQuality(base, 5, 0, false, counts('legacy'), [], universe);
     expect(strict).toMatchObject({ grade: 'A', dataProvenance: 'STRICT_PIT_DATA' });
     expect(historical).toMatchObject({ grade: 'B', dataProvenance: 'HISTORICAL_RECONSTRUCTION' });
     expect(legacy).toMatchObject({ grade: 'C', dataProvenance: 'LEGACY_UNPROVEN' });

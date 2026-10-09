@@ -23,6 +23,7 @@ Status: in force from 2026-10-09 (branch `feature/bar-knowledge-schema-repair`).
 | 007 | `corporate_action_provenance` | committed, unchanged | `56d5af140de5c52215834b1d3551e41636c310b8800259fdd7a1d5ddad0a9021` |
 | 008 | `market_bar_provenance` | committed in `de4c3f4`; **restored byte-for-byte** | `c8f14c983ead6a38fa14f08f298b3d228690603475e78084c8378a607f36861e` |
 | 009 | `market_bar_knowledge_v2` | new, additive | `b2812e5e40906c397d914cac6af646d48f89154f8b3356fc2672bd8805cdf5ec` |
+| 010 | `pit_universe_v1` | new, additive (PIT Universe V1, `universe-engine:v1`) | `3791efaed495bc77516a04fd33f5c460f62b0a3a34a93e813190aa42d30fe18a` |
 
 Git blob of the restored 008: `9e5dbc28d4508a83e2e7534706ae6112867ec8df` (equal to the blob of `de4c3f4:db/migrations/008_market_bar_provenance.sql`).
 
@@ -32,6 +33,16 @@ Git blob of the restored 008: `9e5dbc28d4508a83e2e7534706ae6112867ec8df` (equal 
 - `ce4a919` rewrote that file in place to a different model. Databases that applied the `de4c3f4` 008 would fail the checksum check, so the rewrite was not acceptable.
 - This repair restores 008 from `de4c3f4` byte-for-byte, and adds the knowledge/vintage model as migration 009. The 008 columns keep their meaning; 009 adds separate V2 columns (see `docs/BAR_KNOWLEDGE_EVIDENCE.md` §10).
 - Databases that applied the `ce4a919` variant of 008 cannot be upgraded: their recorded checksum is that of a file that no longer exists. They must be recreated. Editing `schema_migrations` by hand is not a supported repair.
+
+## Migration 010: the persistent Point-in-Time Universe (2026-10-09)
+
+Additive only. It creates five tables and does not alter any table of 001–009: `universe_sources`, `universe_definitions`,
+`universe_snapshot_revisions`, `universe_snapshot_members`, `universe_unresolved_members`. Each table is append-only: UPDATE, DELETE and
+TRUNCATE are rejected by the trigger `nexus_reject_mutation()` from 001. The database also checks the revision order, the knowledge order,
+the ingest sequence, the member count at commit, and that unresolved members appear only in a PARTIAL revision. Identity hashes are
+recomputed and verified by the application on every read (`docs/PIT_UNIVERSE_V1.md`).
+
+Migration 010 does not change the meaning of any earlier migration, and the migrator still refuses destructive statements in it.
 
 ## Verification
 

@@ -41,10 +41,11 @@ import type { BacktestStrategy, StrategyDecision } from './strategy.js';
 import { validateWarmupPlan, type WarmupPlan } from './warmup.js';
 
 /**
+ * v8: the grade uses derived universe evidence (universe-engine:v1), never the caller's pointInTimeUniverse flag. v7 and earlier runs are not reinterpreted.
  * v7: fills execute at the executable market open (execution-clock:v1), not at a daily bar's window start; a signal fills at an open only
  * if it was usable by then; fills carry explicit timing (OPEN_EXACT or INTRABAR_UNKNOWN). v6 and earlier runs are not reinterpreted.
  */
-export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v7';
+export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v8';
 
 interface PendingOrder {
   side: 'buy' | 'sell';
@@ -325,7 +326,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
   const caReasons: CorporateActionReasonCode[] = corporateActions ? [...corporateActions.reasons] : [];
   if (input.quality.corporateActions === 'modeled' && (!corporateActions || !corporateActions.complete)) caReasons.push('CORPORATE_ACTION_CLAIM_NOT_PROVEN');
   const modeled = corporateActions !== undefined && corporateActions.complete && caReasons.length === 0;
-  const assessed = assessBacktestQuality({ ...input.quality, corporateActions: modeled ? 'modeled' : 'not_modeled' }, trades.length, ambiguousBars, costModel.isZeroCost(), barKnowledgeAtUse(input.bars, replay), caReasons);
+  const assessed = assessBacktestQuality({ ...input.quality, corporateActions: modeled ? 'modeled' : 'not_modeled' }, trades.length, ambiguousBars, costModel.isZeroCost(), barKnowledgeAtUse(input.bars, replay), caReasons, input.universe ?? null);
   const quality = applyWarmupToQuality(assessed, { requiredWarmupMet, preferredWarmupMet, barsProcessed, requiredBars: warmup.requiredBars, preferredBars: warmup.preferredBars, strategyEvaluations, evaluationsBelowPreferred });
   const warmupResult: BacktestWarmupResult = {
     algorithmVersion: warmup.algorithmVersion,
@@ -354,6 +355,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     replay,
     corporateActions: ledger ? ledger.fingerprintRows() : null,
     executionClock: executionClockIdentity(input.executionCalendar),
+    universe: input.universe ?? null,
     bars: input.bars.map(barFingerprint),
   });
 
@@ -382,5 +384,6 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     ambiguousBars,
     warmup: warmupResult,
     ...(corporateActions ? { corporateActions } : {}),
+    ...(input.universe ? { universe: input.universe } : {}),
   };
 }

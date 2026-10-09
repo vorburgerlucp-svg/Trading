@@ -66,7 +66,7 @@ export class PostgresScannerRunStore implements ScannerRunStore {
       const recordedAt = await databaseClock(client);
       const inserted = await client.query(
         'INSERT INTO scanner_runs (scanner_run_id,input_fingerprint,definition_id,definition_version,universe_id,universe_fingerprint,universe_point_in_time_safe,as_of,result,result_hash,recorded_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::timestamptz) ON CONFLICT (scanner_run_id) DO NOTHING',
-        [run.scannerRunId, run.inputFingerprint, run.definitionId, run.definitionVersion, run.universeId, run.universeFingerprint, run.universePointInTimeSafe, run.asOf, JSON.stringify(encodeJson(run)), resultHash, recordedAt],
+        [run.scannerRunId, run.inputFingerprint, run.definitionId, run.definitionVersion, run.universeId, run.universeFingerprint, run.universeEvidence.strictDecisionTime, run.asOf, JSON.stringify(encodeJson(run)), resultHash, recordedAt],
       );
       if (inserted.rowCount !== 1) {
         const existing = (await client.query<{ result_hash: string }>('SELECT result_hash FROM scanner_runs WHERE scanner_run_id=$1', [run.scannerRunId])).rows[0];

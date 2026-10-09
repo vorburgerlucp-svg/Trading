@@ -82,13 +82,21 @@ function verifyCorporateActions(run: BacktestRunResult, ca: BacktestCorporateAct
   if (ca.settledDividends.length !== 0) throw new BacktestRunIntegrityError('dividend settlement is not supported in V1');
 }
 
+/** The number of a 'backtest-engine:vN' version. An unrecognised version throws: a check must never be skipped by a format it does not know. */
+function engineMajorVersion(version: string): number {
+  const match = /^backtest-engine:v(\d+)$/.exec(version);
+  if (!match) throw new BacktestRunIntegrityError('unrecognised backtest engine version ' + version);
+  return Number(match[1]);
+}
+
 /**
  * Fill timing must be what the fill claims (execution-clock:v1). An OPEN_EXACT fill executes at its session open, which is not before its bar
  * window start. An INTRABAR_UNKNOWN fill carries no execution instant: its `at` is the bar window start, and the window is non-empty.
  * The execution calendar identity must be recorded, and the open position must come from its entry fill.
+ * Required from backtest-engine:v7 onward. Every later engine version keeps this check; a malformed version is refused, never skipped.
  */
 function verifyExecutionClock(run: BacktestRunResult): void {
-  if (run.engineVersion !== 'backtest-engine:v7') return;
+  if (engineMajorVersion(run.engineVersion) < 7) return;
   if (!run.executionClock || run.executionClock.version !== EXECUTION_CLOCK_VERSION || run.executionClock.calendarId.trim() === '') {
     throw new BacktestRunIntegrityError('execution clock identity is missing or of another version');
   }

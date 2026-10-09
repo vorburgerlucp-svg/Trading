@@ -57,7 +57,7 @@ the open remains entitled. This models ordinary ex-dividend behaviour only. Spec
 
 ## 7. Integrity
 
-A stored run at `backtest-engine:v7` must carry an execution-clock identity of the current version. Each fill must have timing. An exact
+A stored run at `backtest-engine:v7` or later must carry an execution-clock identity of the current version. Each fill must have timing. An exact
 fill must execute at its recorded open, which is not before its bar window start. An intrabar fill must have a non-empty window and `at`
 equal to its window start. An open position's entry time must match its entry fill. Runs at v6 and earlier are not reinterpreted.
 

@@ -28,6 +28,7 @@ const ORIGINAL_008_PATH = join(HERE, '..', 'fixtures', 'migrations', '008_market
 /** Checksums of the committed history. A change to any of these is a change to committed history. */
 const CHECKSUM_008 = 'c8f14c983ead6a38fa14f08f298b3d228690603475e78084c8378a607f36861e';
 const CHECKSUM_009 = 'b2812e5e40906c397d914cac6af646d48f89154f8b3356fc2672bd8805cdf5ec';
+const CHECKSUM_010 = '3791efaed495bc77516a04fd33f5c460f62b0a3a34a93e813190aa42d30fe18a';
 /** Values computed by the ORIGINAL release (de4c3f4): the content hash, and the 008 integrity hash of the same row. */
 const A_CONTENT = '8acf3d64663df037999606308e7436ea0d422d131fe1faeb69b206fbfe893fbc';
 const A_V1 = '8e2b079755058fff8332f0398a767caa72bef0f9dd9e9e955e65f8981df6382c';
@@ -110,9 +111,10 @@ async function bareDatabase(): Promise<{ pool: PgPool; drop: () => Promise<void>
 }
 
 describe.skipIf(!pgAvailable)('schema history on PostgreSQL' + (pgAvailable ? '' : ' (NOT RUN: ' + pgSkipReason + ')'), () => {
-  it('the committed 008 is the historical one, and 009 is the next migration', () => {
+  it('the committed 008 is the historical one, 009 the V2 bar model, and 010 the persistent universe', () => {
     const migrations = loadMigrations();
-    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(migrations.find((m) => m.version === 10)!.checksum).toBe(CHECKSUM_010);
     expect(migrations.find((m) => m.version === 8)!.checksum).toBe(CHECKSUM_008);
     expect(migrations.find((m) => m.version === 9)!.checksum).toBe(CHECKSUM_009);
     expect(originalMigration008().checksum).toBe(CHECKSUM_008);
@@ -144,10 +146,10 @@ describe.skipIf(!pgAvailable)('schema history on PostgreSQL' + (pgAvailable ? ''
       expect(before).toHaveLength(3);
 
       // The upgrade: the current migrator, on the same database (no recreation).
-      expect(await migrate(pool, loadMigrations())).toEqual({ applied: [9], alreadyApplied: [1, 2, 3, 4, 5, 6, 7, 8] });
+      expect(await migrate(pool, loadMigrations())).toEqual({ applied: [9, 10], alreadyApplied: [1, 2, 3, 4, 5, 6, 7, 8] });
       expect(await checksumOf(pool, 8)).toBe(CHECKSUM_008);
       expect(await checksumOf(pool, 9)).toBe(CHECKSUM_009);
-      expect(await migrate(pool, loadMigrations())).toEqual({ applied: [], alreadyApplied: [1, 2, 3, 4, 5, 6, 7, 8, 9] });
+      expect(await migrate(pool, loadMigrations())).toEqual({ applied: [], alreadyApplied: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] });
       expect(await snapshot(pool)).toEqual(before);
       expect((await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM market_bars WHERE knowledge_source_v2 IS NOT NULL')).rows[0]!.n).toBe(0);
 
@@ -187,13 +189,14 @@ describe.skipIf(!pgAvailable)('schema history on PostgreSQL' + (pgAvailable ? ''
   });
 
   // ---- B) a fresh database: 001-009, and every path works ----------------------------------------------------------------
-  it('B) a fresh database runs 001-009, and the store writes and reads both models with the 008 mirror', async () => {
+  it('B) a fresh database runs 001-010, and the store writes and reads both models with the 008 mirror', async () => {
     const db: TestDatabase = await createTestDatabase();
     try {
       const versions = (await db.pool.query<{ version: number }>('SELECT version FROM schema_migrations ORDER BY version')).rows.map((r) => r.version);
-      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       expect(await checksumOf(db.pool, 8)).toBe(CHECKSUM_008);
       expect(await checksumOf(db.pool, 9)).toBe(CHECKSUM_009);
+      expect(await checksumOf(db.pool, 10)).toBe(CHECKSUM_010);
 
       const store = new PostgresMarketDataStore(db.pool);
       await store.registerSource(PRODUCTION_LIKE_SOURCE);

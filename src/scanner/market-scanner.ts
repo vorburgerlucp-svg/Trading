@@ -1,18 +1,34 @@
 import { hashOf } from '../persistence/canonical-json.js';
 import { parseUtc, toUtcIso } from '../market-data/time.js';
+import type { UniverseEvidence, UniverseSelection } from '../universe/universe-model.js';
 import { evaluateScannerFilter, scannerRankingScore } from './scanner-filters.js';
 import type { ScannerCandidate, ScannerCoverage, ScannerDefinition, ScannerRun, ScannerSnapshot } from './scanner-types.js';
-import type { UniverseSnapshot } from './universe.js';
 
-// v2 adds inputsAvailableAt to the stored run. The version is part of the input fingerprint, so the same inputs get
-// a new scannerRunId under v2. A v1 run is never re-stored with different content under its old id.
-export const MARKET_SCANNER_VERSION = 'market-scanner:v3';
+// v2 adds inputsAvailableAt to the stored run. v3 derives the universe from a persistent selection. v4 makes rankingComplete require the
+// universe to be complete, and refuses live candidates unless the universe evidence is strict. The version is part of the input fingerprint.
+export const MARKET_SCANNER_VERSION = 'market-scanner:v4';
 
-export function runMarketScanner(definition: ScannerDefinition, universe: UniverseSnapshot, snapshots: readonly ScannerSnapshot[], asOf: string): ScannerRun {
-  if (definition.universeId !== universe.universeId) throw new Error('scanner universe does not match universe snapshot');
-  if (parseUtc(universe.asOf) !== parseUtc(asOf)) throw new Error('scanner asOf must match universe snapshot asOf');
+/**
+ * Why a universe does not support a live ranking. Empty when the evidence is strict (complete, production, known at asOf, contemporaneous).
+ * Research scans are never blocked by this: they carry the limitation through the evidence instead.
+ */
+function liveUniverseReasons(evidence: UniverseEvidence): string[] {
+  if (evidence.status === 'UNAVAILABLE') return ['UNIVERSE_EVIDENCE_UNPROVEN: no universe revision is known at asOf'];
+  const reasons: string[] = [];
+  if (!evidence.complete) reasons.push('UNIVERSE_COVERAGE_INCOMPLETE: the universe source snapshot is not complete');
+  if (!evidence.sourceProduction) reasons.push('UNIVERSE_SOURCE_NOT_PRODUCTION: the universe source is not a production source');
+  if (!evidence.decisionTimeKnowledgeProven) reasons.push('UNIVERSE_EVIDENCE_UNPROVEN: the universe revision was not known at asOf');
+  if (!evidence.contemporaneousVintage) reasons.push('UNIVERSE_HISTORICAL_RECONSTRUCTION: the universe membership is a historical reconstruction');
+  return reasons;
+}
+
+export function runMarketScanner(definition: ScannerDefinition, universe: UniverseSelection, snapshots: readonly ScannerSnapshot[], asOf: string): ScannerRun {
+  const evidence = universe.evidence;
+  if (definition.universeId !== evidence.universeId) throw new Error('scanner universe does not match the universe selection');
+  if (parseUtc(evidence.asOf) !== parseUtc(asOf)) throw new Error('scanner asOf must match the universe selection asOf');
   const asOfMs = parseUtc(asOf);
   const allowed = new Set(universe.members);
+  const universeBlock = definition.useCase === 'research' ? [] : liveUniverseReasons(evidence);
   const rejected: Array<{ instrumentId: string; reasons: string[] }> = [];
   const accepted: Array<{ snapshot: ScannerSnapshot; passed: string[]; failed: string[]; score: number }> = [];
   const auditInputs: Array<[string, string, string, string, string, string | null, string | null]> = [];
@@ -44,7 +60,7 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
     for (const availableAt of [snapshot.lastPriceAvailableAt, snapshot.averageVolumeAvailableAt]) {
       if (availableAt !== undefined) inputsAvailableMs = Math.max(inputsAvailableMs ?? Number.NEGATIVE_INFINITY, parseUtc(availableAt));
     }
-    const reasons: string[] = [];
+    const reasons: string[] = [...universeBlock];
     if (snapshot.quant.instrumentId !== snapshot.instrumentId) reasons.push('quant instrument mismatch');
     if (snapshot.quant.series.interval !== definition.interval) reasons.push('quant interval does not match scanner interval');
     if (parseUtc(snapshot.asOf) !== asOfMs || parseUtc(snapshot.quant.asOf) !== asOfMs) reasons.push('snapshot/quant asOf does not match scanner asOf');
@@ -104,12 +120,14 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
     duplicateInstruments,
     complete: missingInstruments.length === 0 && duplicateInstruments.length === 0,
   };
+  // A ranking is complete only when every universe member was evaluated AND the universe source snapshot itself is complete.
+  const rankingComplete = coverage.complete && evidence.complete && (definition.useCase === 'research' || universeBlock.length === 0);
   const selected = accepted.slice(0, Math.max(0, definition.maxCandidates));
   const inputFingerprint = hashOf({
     engine: MARKET_SCANNER_VERSION,
     definition,
-    universeFingerprint: universe.fingerprint,
-    universePointInTimeSafe: universe.pointInTimeSafe,
+    universeEvidence: evidence,
+    universeMembers: universe.members,
     asOf,
     coverage,
     inputs: auditInputs,
@@ -142,12 +160,12 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
     definition: structuredClone(definition),
     definitionId: definition.id,
     definitionVersion: definition.version,
-    universeId: universe.universeId,
-    universeFingerprint: universe.fingerprint,
-    universePointInTimeSafe: universe.pointInTimeSafe,
+    universeId: evidence.universeId,
+    universeEvidence: structuredClone(evidence),
+    universeFingerprint: evidence.fingerprint,
     asOf,
     coverage,
-    rankingComplete: coverage.complete,
+    rankingComplete,
     candidates,
     rejected,
     inputsAvailableAt: inputsAvailableMs === null ? null : toUtcIso(inputsAvailableMs),

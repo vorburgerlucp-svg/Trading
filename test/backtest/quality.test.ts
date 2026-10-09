@@ -12,7 +12,7 @@ describe('BacktestQuality', () => {
     );
     expect(result.grade).toBe('C');
     expect(result.insufficientSample).toBe(true);
-    expect(result.reasons.join(' ')).toMatch(/point-in-time/);
+    expect(result.reasons.join(' ')).toMatch(/UNIVERSE_EVIDENCE_NOT_PROVIDED/);
     expect(result.reasons.join(' ')).toMatch(/INSUFFICIENT_SAMPLE/);
   });
 

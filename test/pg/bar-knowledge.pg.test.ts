@@ -115,7 +115,7 @@ describe.skipIf(!pgAvailable)('bar knowledge on PostgreSQL' + (pgAvailable ? '' 
         [AAPL.instrumentId, PRODUCTION_LIKE_SOURCE.sourceId, legacy.startTime, legacy.endTime, legacy.observedAt, legacy.retrievedAt, barContentHash(legacy)],
       );
       const applied = await migrate(pool, loadMigrations());
-      expect(applied.applied).toEqual([8, 9]);
+      expect(applied.applied).toEqual([8, 9, 10]);
       const row = (await pool.query('SELECT observed_at, available_at, retrieved_at, knowledge_provenance, revision_known_at, provenance_hash, knowledge_source_v2, known_at_v2, vintage_v2, vintage_policy_v2, knowledge_vintage_hash FROM market_bars WHERE start_time = $1', [legacy.startTime])).rows[0];
       expect(row).toEqual({
         observed_at: new Date(legacy.observedAt),

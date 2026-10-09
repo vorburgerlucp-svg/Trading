@@ -1,5 +1,6 @@
 import type { BacktestBarKnowledge, BacktestDataProvenance, BacktestQuality, BacktestQualityContext, CorporateActionReasonCode } from './backtest-types.js';
 import { CORPORATE_ACTION_REASON_TEXT } from './corporate-action-engine.js';
+import type { UniverseEvidence } from '../universe/universe-model.js';
 
 /**
  * Grade of a backtest. Its data provenance caps the grade; the return never enters.
@@ -17,6 +18,8 @@ export function assessBacktestQuality(
   bars: BacktestBarKnowledge,
   /** The corporate-action limitations the engine recorded. Each is reported under its own code, never merged. */
   corporateActionReasons: readonly CorporateActionReasonCode[] = [],
+  /** The derived universe evidence the run cites (BacktestInput.universe). A caller boolean never reaches this. null/undefined: none cited. */
+  universe?: UniverseEvidence | null,
 ): BacktestQuality {
   const reasons: string[] = [];
   const dataProvenance: BacktestDataProvenance =
@@ -29,7 +32,17 @@ export function assessBacktestQuality(
     if (target === 'C' || grade === 'A') grade = target;
   };
 
-  if (!context.pointInTimeUniverse) downgrade('C', 'instrument universe is not point-in-time safe');
+  // The universe is proven by evidence or it is not proven. A caller's pointInTimeUniverse flag is never trusted (docs/PIT_UNIVERSE_V1.md).
+  if (universe === undefined || universe === null) {
+    downgrade('C', 'UNIVERSE_EVIDENCE_NOT_PROVIDED: no universe evidence is cited, so the universe is not proven');
+    if (context.pointInTimeUniverse) downgrade('C', 'CALLER_UNIVERSE_CLAIM_NOT_PROVEN: a caller asserted point-in-time safety without evidence');
+  } else if (universe.status === 'UNAVAILABLE') {
+    downgrade('C', 'UNIVERSE_EVIDENCE_UNPROVEN: no universe revision was known at asOf');
+  } else {
+    if (!universe.complete) downgrade('C', 'UNIVERSE_COVERAGE_INCOMPLETE: the universe source snapshot is not complete');
+    if (!universe.sourceProduction) downgrade('C', 'UNIVERSE_SOURCE_NOT_PRODUCTION: the universe source is not a production source');
+    if (universe.historicalReconstruction) downgrade('B', 'UNIVERSE_HISTORICAL_RECONSTRUCTION: the universe membership is a historical reconstruction, not strict point-in-time evidence');
+  }
   if (context.corporateActions !== 'modeled' || corporateActionReasons.length > 0) downgrade('C', 'corporate actions are not fully modeled');
   for (const code of corporateActionReasons) downgrade('C', code + ': ' + CORPORATE_ACTION_REASON_TEXT[code]);
   if (!context.providerProduction) downgrade('B', 'market data source is not production');

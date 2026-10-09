@@ -1,5 +1,8 @@
+import { historicalSelection, partialSelection, strictSelection, unavailableSelection } from '../universe/fixtures.js';
 import { describe, expect, it } from 'vitest';
 import { InMemoryBacktestRunStore } from '../../src/backtest/backtest-store.js';
+import { executionClockIdentity } from '../../src/backtest/execution-clock.js';
+import { getCalendar } from '../../src/market-data/sessions.js';
 import { SPLIT_ADJUSTMENT_VERSION } from '../../src/market-data/corporate-actions.js';
 import type { BacktestFill, BacktestRunResult, BacktestTrade } from '../../src/backtest/backtest-types.js';
 import type { CostModelConfig } from '../../src/backtest/cost-model.js';
@@ -18,6 +21,7 @@ import { sealFor, verifySeal } from '../../src/persistence/evidence-seal.js';
 import type { QuantRunRecord } from '../../src/quant/quant-types.js';
 import { InMemoryScannerRunStore } from '../../src/scanner/scanner-store.js';
 import type { ScannerCandidate, ScannerRun } from '../../src/scanner/scanner-types.js';
+import type { UniverseEvidence } from '../../src/universe/universe-model.js';
 import { T0 } from '../helpers.js';
 import { byRole, decisionRequest, QUANT_CONFIRMS, ScriptedAdapter, setupBrain, task } from './fakes.js';
 
@@ -43,7 +47,7 @@ function quantRun(c: string, instrumentId = 'AAPL', asOf = T0, barDataProvenance
   return { result: { quantRunId: quantId(c), instrumentId, asOf, series: { interval: '1d' }, barDataProvenance }, resultHash: 'test', storedThrough: null, createdAt: asOf } as unknown as QuantRunRecord;
 }
 
-function scannerRun(o: { c: string; asOf?: string; candidates: { instrumentId: string; quantRunId: string; barKnowledge?: Record<string, unknown> }[]; rankingComplete?: boolean; inputsAvailableAt?: string | null; useCase?: 'live_trading' | 'research' }): ScannerRun {
+function scannerRun(o: { c: string; asOf?: string; candidates: { instrumentId: string; quantRunId: string; barKnowledge?: Record<string, unknown> }[]; rankingComplete?: boolean; inputsAvailableAt?: string | null; useCase?: 'live_trading' | 'research'; universe?: UniverseEvidence }): ScannerRun {
   const asOf = o.asOf ?? T0;
   const complete = o.rankingComplete ?? true;
   const scannerRunId = scannerId(o.c);
@@ -60,6 +64,7 @@ function scannerRun(o: { c: string; asOf?: string; candidates: { instrumentId: s
     barKnowledge: { ...PROVEN_BAR_KNOWLEDGE, ...c.barKnowledge } as ScannerCandidate['barKnowledge'],
   }));
   const definition = { id: 'momentum', version: '1', universeId: 'universe-test', interval: '1d', filters: [], ranking: [], maxCandidates: 10, ...(o.useCase ? { useCase: o.useCase } : {}) };
+  const universe = o.universe ?? strictSelection(definition.universeId, ['AAPL'], asOf).evidence;
   return {
     scannerRunId,
     inputFingerprint: o.c.repeat(64),
@@ -67,8 +72,8 @@ function scannerRun(o: { c: string; asOf?: string; candidates: { instrumentId: s
     definitionId: definition.id,
     definitionVersion: definition.version,
     universeId: definition.universeId,
-    universeFingerprint: 'u'.repeat(64),
-    universePointInTimeSafe: true,
+    universeEvidence: universe,
+    universeFingerprint: universe.fingerprint,
     asOf,
     coverage: {
       universeMembers: 2,
@@ -104,7 +109,7 @@ function backtestRun(o: { c: string; instrumentId?: string; grade?: BacktestRunR
   const grade = o.grade ?? 'A';
   return {
     backtestRunId: backtestId(o.c),
-    engineVersion: 'backtest-engine:test',
+    engineVersion: 'backtest-engine:v8',
     instrumentId,
     strategyId: 'breakout',
     strategyVersion: '1',
@@ -120,6 +125,7 @@ function backtestRun(o: { c: string; instrumentId?: string; grade?: BacktestRunR
     trades,
     equityCurve: [{ at: cutoff, cash: endingEquity, marketValue: D('0'), equity: endingEquity }],
     openPosition: null,
+    executionClock: executionClockIdentity(getCalendar('XNAS')!),
     metrics: {
       startingCapital: D('5000'),
       endingEquity,
@@ -286,6 +292,39 @@ describe('Evidence reference validation (NEXUS Brain, read-only, fail closed)', 
     const strict = await setupBrain({ adapters: council(), evidenceReaders: readers });
     const error = await strict.brain.decide(decisionRequest(task(), { quant: cited, requiresCompleteUniverse: true })).catch((e: unknown) => e);
     expect((error as EvidenceReferenceError).codes).toEqual(['SCANNER_RANKING_INCOMPLETE']);
+  });
+
+  it('Universum unbekannt (UNAVAILABLE): blockiert, auch für eine Entscheidung ohne volles Universum', async () => {
+    const { readers, cited } = await validLineage({ scanner: { rankingComplete: false, universe: unavailableSelection('universe-test', T0).evidence } });
+    const ctx = await setupBrain({ adapters: council(), evidenceReaders: readers });
+    const error = await ctx.brain.decide(decisionRequest(task(), { quant: cited })).catch((e: unknown) => e);
+    expect((error as EvidenceReferenceError).codes).toEqual(expect.arrayContaining(['UNIVERSE_EVIDENCE_UNPROVEN']));
+  });
+
+  it('Partielles Universum: Warnung für Research, fail closed wenn die Entscheidung das volle Universum braucht', async () => {
+    const { readers, cited } = await validLineage({ scanner: { rankingComplete: false, universe: partialSelection('universe-test', ['AAPL', 'MSFT'], T0).evidence } });
+    const soft = await setupBrain({ adapters: council(), evidenceReaders: readers });
+    const decision = await soft.brain.decide(decisionRequest(task(), { quant: cited }));
+    expect(decision.evidence.warnings.map((w) => w.code)).toContain('UNIVERSE_COVERAGE_INCOMPLETE');
+    const strict = await setupBrain({ adapters: council(), evidenceReaders: readers });
+    const error = await strict.brain.decide(decisionRequest(task(), { quant: cited, requiresCompleteUniverse: true })).catch((e: unknown) => e);
+    expect((error as EvidenceReferenceError).codes).toEqual(expect.arrayContaining(['UNIVERSE_COVERAGE_INCOMPLETE']));
+  });
+
+  it('Historische Rekonstruktion: sichtbare Warnung, nie stille Strenge', async () => {
+    const { readers, cited } = await validLineage({ scanner: { universe: historicalSelection('universe-test', ['AAPL', 'MSFT'], T0).evidence } });
+    const ctx = await setupBrain({ adapters: council(), evidenceReaders: readers });
+    const decision = await ctx.brain.decide(decisionRequest(task(), { quant: cited }));
+    expect(decision.evidence.warnings.map((w) => w.code)).toContain('UNIVERSE_HISTORICAL_RECONSTRUCTION');
+    expect(decision.evidence.lineage.scanner?.universe).toMatchObject({ historicalReconstruction: true, strictDecisionTime: false });
+  });
+
+  it('Striktes Universum: keine Universums-Warnung, Identität und Herkunft stehen in der Lineage', async () => {
+    const { readers, cited } = await validLineage();
+    const ctx = await setupBrain({ adapters: council(), evidenceReaders: readers });
+    const decision = await ctx.brain.decide(decisionRequest(task(), { quant: cited, requiresCompleteUniverse: true }));
+    expect(decision.evidence.warnings.filter((w) => w.code.startsWith('UNIVERSE_'))).toEqual([]);
+    expect(decision.evidence.lineage.scanner?.universe).toMatchObject({ status: 'SELECTED', complete: true, sourceProduction: true, strictDecisionTime: true, historicalReconstruction: false });
   });
 
   it('Referenz ohne konfigurierten Reader schlägt fail closed fehl (kein stiller Fallback)', async () => {

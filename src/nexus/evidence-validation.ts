@@ -16,10 +16,11 @@ import type { EvidenceSeal, EvidenceSealKind, Sealed } from '../persistence/evid
 import type { QuantRunStore } from '../quant/quant-run-store.js';
 import type { QuantBarProvenance, QuantRunRecord } from '../quant/quant-types.js';
 import type { ScannerRunStore } from '../scanner/scanner-store.js';
+import type { UniverseEvidence } from '../universe/universe-model.js';
 import type { ScannerBarKnowledge, ScannerCandidate, ScannerRun } from '../scanner/scanner-types.js';
 
 /** Version of the lineage object that enters the decision input fingerprint. */
-export const EVIDENCE_LINEAGE_VERSION = 'evidence-lineage:v3';
+export const EVIDENCE_LINEAGE_VERSION = 'evidence-lineage:v4';
 
 export interface ScannerEvidenceReader {
   getSealed(scannerRunId: string): Promise<Sealed<ScannerRun> | null>;
@@ -78,6 +79,10 @@ export const EVIDENCE_REASON_CODES = [
   'BAR_VINTAGE_NOT_CONTEMPORANEOUS',
   'LATEST_BAR_NOT_CONTEMPORANEOUS',
   'SCANNER_RESEARCH_EVIDENCE',
+  'UNIVERSE_EVIDENCE_UNPROVEN',
+  'UNIVERSE_COVERAGE_INCOMPLETE',
+  'UNIVERSE_HISTORICAL_RECONSTRUCTION',
+  'UNIVERSE_SOURCE_NOT_PRODUCTION',
 ] as const;
 export type EvidenceReasonCode = (typeof EVIDENCE_REASON_CODES)[number];
 
@@ -122,6 +127,23 @@ function barKnowledgeOf(provenance: Partial<QuantBarProvenance> | undefined): Ba
   };
 }
 
+/** Identity and derived facts of the universe revision a scanner run ranked over. Never a caller claim. */
+export interface UniverseLineage {
+  status: 'SELECTED' | 'UNAVAILABLE';
+  snapshotKey: string | null;
+  snapshotRevisionId: string | null;
+  revision: number | null;
+  effectiveAt: string | null;
+  knownAt: string | null;
+  vintage: string | null;
+  complete: boolean;
+  decisionTimeKnowledgeProven: boolean;
+  strictDecisionTime: boolean;
+  sourceProduction: boolean;
+  historicalReconstruction: boolean;
+  fingerprint: string;
+}
+
 export interface EvidenceLineage {
   evidenceLineageVersion: typeof EVIDENCE_LINEAGE_VERSION;
   asOf: string;
@@ -137,6 +159,8 @@ export interface EvidenceLineage {
     /** live_trading (the default) or research: a research scan is never live evidence. */
     useCase: 'live_trading' | 'research';
     candidate: { instrumentId: string; rank: number; quantRunId: string; barKnowledge: ScannerBarKnowledge | null } | null;
+    /** The derived universe evidence the scanner ranked over (docs/PIT_UNIVERSE_V1.md). null only when the run predates it. */
+    universe: UniverseLineage | null;
   } | null;
   backtests: {
     backtestRunId: string;
@@ -183,6 +207,10 @@ export class EvidenceReferenceError extends Error {
     super('evidence references rejected (fail closed): ' + validation.blocking.map((i) => i.code + ' ' + i.ref).join('; '));
     this.codes = [...new Set(validation.blocking.map((i) => i.code))];
   }
+}
+
+function universeLineageOf(u: UniverseEvidence): UniverseLineage {
+  return { status: u.status, snapshotKey: u.snapshotKey, snapshotRevisionId: u.snapshotRevisionId, revision: u.revision, effectiveAt: u.effectiveAt, knownAt: u.knownAt, vintage: u.vintage, complete: u.complete, decisionTimeKnowledgeProven: u.decisionTimeKnowledgeProven, strictDecisionTime: u.strictDecisionTime, sourceProduction: u.sourceProduction, historicalReconstruction: u.historicalReconstruction, fingerprint: u.fingerprint };
 }
 
 const byCodeAndRef = (a: EvidenceIssue, b: EvidenceIssue): number => (a.code < b.code ? -1 : a.code > b.code ? 1 : a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0);
@@ -304,6 +332,32 @@ export async function validateEvidenceReferences(request: EvidenceRequest, reade
       if (quant !== null && parseUtc(quant.record.result.asOf) !== parseUtc(run.asOf)) {
         block('SCANNER_QUANT_LINEAGE_MISMATCH', run.scannerRunId, 'quant run asOf ' + quant.record.result.asOf + ' differs from scanner asOf ' + run.asOf);
       }
+      // The universe: a scanner run without derived universe evidence cannot be promoted, and an unproven or incomplete universe blocks a
+      // decision that needs the complete universe. A historical reconstruction is always a visible warning, never described as strict.
+      const universe = run.universeEvidence;
+      if (universe === undefined || universe === null) {
+        block('UNIVERSE_EVIDENCE_UNPROVEN', run.scannerRunId, 'scanner run predates universe evidence: its universe cannot be shown');
+      } else {
+        // An unavailable universe is never acceptable: no revision was known, so nothing can be shown. The other facts are then moot.
+        if (universe.status === 'UNAVAILABLE') {
+          block('UNIVERSE_EVIDENCE_UNPROVEN', run.scannerRunId, 'no universe revision was known at asOf');
+        } else {
+          if (!universe.decisionTimeKnowledgeProven) {
+            const detail = 'the universe revision was not known at asOf';
+            if (request.requiresCompleteUniverse) block('UNIVERSE_EVIDENCE_UNPROVEN', run.scannerRunId, detail);
+            else warn('UNIVERSE_EVIDENCE_UNPROVEN', run.scannerRunId, detail);
+          }
+          if (!universe.complete) {
+            if (request.requiresCompleteUniverse) block('UNIVERSE_COVERAGE_INCOMPLETE', run.scannerRunId, 'the universe source snapshot is not complete');
+            else warn('UNIVERSE_COVERAGE_INCOMPLETE', run.scannerRunId, 'the universe source snapshot is not complete');
+          }
+          if (!universe.sourceProduction) {
+            if (request.requiresCompleteUniverse) block('UNIVERSE_SOURCE_NOT_PRODUCTION', run.scannerRunId, 'the universe source is not production');
+            else warn('UNIVERSE_SOURCE_NOT_PRODUCTION', run.scannerRunId, 'the universe source is not production');
+          }
+          if (universe.historicalReconstruction) warn('UNIVERSE_HISTORICAL_RECONSTRUCTION', run.scannerRunId, 'the universe membership is a historical reconstruction, not strict point-in-time evidence');
+        }
+      }
       if (candidate !== null) {
         // The candidate's bars must be known at asOf in every case. A live candidate also needs a contemporaneous signal bar.
         const k = candidate.barKnowledge as Partial<ScannerBarKnowledge> | undefined;
@@ -389,6 +443,7 @@ export async function validateEvidenceReferences(request: EvidenceRequest, reade
           inputsAvailableAt: scanner.record.inputsAvailableAt ?? null,
           useCase: scanner.record.definition.useCase ?? 'live_trading',
           candidate: candidate === null ? null : { instrumentId: candidate.instrumentId, rank: candidate.rank, quantRunId: candidate.quantRunId, barKnowledge: candidate.barKnowledge ?? null },
+          universe: scanner.record.universeEvidence ? universeLineageOf(scanner.record.universeEvidence) : null,
         },
     backtests: backtests.sort((a, b) => (a.backtestRunId < b.backtestRunId ? -1 : a.backtestRunId > b.backtestRunId ? 1 : 0)),
   };

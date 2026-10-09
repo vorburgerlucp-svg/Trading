@@ -1,3 +1,4 @@
+import { strictSelection } from '../universe/fixtures.js';
 import { getCalendar } from '../../src/market-data/sessions.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runBacktest } from '../../src/backtest/backtest-engine.js';
@@ -45,8 +46,8 @@ function scannerRun(): ScannerRun {
     definitionId: definition.id,
     definitionVersion: definition.version,
     universeId: definition.universeId,
-    universeFingerprint: hashOf({ members: ['TEST'] }),
-    universePointInTimeSafe: true,
+    universeEvidence: strictSelection(definition.universeId, ['TEST'], '2026-10-08T20:00:00.000Z').evidence,
+    universeFingerprint: strictSelection(definition.universeId, ['TEST'], '2026-10-08T20:00:00.000Z').evidence.fingerprint,
     asOf: '2026-10-08T20:00:00.000Z',
     coverage: { universeMembers: 1, snapshotsProvided: 1, evaluatedInstruments: 1, missingInstruments: [], duplicateInstruments: [], complete: true },
     rankingComplete: true,

@@ -5,8 +5,9 @@ import { Decimal } from '../../src/money/decimal.js';
 import { computeQuant } from '../../src/quant/quant-engine.js';
 import { runMarketScanner } from '../../src/scanner/market-scanner.js';
 import type { ScannerDefinition, ScannerSnapshot } from '../../src/scanner/scanner-types.js';
-import { InMemoryInstrumentUniverseStore } from '../../src/scanner/universe.js';
 import { AAPL, PRODUCTION_LIKE_SOURCE, dailyBars, randomOhlcv } from '../market-data/fixtures.js';
+import { InMemoryUniverseStore } from '../../src/universe/universe-store.js';
+import { strictSelection } from '../universe/fixtures.js';
 
 const XNAS = getCalendar('XNAS')!;
 
@@ -60,25 +61,23 @@ function scannerSnapshot(q: ReturnType<typeof quant>['q'], asOf: string, overrid
 }
 
 function scannerUniverse(asOf: string, extraMembers: string[] = []) {
-  const store = new InMemoryInstrumentUniverseStore();
-  store.register({ universeId: 'U', version: '1', source: 'fixture', pointInTimeSafe: true });
-  store.addMembership({ universeId: 'U', instrumentId: AAPL.instrumentId, validFrom: '2020-01-01T00:00:00.000Z', availableAt: '2020-01-01T00:00:00.000Z', source: 'fixture' });
-  for (const instrumentId of extraMembers) {
-    store.addMembership({ universeId: 'U', instrumentId, validFrom: '2020-01-01T00:00:00.000Z', availableAt: '2020-01-01T00:00:00.000Z', source: 'fixture' });
-  }
-  return store.snapshot('U', asOf);
+  return strictSelection('U', [AAPL.instrumentId, ...extraMembers], asOf);
 }
 
 describe('point-in-time universe', () => {
-  it('membership is invisible before its availableAt and historical delisting is respected', () => {
-    const store = new InMemoryInstrumentUniverseStore();
-    store.register({ universeId: 'U', version: '1', source: 'fixture', pointInTimeSafe: true });
-    store.addMembership({ universeId: 'U', instrumentId: 'A', validFrom: '2026-01-01T00:00:00.000Z', validTo: '2026-06-01T00:00:00.000Z', availableAt: '2025-12-31T00:00:00.000Z', source: 'fixture' });
-    store.addMembership({ universeId: 'U', instrumentId: 'B', validFrom: '2026-01-01T00:00:00.000Z', availableAt: '2026-02-01T00:00:00.000Z', source: 'fixture' });
-
-    expect(store.snapshot('U', '2026-01-15T00:00:00.000Z').members).toEqual(['A']);
-    expect(store.snapshot('U', '2026-03-01T00:00:00.000Z').members).toEqual(['A', 'B']);
-    expect(store.snapshot('U', '2026-07-01T00:00:00.000Z').members).toEqual(['B']);
+  it('a member joins and leaves by effective complete snapshots; each decision sees the list in force', () => {
+    const store = new InMemoryUniverseStore();
+    store.registerDefinition({ universeId: 'U', definitionVersion: '1', name: 'U' });
+    store.registerSource({ sourceId: 'fixture:u:production', provider: 'fixture', dataset: 'constituents', environment: 'production', license: 'internal_use' });
+    const ingest = (effectiveAt: string, retrievedAt: string, ids: string[]) =>
+      store.ingest({ universeId: 'U', sourceId: 'fixture:u:production', effectiveAt, retrievedAt, knowledgeSource: 'captured_by_nexus', knownAt: retrievedAt, completeness: 'COMPLETE', members: ids.map((id) => ({ sourceMemberKey: 'k:' + id, providerSymbol: id })) }, (m) => m.providerSymbol);
+    ingest('2026-01-01T00:00:00.000Z', '2025-12-31T00:00:00.000Z', ['A']);
+    ingest('2026-02-01T00:00:00.000Z', '2026-01-31T00:00:00.000Z', ['A', 'B']);
+    ingest('2026-06-01T00:00:00.000Z', '2026-05-31T00:00:00.000Z', ['B']);
+    const at = (asOf: string) => store.select({ universeId: 'U', sourceId: 'fixture:u:production', asOf, mode: 'decision_time' }).members;
+    expect(at('2026-01-15T00:00:00.000Z')).toEqual(['A']);
+    expect(at('2026-03-01T00:00:00.000Z')).toEqual(['A', 'B']);
+    expect(at('2026-07-01T00:00:00.000Z')).toEqual(['B']);
   });
 });
 
@@ -90,7 +89,7 @@ describe('market scanner core', () => {
     const run = runMarketScanner(definition(), universe, [scannerSnapshot(q, asOf)], asOf);
     expect(run.candidates).toHaveLength(1);
     expect(run.candidates[0]).toMatchObject({ instrumentId: AAPL.instrumentId, rank: 1, quantRunId: q.quantRunId });
-    expect(run.universePointInTimeSafe).toBe(true);
+    expect(run.universeEvidence.strictDecisionTime).toBe(true);
     expect(run.coverage.complete).toBe(true);
     expect(run.rankingComplete).toBe(true);
   });
