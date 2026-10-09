@@ -3,6 +3,7 @@ import { Decimal } from '../money/decimal.js';
 import { hashOf } from '../persistence/canonical-json.js';
 import { isoMs, sealFor, verifySeal, type EvidenceSeal, type Sealed } from '../persistence/evidence-seal.js';
 import { CORPORATE_ACTION_ENGINE_VERSION, CORPORATE_ACTION_POLICY_VERSION, CORPORATE_ACTION_REASON_TEXT } from './corporate-action-engine.js';
+import { EXECUTION_CLOCK_VERSION } from './execution-clock.js';
 import type { BacktestCorporateActionResult, BacktestRunResult } from './backtest-types.js';
 
 export class BacktestRunConflictError extends Error {
@@ -81,7 +82,36 @@ function verifyCorporateActions(run: BacktestRunResult, ca: BacktestCorporateAct
   if (ca.settledDividends.length !== 0) throw new BacktestRunIntegrityError('dividend settlement is not supported in V1');
 }
 
+/**
+ * Fill timing must be what the fill claims (execution-clock:v1). An OPEN_EXACT fill executes at its session open, which is not before its bar
+ * window start. An INTRABAR_UNKNOWN fill carries no execution instant: its `at` is the bar window start, and the window is non-empty.
+ * The execution calendar identity must be recorded, and the open position must come from its entry fill.
+ */
+function verifyExecutionClock(run: BacktestRunResult): void {
+  if (run.engineVersion !== 'backtest-engine:v7') return;
+  if (!run.executionClock || run.executionClock.version !== EXECUTION_CLOCK_VERSION || run.executionClock.calendarId.trim() === '') {
+    throw new BacktestRunIntegrityError('execution clock identity is missing or of another version');
+  }
+  const byId = new Map(run.fills.map((f) => [f.fillId, f]));
+  for (const fill of run.fills) {
+    const t = fill.timing;
+    if (!t) throw new BacktestRunIntegrityError('fill ' + fill.fillId + ' has no timing');
+    if (t.kind === 'OPEN_EXACT') {
+      if (fill.at !== t.executionAt) throw new BacktestRunIntegrityError('exact fill ' + fill.fillId + ' does not execute at its recorded open');
+      if (parseUtc(t.barStart) > parseUtc(t.executionAt)) throw new BacktestRunIntegrityError('fill ' + fill.fillId + ' executes before its bar window starts');
+    } else {
+      if (fill.at !== t.barStart) throw new BacktestRunIntegrityError('intrabar fill ' + fill.fillId + ' has an inconsistent bar window');
+      if (parseUtc(t.barStart) >= parseUtc(t.barEnd)) throw new BacktestRunIntegrityError('intrabar fill ' + fill.fillId + ' has an empty bar window');
+    }
+  }
+  if (run.openPosition) {
+    const entry = byId.get(run.openPosition.entryFillId);
+    if (!entry || entry.side !== 'buy' || entry.at !== run.openPosition.entryTime) throw new BacktestRunIntegrityError('open position entry time does not match its entry fill');
+  }
+}
+
 export function verifyBacktestRun(run: BacktestRunResult): BacktestRunResult {
+  verifyExecutionClock(run);
   if (run.engineVersion === 'backtest-engine:v5') {
     if (typeof run.portfolioCurrency !== 'string' || !/^[A-Z]{3}$/.test(run.portfolioCurrency)) throw new BacktestRunIntegrityError('portfolio currency is missing or invalid');
   }

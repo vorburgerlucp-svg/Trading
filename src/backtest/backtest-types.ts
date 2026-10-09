@@ -2,6 +2,7 @@ import type { BarReplayMode, CorporateActionKnowledgeProvenance, CorporateAction
 import type { TradingCalendar } from '../market-data/sessions.js';
 import type { Decimal } from '../money/decimal.js';
 import type { CostModelConfig } from './cost-model.js';
+import type { ExecutionClockIdentity } from './execution-clock.js';
 import type { IntrabarFillPolicy } from './execution-model.js';
 
 export type PositionSizing =
@@ -22,12 +23,26 @@ export interface BacktestPosition {
   takeProfit: Decimal | null;
 }
 
+/**
+ * How the execution instant of a fill is known (execution-clock:v1).
+ *   OPEN_EXACT:       the fill executes at the executable open of its session (market entry, strategy exit, gap stop or gap take profit).
+ *                     `executionAt` is that instant; the fill's `at` equals it.
+ *   INTRABAR_UNKNOWN: a stop or target touched inside the bar's range. The instant is not knowable from OHLC. `at` is the bar window start
+ *                     and is NOT an execution time. The touch lies somewhere in [barStart, barEnd). Trade duration must not use it as exact.
+ */
+export type FillTiming =
+  | { kind: 'OPEN_EXACT'; executionAt: string; barStart: string; openSource: 'regular_session_open' | 'intraday_bar_start' }
+  | { kind: 'INTRABAR_UNKNOWN'; barStart: string; barEnd: string };
+
 export interface BacktestFill {
   fillId: string;
   instrumentId: string;
   side: 'buy' | 'sell';
   reason: 'market_entry' | 'strategy_exit' | 'stop' | 'take_profit';
+  /** The economic execution instant for OPEN_EXACT fills. For INTRABAR_UNKNOWN fills it is the bar window start, not an execution time (see timing). */
   at: string;
+  /** Explicit timing semantics. Required from backtest-engine:v7. */
+  timing: FillTiming;
   rawPrice: Decimal;
   executionPrice: Decimal;
   quantity: Decimal;
@@ -120,6 +135,8 @@ export interface BacktestRunResult {
   warmup?: BacktestWarmupResult;
   /** Portfolio currency the cash and any receivable are denominated in. Required from backtest-engine:v5. */
   portfolioCurrency?: string;
+  /** The execution calendar identity that fixed every executable open of this run. Required from backtest-engine:v7. */
+  executionClock?: ExecutionClockIdentity;
   /** Corporate-action accounting of this run. Present when the run was given corporate-action input (backtest-engine:v5). */
   corporateActions?: BacktestCorporateActionResult;
 }
@@ -272,6 +289,11 @@ export interface BacktestInput {
   initialCapital: Decimal;
   /** ISO 4217. Required, never defaulted: cash, dividends and the fingerprint depend on it. */
   portfolioCurrency: string;
+  /**
+   * The execution calendar. Required and explicit: it fixes every executable market open (a daily bar's window start is not one). It is
+   * used whether or not corporate actions are enabled, and must match corporateActions.calendar when both are given.
+   */
+  executionCalendar: TradingCalendar;
   sizing: PositionSizing;
   costModel: CostModelConfig;
   intrabarPolicy?: IntrabarFillPolicy;

@@ -65,7 +65,7 @@ function ca(p: {
 const withActions = (actions: readonly StoredCorporateAction[]): { corporateActions: CorporateActionInput } => ({ corporateActions: { actions, calendar: XNAS } });
 
 function run(bars: MarketBar[], strategy: BacktestStrategy, extra: Partial<BacktestInput> = {}) {
-  return runBacktest({ bars, strategy, initialCapital: Decimal.from(10_000), portfolioCurrency: 'USD', sizing: { type: 'fixed_cash', amount: '1000' }, costModel: costs, quality, ...extra });
+  return runBacktest({ bars, strategy, initialCapital: Decimal.from(10_000), portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, sizing: { type: 'fixed_cash', amount: '1000' }, costModel: costs, quality, ...extra });
 }
 
 /** Enters when the history reaches `enterAt`, optionally with attached levels, and exits when it reaches `exitAt`. Logs what it saw. */
@@ -289,11 +289,9 @@ describe('O2 calendar effective time (Phase 3)', () => {
     expect(() => effectiveSessionOf(ca({ key: 'split:thx', type: 'split', exDate: '2026-11-26', from: '1', to: '4' }), XNAS)).toThrow(/CORPORATE_ACTION_CALENDAR_UNPROVEN/);
   });
 
-  it('an assumed session (outside the verified coverage) is applied but reported: the run is not fully modeled', () => {
+  it('an assumed session (outside the verified coverage) is refused: the executable open is not proven (execution clock, fail closed)', () => {
     const rows: Row[] = [['2028-03-02', '100', '100', '100', '100'], ['2028-03-03', '100', '100', '100', '100'], ['2028-03-06', '110', '110', '110', '110']];
-    const r = run(series(rows), strategy({ enterAt: 1, exitAt: 100 }), withActions([ca({ key: 'symbol:2028', type: 'symbol_change', exDate: '2028-03-06', oldSymbol: 'OLD', newSymbol: 'NEW' })]));
-    expect(r.corporateActions!.reasons).toContain('CORPORATE_ACTION_CALENDAR_UNPROVEN');
-    expect(r.quality.grade).toBe('C');
+    expect(() => run(series(rows), strategy({ enterAt: 1, exitAt: 100 }), withActions([ca({ key: 'symbol:2028', type: 'symbol_change', exDate: '2028-03-06', oldSymbol: 'OLD', newSymbol: 'NEW' })]))).toThrow(/EXECUTION_CALENDAR_UNPROVEN/);
   });
 });
 

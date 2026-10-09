@@ -1,3 +1,4 @@
+import { getCalendar } from '../../src/market-data/sessions.js';
 import { describe, expect, it } from 'vitest';
 import { runBacktest } from '../../src/backtest/backtest-engine.js';
 import type { BacktestStrategy, StrategyContext } from '../../src/backtest/strategy.js';
@@ -26,7 +27,7 @@ const cost = { commissionBps: 0, spreadBps: 0, slippageBps: 0, minCommission: '0
 const warmup = { requiredBars: 1, preferredBars: 1, algorithmVersion: 'test-warmup:v1' };
 
 function run(input: MarketBar[], strategy: BacktestStrategy) {
-  return runBacktest({ bars: input, strategy, portfolioCurrency: 'USD', initialCapital: Decimal.from(1000), sizing: { type: 'fixed_cash', amount: '100' }, costModel: cost, quality });
+  return runBacktest({ bars: input, strategy, portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000), sizing: { type: 'fixed_cash', amount: '100' }, costModel: cost, quality });
 }
 
 describe('strategy isolation: the engine owns its data', () => {

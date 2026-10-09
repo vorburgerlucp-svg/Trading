@@ -69,7 +69,7 @@ export function ca(p: {
 export const withActions = (actions: readonly StoredCorporateAction[]): { corporateActions: CorporateActionInput } => ({ corporateActions: { actions, calendar: XNAS } });
 
 export function run(bars: MarketBar[], strategy: BacktestStrategy, extra: Partial<BacktestInput> = {}) {
-  return runBacktest({ bars, strategy, initialCapital: Decimal.from(10_000), portfolioCurrency: 'USD', sizing: { type: 'fixed_cash', amount: '1000' }, costModel: costs, quality, ...extra });
+  return runBacktest({ bars, strategy, initialCapital: Decimal.from(10_000), portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, sizing: { type: 'fixed_cash', amount: '1000' }, costModel: costs, quality, ...extra });
 }
 
 /** Enters when the history reaches `enterAt` (with attached levels when given), exits when it reaches `exitAt`. Logs what it saw. */

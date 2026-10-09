@@ -91,8 +91,9 @@ function backtestRun(o: { c: string; instrumentId?: string; grade?: BacktestRunR
   const fills: BacktestFill[] = [];
   for (let i = 0; i < (o.trades ?? 0); i++) {
     const at = '2026-09-0' + ((i % 9) + 1) + 'T14:30:00.000Z';
-    const entry: BacktestFill = { fillId: 'in-' + i, instrumentId, side: 'buy', reason: 'market_entry', at, rawPrice: D('10'), executionPrice: D('10'), quantity: D('1'), commission: D('0') };
-    const exit: BacktestFill = { fillId: 'out-' + i, instrumentId, side: 'sell', reason: 'strategy_exit', at, rawPrice: D('11'), executionPrice: D('11'), quantity: D('1'), commission: D('0') };
+    const timing = { kind: 'OPEN_EXACT' as const, executionAt: at, barStart: at, openSource: 'intraday_bar_start' as const };
+    const entry: BacktestFill = { fillId: 'in-' + i, instrumentId, side: 'buy', reason: 'market_entry', at, timing, rawPrice: D('10'), executionPrice: D('10'), quantity: D('1'), commission: D('0') };
+    const exit: BacktestFill = { fillId: 'out-' + i, instrumentId, side: 'sell', reason: 'strategy_exit', at, timing, rawPrice: D('11'), executionPrice: D('11'), quantity: D('1'), commission: D('0') };
     fills.push(entry, exit);
     trades.push({ tradeId: 'trade-' + i, instrumentId, entry, exit, pnl: D('1'), returnPct: 10 });
   }

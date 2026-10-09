@@ -14,12 +14,13 @@
 
 import { knownAtMs, replayInstantMs, vintageOf } from '../market-data/bar-replay.js';
 import type { BarReplayMode, MarketBar } from '../market-data/market-data-types.js';
-import { parseUtc } from '../market-data/time.js';
+import { parseUtc, toUtcIso } from '../market-data/time.js';
 import { Decimal } from '../money/decimal.js';
 import { hashOf } from '../persistence/canonical-json.js';
 import { DeterministicCostModel } from './cost-model.js';
 import { CORPORATE_ACTION_REASON_TEXT, CorporateActionLedger, type AttachedLevels } from './corporate-action-engine.js';
-import { isEligibleNextBar, protectiveExitForLong } from './execution-model.js';
+import { executionClockIdentity, executionOpenOf, isEligibleAtOpen } from './execution-clock.js';
+import { protectiveExitForLong } from './execution-model.js';
 import { backtestMetrics } from './performance.js';
 import { PointInTimeBarState, buildBarAvailabilityQueue } from './point-in-time.js';
 import { assessBacktestQuality } from './quality.js';
@@ -34,19 +35,21 @@ import type {
   BacktestTrade,
   BacktestWarmupResult,
   CorporateActionReasonCode,
+  FillTiming,
 } from './backtest-types.js';
 import type { BacktestStrategy, StrategyDecision } from './strategy.js';
 import { validateWarmupPlan, type WarmupPlan } from './warmup.js';
 
 /**
- * v6: economic corporate-action knowledge is required at the effective instant (not at the event), audit appliedAt is the effective
- * instant with processedAt for the event, same-instant splits are one composite, source identity is enforced. v5 runs are not reinterpreted.
+ * v7: fills execute at the executable market open (execution-clock:v1), not at a daily bar's window start; a signal fills at an open only
+ * if it was usable by then; fills carry explicit timing (OPEN_EXACT or INTRABAR_UNKNOWN). v6 and earlier runs are not reinterpreted.
  */
-export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v6';
+export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v7';
 
 interface PendingOrder {
   side: 'buy' | 'sell';
-  decisionBar: MarketBar;
+  /** The instant the signal became usable (the event that created it), in ms. An executable open must be at or after it. */
+  decidedAt: number;
   stopLoss: Decimal | null;
   takeProfit: Decimal | null;
 }
@@ -88,14 +91,19 @@ function barKnowledgeAtUse(bars: readonly MarketBar[], mode: BarReplayMode): Bac
   return out;
 }
 
-function decisionToPending(decision: StrategyDecision, currentBar: MarketBar): PendingOrder | null {
+function decisionToPending(decision: StrategyDecision, decidedAt: number): PendingOrder | null {
   if (decision.action === 'ENTER_LONG') {
-    return { side: 'buy', decisionBar: currentBar, stopLoss: decision.stopLoss ?? null, takeProfit: decision.takeProfit ?? null };
+    return { side: 'buy', decidedAt, stopLoss: decision.stopLoss ?? null, takeProfit: decision.takeProfit ?? null };
   }
   if (decision.action === 'EXIT_LONG') {
-    return { side: 'sell', decisionBar: currentBar, stopLoss: null, takeProfit: null };
+    return { side: 'sell', decidedAt, stopLoss: null, takeProfit: null };
   }
   return null;
+}
+
+/** The economic execution instant of a fill: the open for an exact fill; for an intrabar touch, the bar window start (never an execution time). */
+function fillAt(timing: FillTiming): string {
+  return timing.kind === 'OPEN_EXACT' ? timing.executionAt : timing.barStart;
 }
 
 function assertChronologicalAvailability(bars: readonly MarketBar[], mode: BarReplayMode): void {
@@ -165,6 +173,9 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
   if (input.corporateActions && first.adjustment !== 'raw') {
     throw new Error('CORPORATE_ACTION_DOUBLE_ADJUSTMENT_RISK: ' + CORPORATE_ACTION_REASON_TEXT.CORPORATE_ACTION_DOUBLE_ADJUSTMENT_RISK + ' (got ' + first.adjustment + ')');
   }
+  if (input.corporateActions && input.corporateActions.calendar.calendarId !== input.executionCalendar.calendarId) {
+    throw new Error('corporate actions and execution use different calendars (' + input.corporateActions.calendar.calendarId + ' vs ' + input.executionCalendar.calendarId + ')');
+  }
   const replay: BarReplayMode = input.replay ?? 'historical_research';
   assertChronologicalAvailability(input.bars, replay);
 
@@ -199,11 +210,11 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     return complete;
   };
 
-  const closePosition = (bar: MarketBar, rawPrice: Decimal, reason: BacktestFill['reason']): void => {
+  const closePosition = (_bar: MarketBar, rawPrice: Decimal, reason: BacktestFill['reason'], timing: FillTiming): void => {
     if (!position) return;
     const openPosition = position;
     const quote = costModel.quote(rawPrice, 'sell', openPosition.quantity);
-    const exitFill = addFill({ instrumentId, side: 'sell', reason, at: bar.startTime, rawPrice, executionPrice: quote.executionPrice, quantity: openPosition.quantity, commission: quote.commission });
+    const exitFill = addFill({ instrumentId, side: 'sell', reason, at: fillAt(timing), timing, rawPrice, executionPrice: quote.executionPrice, quantity: openPosition.quantity, commission: quote.commission });
     const exitNet = quote.executionPrice.times(openPosition.quantity).minus(quote.commission);
     // The entry is resolved by its immutable id. Its cost is the entry fill itself: a split changes the per-share basis, never the total.
     const entryFill = fills.find((f) => f.fillId === openPosition.entryFillId);
@@ -227,33 +238,48 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
       pending = withLevels(pending, step.levels);
     }
 
-    // 1. Market order created earlier, at this bar's open.
-    if (pending && isEligibleNextBar(pending.decisionBar, bar)) {
-      if (pending.side === 'buy' && !position) {
-        const estimatedExecution = costModel.executionPrice(bar.open, 'buy');
-        const desired = desiredLongQuantity({ sizing: input.sizing, cash, equity: cash, executionPrice: estimatedExecution, stopLoss: pending.stopLoss });
-        const affordable = costModel.maxAffordableQuantity(cash, bar.open);
-        const quantity = minDecimal(desired, affordable);
-        if (quantity.isPositive()) {
-          const quote = costModel.quote(bar.open, 'buy', quantity);
-          const total = quote.executionPrice.times(quantity).plus(quote.commission);
-          if (total.lte(cash)) {
-            const fill = addFill({ instrumentId, side: 'buy', reason: 'market_entry', at: bar.startTime, rawPrice: bar.open, executionPrice: quote.executionPrice, quantity, commission: quote.commission });
-            cash = cash.minus(total);
-            position = { instrumentId, entryFillId: fill.fillId, quantity, entryPrice: quote.executionPrice, entryTime: fill.at, entryCommission: quote.commission, stopLoss: pending.stopLoss, takeProfit: pending.takeProfit };
+    // 1. Market order created earlier, at this bar's EXECUTABLE open (execution-clock:v1). A signal fills there only if it was usable by
+    //    that open (equality is eligible). A signal usable after the open waits for the next executable open; it never fills retroactively.
+    if (pending) {
+      const open = executionOpenOf(bar, input.executionCalendar);
+      if (isEligibleAtOpen(pending.decidedAt, open.openMs)) {
+        const timing: FillTiming = { kind: 'OPEN_EXACT', executionAt: toUtcIso(open.openMs), barStart: bar.startTime, openSource: open.source };
+        if (pending.side === 'buy' && !position) {
+          const estimatedExecution = costModel.executionPrice(bar.open, 'buy');
+          const desired = desiredLongQuantity({ sizing: input.sizing, cash, equity: cash, executionPrice: estimatedExecution, stopLoss: pending.stopLoss });
+          const affordable = costModel.maxAffordableQuantity(cash, bar.open);
+          const quantity = minDecimal(desired, affordable);
+          if (quantity.isPositive()) {
+            const quote = costModel.quote(bar.open, 'buy', quantity);
+            const total = quote.executionPrice.times(quantity).plus(quote.commission);
+            if (total.lte(cash)) {
+              const fill = addFill({ instrumentId, side: 'buy', reason: 'market_entry', at: fillAt(timing), timing, rawPrice: bar.open, executionPrice: quote.executionPrice, quantity, commission: quote.commission });
+              cash = cash.minus(total);
+              position = { instrumentId, entryFillId: fill.fillId, quantity, entryPrice: quote.executionPrice, entryTime: fill.at, entryCommission: quote.commission, stopLoss: pending.stopLoss, takeProfit: pending.takeProfit };
+            }
           }
+        } else if (pending.side === 'sell' && position) {
+          closePosition(bar, bar.open, 'strategy_exit', timing);
         }
-      } else if (pending.side === 'sell' && position) {
-        closePosition(bar, bar.open, 'strategy_exit');
+        pending = null;
       }
-      pending = null;
     }
 
-    // 2. Protective exits over this bar.
+    // 2. Protective exits over this bar. A gap through a level executes at the open (exact). A level touched inside the bar's range has
+    //    an instant that OHLC cannot give: it is recorded as INTRABAR_UNKNOWN with the bar window, never as an exact time.
     if (position && (position.stopLoss !== null || position.takeProfit !== null)) {
       const protective = protectiveExitForLong(bar, position.stopLoss, position.takeProfit, intrabarPolicy);
       if (protective?.kind === 'ambiguous') ambiguousBars++;
-      else if (protective?.rawFillPrice) closePosition(bar, protective.rawFillPrice, protective.kind);
+      else if (protective?.rawFillPrice) {
+        const timing: FillTiming =
+          protective.timing === 'OPEN_EXACT'
+            ? (() => {
+                const open = executionOpenOf(bar, input.executionCalendar);
+                return { kind: 'OPEN_EXACT' as const, executionAt: toUtcIso(open.openMs), barStart: bar.startTime, openSource: open.source };
+              })()
+            : { kind: 'INTRABAR_UNKNOWN', barStart: bar.startTime, barEnd: bar.endTime };
+        closePosition(bar, protective.rawFillPrice, protective.kind, timing);
+      }
     }
 
     // 3. Mark at close. Receivables are economic value in equity, never cash.
@@ -282,8 +308,9 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     // A frozen copy of the open position: the strategy reads its levels, the engine alone changes them.
     const decision = input.strategy.evaluate({ instrumentId, asOf: event.availableAt, currentBar: view.currentBar, history: view.history, position: position === null ? null : Object.freeze({ ...position }) });
     if (!pending) {
-      if (decision.action === 'ENTER_LONG' && !position) pending = decisionToPending(decision, bar);
-      else if (decision.action === 'EXIT_LONG' && position) pending = decisionToPending(decision, bar);
+      const decidedAt = parseUtc(event.availableAt);
+      if (decision.action === 'ENTER_LONG' && !position) pending = decisionToPending(decision, decidedAt);
+      else if (decision.action === 'EXIT_LONG' && position) pending = decisionToPending(decision, decidedAt);
     }
   }
 
@@ -326,6 +353,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     qualityContext: input.quality,
     replay,
     corporateActions: ledger ? ledger.fingerprintRows() : null,
+    executionClock: executionClockIdentity(input.executionCalendar),
     bars: input.bars.map(barFingerprint),
   });
 
@@ -340,6 +368,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     inputFingerprint,
     initialCapital: input.initialCapital,
     portfolioCurrency: input.portfolioCurrency,
+    executionClock: executionClockIdentity(input.executionCalendar),
     costModel: costModel.config,
     sizing: input.sizing,
     intrabarPolicy,

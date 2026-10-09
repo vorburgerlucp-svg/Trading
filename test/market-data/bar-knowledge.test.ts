@@ -412,7 +412,7 @@ describe('I — backtest: strict only if known at the simulated use time and con
     runBacktest({
       bars,
       strategy: enterExit,
-      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: { commissionBps: 1, spreadBps: 1, slippageBps: 1, minCommission: '0' },
       quality: { pointInTimeUniverse: true, dataComplete: true, corporateActions: 'not_modeled', providerProduction: true, minimumTrades: 1 },

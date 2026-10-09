@@ -8,6 +8,7 @@
 // decision time. Nothing here repairs history.
 
 import { isProvenKnowledge, splitAdjustBars } from '../market-data/corporate-actions.js';
+import { executionOpenMs } from './execution-clock.js';
 import type { MarketBar, StoredCorporateAction } from '../market-data/market-data-types.js';
 import type { TradingCalendar } from '../market-data/sessions.js';
 import { localDateOf, parseUtc, toUtcIso } from '../market-data/time.js';
@@ -111,15 +112,16 @@ export function resolveCorporateActions(input: CorporateActionInput): ResolvedCo
   return [...byKey.values()].map((action) => ({ action, ...effectiveSessionOf(action, input.calendar) })).sort(byEffectiveThenKey);
 }
 
-/** Open instant of a bar: its start for intraday bars; for a daily bar the regular session open of its trading date. */
+/**
+ * Open instant of a bar, from the single execution-clock authority (execution-clock.ts). A calendar that cannot prove the session is
+ * reported as CORPORATE_ACTION_CALENDAR_UNPROVEN in this module.
+ */
 export function barOpenMs(bar: MarketBar, calendar: TradingCalendar): number {
-  const start = parseUtc(bar.startTime);
-  if (bar.interval !== '1d') return start;
-  const session = calendar.session(calendar.dailyBarDate(start), 'regular');
-  if (!session) {
-    throw new CorporateActionEngineError('CORPORATE_ACTION_CALENDAR_UNPROVEN', 'daily bar ' + bar.startTime + ' has no regular session in ' + calendar.calendarId);
+  try {
+    return executionOpenMs(bar, calendar);
+  } catch (error) {
+    throw new CorporateActionEngineError('CORPORATE_ACTION_CALENDAR_UNPROVEN', error instanceof Error ? error.message : String(error));
   }
-  return session.open;
 }
 
 /** Quantity transformation of a split: quantity × ratioTo / ratioFrom. Exact up to QUANTITY_SCALE. */

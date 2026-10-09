@@ -1,3 +1,4 @@
+import { getCalendar } from '../../src/market-data/sessions.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runBacktest } from '../../src/backtest/backtest-engine.js';
 import type { BacktestStrategy } from '../../src/backtest/strategy.js';
@@ -80,7 +81,7 @@ function backtestRun() {
   return runBacktest({
     bars: [bar(0, '100', '100'), bar(1, '101', '102'), bar(2, '103', '103'), bar(3, '104', '104')],
     strategy,
-    portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
+    portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000),
     sizing: { type: 'fixed_cash', amount: '500' },
     costModel: { commissionBps: 5, spreadBps: 10, slippageBps: 5, minCommission: '1' },
     quality: { pointInTimeUniverse: true, dataComplete: true, corporateActions: 'not_modeled', providerProduction: true, minimumTrades: 1 },

@@ -1,3 +1,4 @@
+import { getCalendar } from '../../src/market-data/sessions.js';
 import { describe, expect, it } from 'vitest';
 import { runBacktest } from '../../src/backtest/backtest-engine.js';
 import { verifyBacktestRun } from '../../src/backtest/backtest-store.js';
@@ -64,7 +65,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const result = runBacktest({
       bars,
       strategy: enterThenExit(1, 3),
-      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,
@@ -86,7 +87,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const result = runBacktest({
       bars,
       strategy: enterThenExit(1, 99, { stop: '95', tp: '120' }),
-      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,
@@ -104,7 +105,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const result = runBacktest({
       bars,
       strategy: enterThenExit(1, 99, { stop: '95', tp: '110' }),
-      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,
@@ -125,7 +126,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const base = {
       bars,
       strategy,
-      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash' as const, amount: '500' },
       quality,
     };
@@ -143,7 +144,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const result = runBacktest({
       bars: [delayedFirst, second, third],
       strategy: enterThenExit(1, 99),
-      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,
@@ -156,7 +157,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const run = runBacktest({
       bars: [bar(0, '100', '101', '99', '100'), bar(1, '101', '102', '100', '101')],
       strategy: enterThenExit(1, 99),
-      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality: { ...quality, corporateActions: 'modeled' },
@@ -172,7 +173,7 @@ describe('Backtest Engine point-in-time execution', () => {
     expect(() => runBacktest({
       bars: [a, b],
       strategy: enterThenExit(1, 99),
-      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,
@@ -188,7 +189,7 @@ describe('Backtest Engine point-in-time execution', () => {
     ];
     const common = {
       bars,
-      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash' as const, amount: '500' },
       costModel: zeroCost,
       quality,
@@ -205,7 +206,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const result = runBacktest({
       bars: [bar(0, '100', '101', '99', '100'), bar(1, '101', '102', '100', '101'), bar(2, '102', '103', '101', '102')],
       strategy: enterThenExit(1, 99),
-      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,
@@ -221,7 +222,7 @@ describe('Backtest Engine point-in-time execution', () => {
     expect(() => runBacktest({
       bars: [inverted, second],
       strategy: enterThenExit(1, 2),
-      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', executionCalendar: getCalendar('XNAS')!, initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,

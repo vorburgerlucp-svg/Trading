@@ -55,6 +55,7 @@ function runWithAccounting(): BacktestRunResult {
     strategy: holdStrategy,
     initialCapital: Decimal.from(10_000),
     portfolioCurrency: 'USD',
+    executionCalendar: XNAS,
     sizing: { type: 'fixed_cash', amount: '1000' },
     costModel: { commissionBps: 0, spreadBps: 0, slippageBps: 0, minCommission: '5' },
     quality: { pointInTimeUniverse: true, dataComplete: true, corporateActions: 'not_modeled', providerProduction: true, minimumTrades: 1 },

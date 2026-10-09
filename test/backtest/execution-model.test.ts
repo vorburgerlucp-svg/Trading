@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DeterministicCostModel } from '../../src/backtest/cost-model.js';
-import { isEligibleNextBar, protectiveExitForLong } from '../../src/backtest/execution-model.js';
+import { isEligibleAtOpen } from '../../src/backtest/execution-clock.js';
+import { protectiveExitForLong } from '../../src/backtest/execution-model.js';
 import type { MarketBar } from '../../src/market-data/market-data-types.js';
 import { Decimal } from '../../src/money/decimal.js';
 
@@ -44,21 +45,18 @@ describe('conservative OHLC execution rules', () => {
     expect(exit).toMatchObject({ kind: 'ambiguous', rawFillPrice: null });
   });
 
-  it('does not retroactively fill a next bar whose open happened before the delayed decision became available', () => {
-    const decision = bar({ start: '2026-10-08T13:30:00.000Z', open: '100', high: '102', low: '99', close: '101' });
-    const delayedDecision = { ...decision, availableAt: '2026-10-08T13:41:00.000Z' };
-    const alreadyOpened = bar({ start: '2026-10-08T13:35:00.000Z', open: '102', high: '103', low: '101', close: '102' });
-    const firstExecutable = bar({ start: '2026-10-08T13:45:00.000Z', open: '104', high: '105', low: '103', close: '104' });
-    expect(isEligibleNextBar(delayedDecision, alreadyOpened)).toBe(false);
-    expect(isEligibleNextBar(delayedDecision, firstExecutable)).toBe(true);
+  it('does not retroactively fill an executable open that passed before the delayed decision became usable', () => {
+    // Decision usable at 13:41. The 13:35 open had already passed; the 13:45 open is the first executable one.
+    const decidedAt = Date.parse('2026-10-08T13:41:00.000Z');
+    expect(isEligibleAtOpen(decidedAt, Date.parse('2026-10-08T13:35:00.000Z'))).toBe(false);
+    expect(isEligibleAtOpen(decidedAt, Date.parse('2026-10-08T13:45:00.000Z'))).toBe(true);
   });
 
-  it('never lets a decision use the same bar as its next-bar fill', () => {
-    const decision = bar({ start: '2026-10-08T13:30:00.000Z', open: '100', high: '102', low: '99', close: '101' });
-    const same = { ...decision };
-    const next = bar({ start: '2026-10-08T13:35:00.000Z', open: '102', high: '103', low: '101', close: '102' });
-    expect(isEligibleNextBar(decision, same)).toBe(false);
-    expect(isEligibleNextBar(decision, next)).toBe(true);
+  it('never lets a decision fill at the open of its own bar; equality with the usable instant is eligible', () => {
+    // The decision bar becomes usable at its completion (13:35). Its own open (13:30) is before that: never eligible.
+    const decidedAt = Date.parse('2026-10-08T13:35:00.000Z');
+    expect(isEligibleAtOpen(decidedAt, Date.parse('2026-10-08T13:30:00.000Z'))).toBe(false);
+    expect(isEligibleAtOpen(decidedAt, Date.parse('2026-10-08T13:35:00.000Z'))).toBe(true);
   });
 });
 

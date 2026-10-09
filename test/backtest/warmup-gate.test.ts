@@ -1,3 +1,4 @@
+import { getCalendar } from '../../src/market-data/sessions.js';
 import { describe, expect, it } from 'vitest';
 import { BACKTEST_ENGINE_VERSION, runBacktest } from '../../src/backtest/backtest-engine.js';
 import { verifyBacktestRun } from '../../src/backtest/backtest-store.js';
@@ -69,7 +70,7 @@ const quality = { pointInTimeUniverse: true, dataComplete: true, corporateAction
 const zeroCost = { commissionBps: 0, spreadBps: 0, slippageBps: 0, minCommission: '0' };
 
 function run(bars: MarketBar[], strategy: BacktestStrategy): BacktestRunResult {
-  return runBacktest({ bars, strategy, portfolioCurrency: 'USD', initialCapital: Decimal.from(1000), sizing: { type: 'fixed_cash', amount: '100' }, costModel: zeroCost, quality });
+  return runBacktest({ bars, strategy, portfolioCurrency: 'USD', executionCalendar: getCalendar('24x7')!, initialCapital: Decimal.from(1000), sizing: { type: 'fixed_cash', amount: '100' }, costModel: zeroCost, quality });
 }
 
 describe('Backtest warm-up enforcement (O3)', () => {
@@ -207,13 +208,13 @@ describe('Backtest warm-up enforcement (O3)', () => {
     expect(() => run(series(10), recorder(plan(0), enterOnFirst).strategy)).toThrow(WarmupPlanError);
   });
 
-  it('engine version: backtest-engine:v6 (v2 warm-up gate; v4 replay mode and knowledge at use; v5 corporate actions; v6 effective-instant knowledge boundary)', () => {
-    expect(BACKTEST_ENGINE_VERSION).toBe('backtest-engine:v6');
+  it('engine version: backtest-engine:v7 (v2 warm-up gate; v4 replay mode and knowledge at use; v5 corporate actions; v6 effective-instant knowledge boundary; v7 execution clock)', () => {
+    expect(BACKTEST_ENGINE_VERSION).toBe('backtest-engine:v7');
   });
 
   it('integrity: a run below the gate that shows a fill, or a flipped warm-up flag, fails verification', () => {
     const insufficient = run(series(4), recorder(plan(5), enterOnFirst).strategy);
-    const fakeFill = { fillId: 'fill_000001', instrumentId: 'TEST', side: 'buy' as const, reason: 'market_entry' as const, at: insufficient.equityCurve[0]!.at, rawPrice: Decimal.from('1'), executionPrice: Decimal.from('1'), quantity: Decimal.from('1'), commission: Decimal.from('0') };
+    const fakeFill = { fillId: 'fill_000001', instrumentId: 'TEST', side: 'buy' as const, reason: 'market_entry' as const, at: insufficient.equityCurve[0]!.at, timing: { kind: 'OPEN_EXACT' as const, executionAt: insufficient.equityCurve[0]!.at, barStart: insufficient.equityCurve[0]!.at, openSource: 'intraday_bar_start' as const }, rawPrice: Decimal.from('1'), executionPrice: Decimal.from('1'), quantity: Decimal.from('1'), commission: Decimal.from('0') };
     expect(() => verifyBacktestRun({ ...insufficient, fills: [fakeFill] })).toThrow(/warm-up gate shows a decision, order or fill/);
     expect(() => verifyBacktestRun({ ...insufficient, warmup: { ...insufficient.warmup!, requiredWarmupMet: true } })).toThrow(/requiredWarmupMet/);
   });
