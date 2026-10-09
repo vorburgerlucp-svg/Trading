@@ -46,9 +46,11 @@ describe('Bar Integrity: fehlerhafte Bars werden abgewiesen, nie repariert', () 
 
   it('Zeitlogik: kein finaler Bar vor seinem Ende, keine Zukunftszeitstempel, gültiges Intervall', () => {
     expect(validateBar({ ...good, availableAt: '2026-10-07T13:32:00.000Z' }).map((i) => i.code)).toContain('invalid_time');
-    // 5 minutes of clock skew are tolerated; beyond that a bar "from the future" is corrupt.
-    expect(validateBar(retrievedAs(good, '2026-10-07T13:31:00.000Z'))).toEqual([]);
+    // Retrieval timestamps tolerate 5 minutes of clock skew; beyond that a bar "from the future" is corrupt.
+    expect(validateBar(retrievedAs(good, '2026-10-07T13:35:00.000Z'))).toEqual([]);
     expect(validateBar(retrievedAs(good, '2026-10-07T13:20:00.000Z')).map((i) => i.code)).toContain('future_timestamp');
+    // Knowledge is never tolerant: a final bar is not known before its completion (the same rule as migration 008 in the database).
+    expect(validateBar(retrievedAs(good, '2026-10-07T13:31:00.000Z')).map((i) => i.code)).toContain('invalid_time');
     expect(validateBar({ ...good, endTime: '2026-10-07T13:45:00.000Z' }).map((i) => i.code)).toContain('misaligned_interval');
     expect(validateBar({ ...good, startTime: '2026-10-07 13:30:00' }).map((i) => i.code)).toContain('invalid_time');
   });

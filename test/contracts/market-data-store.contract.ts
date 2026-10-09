@@ -93,7 +93,8 @@ export function marketDataStoreContract(label: string, makeHarness: () => Promis
       await store.ingestBars(AAPL, bars(5), '2026-10-08T00:00:00Z');
       const b = bars(5);
       const broken = { ...b[4]!, startTime: '2026-10-07T13:55:00.000Z', endTime: '2026-10-07T14:00:00.000Z', availableAt: '2026-10-07T14:00:00.000Z', observedAt: '2026-10-07T14:00:00.000Z', high: Decimal.from('1') };
-      const regression = { ...b[1]!, isFinal: false, close: b[1]!.close.plus('0.01'), high: b[1]!.high.plus('0.01') };
+      // The in-progress version is what NEXUS holds at the observation time: contemporaneous by the policy, so only the final → in-progress rule can refuse it.
+      const regression = retrievedAs({ ...b[1]!, isFinal: false, close: b[1]!.close.plus('0.01'), high: b[1]!.high.plus('0.01') }, b[1]!.observedAt);
       const twinA = { ...bars(7)[6]! };
       const twinB = { ...twinA, close: twinA.close.plus('0.01'), high: twinA.high.plus('0.01') };
       const r = await store.ingestBars(AAPL, [broken, regression, twinA, twinB], '2026-10-09T00:00:00Z');

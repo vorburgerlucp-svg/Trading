@@ -4,7 +4,7 @@
 import { Decimal } from '../../src/money/decimal.js';
 import type { BarInterval, BarRevisionKnowledge, BarSession, Instrument, MarketBar, MarketDataSource, PriceAdjustment } from '../../src/market-data/market-data-types.js';
 import { INTERVAL_MS, isIntraday } from '../../src/market-data/market-data-types.js';
-import { BAR_VINTAGE_POLICY_VERSION } from '../../src/market-data/bar-vintage.js';
+import { BAR_VINTAGE_POLICY_VERSION, barVintageOf } from '../../src/market-data/bar-vintage.js';
 import type { TradingCalendar } from '../../src/market-data/sessions.js';
 import { addDays, parseUtc, toUtcIso } from '../../src/market-data/time.js';
 
@@ -155,8 +155,8 @@ export function bar(r: Ohlcv, start: number, end: number, completion: number, sp
     observedAt: toUtcIso(completion),
     availableAt: toUtcIso(completion),
     retrievedAt,
-    // Fixtures are backfills by default (retrieved long after completion): reconstructions, never captures.
-    knowledge: spec.knowledge ?? { knownAt: retrievedAt, knowledgeSource: 'captured_by_nexus', vintage: 'historical_reconstruction', vintagePolicy: BAR_VINTAGE_POLICY_VERSION },
+    // Fixtures are backfills by default (retrieved long after completion): the policy classifies them as reconstructions.
+    knowledge: spec.knowledge ?? { knownAt: retrievedAt, knowledgeSource: 'captured_by_nexus', vintage: barVintageOf({ observedAt: toUtcIso(completion), retrievedAt, isFinal: true, interval: spec.interval }), vintagePolicy: BAR_VINTAGE_POLICY_VERSION },
   };
   if (r.volume !== undefined) b.volume = Decimal.from(r.volume);
   return b;
@@ -167,6 +167,8 @@ export function flat(count: number, price = '100.10', volume = '1000'): Ohlcv[] 
 }
 
 /** The bar as NEXUS retrieved it at `retrievedAt`. Every capture makes the knowledge time follow the retrieval, so both change together. */
+/** The same bar as NEXUS retrieved it at `retrievedAt`. Its vintage follows that retrieval under the policy (an in-progress bar is always contemporaneous). */
 export function retrievedAs<T extends MarketBar>(bar: T, retrievedAt: string): T {
-  return { ...bar, retrievedAt, knowledge: { ...bar.knowledge, knownAt: retrievedAt } };
+  const vintage = barVintageOf({ observedAt: bar.observedAt, retrievedAt, isFinal: bar.isFinal, interval: bar.interval });
+  return { ...bar, retrievedAt, knowledge: { ...bar.knowledge, knownAt: retrievedAt, vintage } };
 }

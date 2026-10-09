@@ -130,8 +130,8 @@ export interface StoredBar extends MarketBar {
   ingestSeq: number;
   /** Economic content identity (change detection between revisions). Excludes provenance and retrieval. */
   contentHash: string;
-  /** Integrity of observability, gate, retrieval and knowledge. null for legacy rows, where there was nothing to protect. */
-  provenanceHash: string | null;
+  /** Integrity of the knowledge, vintage, observability, gate and retrieval of this revision. null for legacy rows. */
+  knowledgeVintageHash: string | null;
 }
 
 export interface MarketQuote {

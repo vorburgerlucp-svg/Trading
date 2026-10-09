@@ -153,7 +153,7 @@ describe.skipIf(!pgAvailable)('corporate action provenance on PostgreSQL' + (pgA
       const applied = await migrate(pool, loadMigrations());
       // Bars are written by the current store, after the schema that holds their columns exists.
       await new PostgresMarketDataStore(pool).ingestBars(AAPL, dailyBars(XNAS, '2020-08-27', ROWS.slice(0, 2)), '2026-10-08T00:00:00Z');
-      expect(applied.applied).toEqual([7, 8]);
+      expect(applied.applied).toEqual([7, 8, 9]);
 
       const row = (await pool.query("SELECT available_at, retrieved_at, knowledge_provenance, knowledge_at, provenance_hash FROM corporate_actions WHERE action_key = 'split:2020-08-31'")).rows[0];
       expect(row).toEqual({ available_at: new Date('2020-08-31T04:00:00.000Z'), retrieved_at: new Date('2026-10-07T13:57:30.000Z'), knowledge_provenance: null, knowledge_at: null, provenance_hash: null });

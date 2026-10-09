@@ -15,6 +15,7 @@ import {
   type StoredBar,
   type StoredCorporateAction,
 } from './market-data-types.js';
+import { BAR_VINTAGE_POLICY_VERSION, barVintageOf } from './bar-vintage.js';
 import { HOUR_MS, MINUTE_MS, isLocalDate, parseUtc, toUtcIso } from './time.js';
 
 /** Clock skew tolerated between provider timestamps and our retrieval clock. */
@@ -138,12 +139,18 @@ function barKnowledgeIssues(bar: MarketBar, observed: number | null, retrieved: 
   }
   if (!(BAR_INGEST_VINTAGES as readonly string[]).includes(k.vintage as string)) issues.push(critical('invalid_time', 'vintage must be contemporaneous or historical_reconstruction', at));
   if (typeof k.vintagePolicy !== 'string' || k.vintagePolicy.trim() === '') issues.push(critical('invalid_time', 'a vintage policy version is required', at));
+  // The capture window decides the vintage under its policy: an in-progress bar is contemporaneous, a final bar by its window.
+  // The database (migration 009) states the same rule, so a contradicting claim is refused here, never by the database.
+  if (k.vintagePolicy === BAR_VINTAGE_POLICY_VERSION && observed !== null && retrieved !== null && (BAR_INGEST_VINTAGES as readonly string[]).includes(k.vintage as string)) {
+    const expected = barVintageOf({ observedAt: bar.observedAt, retrievedAt: bar.retrievedAt, isFinal: bar.isFinal, interval: bar.interval });
+    if (expected !== k.vintage) issues.push(critical('invalid_time', 'vintage ' + k.vintage + ' contradicts ' + BAR_VINTAGE_POLICY_VERSION + ' (the capture window gives ' + expected + ')', at));
+  }
   const known = instant(k.knownAt, 'knownAt', issues, at);
   if (known === null || retrieved === null) return issues;
   if (k.knowledgeSource === 'captured_by_nexus' && known !== retrieved) issues.push(critical('invalid_time', 'captured knowledge is exactly the retrieval (NEXUS holds the response from its retrieval)', at));
-  if (known > retrieved + CLOCK_SKEW_MS) issues.push(critical('future_timestamp', 'knownAt is after retrievedAt: NEXUS cannot have held what it did not yet retrieve', at));
-  // The clock skew of the retrieval clock is tolerated, as for the other retrieval checks of a final bar.
-  if (bar.isFinal === true && observed !== null && known + CLOCK_SKEW_MS < observed) issues.push(critical('invalid_time', 'a final bar cannot be known before it was complete (look-ahead)', at));
+  // No clock-skew allowance here: the database states the same rules (known_at_v2 <= retrieved_at, known_at_v2 >= observed_at for a final bar).
+  if (known > retrieved) issues.push(critical('future_timestamp', 'knownAt is after retrievedAt: NEXUS cannot have held what it did not yet retrieve', at));
+  if (bar.isFinal === true && observed !== null && known < observed) issues.push(critical('invalid_time', 'a final bar cannot be known before it was complete (look-ahead)', at));
   return issues;
 }
 
@@ -166,12 +173,13 @@ export function normalizeBar<T extends MarketBar>(bar: T): T {
 }
 
 /**
- * Integrity of what the content hash does not cover: the bar's observability and gate, when NEXUS retrieved it, and what
- * proves its revision knowledge. Verified on every read; a privileged change of any of them fails closed.
+ * Integrity of the knowledge and vintage model (migration 009, `knowledge_vintage_hash`): the revision's key and content, its
+ * retrieval, observability and gate, and the two questions it answers. Verified on every read; a privileged change fails closed.
+ * The 008 compatibility hash (`provenance_hash`) is a separate value with its own rule, in the persistence layer.
  */
-export function barProvenanceHash(bar: Pick<StoredBar, 'instrumentId' | 'source' | 'interval' | 'session' | 'adjustment' | 'startTime' | 'contentHash' | 'retrievedAt' | 'observedAt' | 'availableAt' | 'knowledge'>): string {
+export function barKnowledgeVintageHash(bar: Pick<StoredBar, 'instrumentId' | 'source' | 'interval' | 'session' | 'adjustment' | 'startTime' | 'contentHash' | 'retrievedAt' | 'observedAt' | 'availableAt' | 'knowledge'>): string {
   return hashOf({
-    contentVersion: 'market-bar-provenance:v1',
+    contentVersion: 'market-bar-knowledge-vintage:v2',
     key: barKey(bar),
     contentHash: bar.contentHash,
     retrievedAt: bar.retrievedAt,

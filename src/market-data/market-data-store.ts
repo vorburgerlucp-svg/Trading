@@ -21,7 +21,7 @@ import { hashOf } from '../persistence/canonical-json.js';
 import {
   barContentHash,
   barKey,
-  barProvenanceHash,
+  barKnowledgeVintageHash,
   corporateActionContentHash,
   corporateActionProvenanceHash,
   normalizeBar,
@@ -316,25 +316,27 @@ export function planBars(instrument: IngestInstrument, bars: readonly MarketBar[
   });
 }
 
-/** A proven revision cannot be known before an earlier proven revision of the same bar: knowledge only moves forward. */
+/**
+ * A revision cannot be known before the knowledge floor of the one before it: its knowledge when proven, else its retrieval.
+ * The database trigger (migration 009) states the same floor, so the two never disagree.
+ */
 function knowledgeRegression(record: MarketBar, previous: StoredBar): DataQualityIssue[] {
   const nowKnown = knownAtMs(record);
-  const beforeKnown = knownAtMs(previous);
-  if (nowKnown !== null && beforeKnown !== null && nowKnown < beforeKnown) {
-    return [{ code: 'invalid_time', severity: 'critical', message: 'a later revision cannot be known before an earlier proven revision (knowledge would move backwards)' }];
+  if (nowKnown !== null && nowKnown < parseUtc(revisionFloorOf(previous))) {
+    return [{ code: 'invalid_time', severity: 'critical', message: 'a later revision cannot be known before an earlier revision (knowledge would move backwards)' }];
   }
   return [];
 }
 
-function storedBar(stored: Omit<StoredBar, 'provenanceHash'>): StoredBar {
-  const withoutHash: Omit<StoredBar, 'provenanceHash'> = stored;
-  return { ...withoutHash, provenanceHash: barProvenanceHash(withoutHash) };
+function storedBar(stored: Omit<StoredBar, 'knowledgeVintageHash'>): StoredBar {
+  const withoutHash: Omit<StoredBar, 'knowledgeVintageHash'> = stored;
+  return { ...withoutHash, knowledgeVintageHash: barKnowledgeVintageHash(withoutHash) };
 }
 
-/** Integrity of the provenance fields of a stored bar. Rows without a hash (legacy) have nothing to verify. */
-export function assertBarProvenanceIntact(b: StoredBar): void {
-  if (b.provenanceHash === null) return;
-  assertIntact('bar provenance', barKey(b), barProvenanceHash(b), b.provenanceHash);
+/** Integrity of the knowledge and vintage of a stored bar. A row without the V2 hash (legacy) has nothing to verify. */
+export function assertKnowledgeVintageIntact(b: StoredBar): void {
+  if (b.knowledgeVintageHash === null) return;
+  assertIntact('bar knowledge', barKey(b), barKnowledgeVintageHash(b), b.knowledgeVintageHash);
 }
 
 export function quoteKey(q: Pick<MarketQuote, 'instrumentId' | 'source' | 'observedAt'>): string {
@@ -544,7 +546,7 @@ export class InMemoryMarketDataStore implements MarketDataStore {
       const v = visibleRevision(revisions, asOf, storedThrough);
       if (!v) continue;
       assertIntact('bar', barKey(v), barContentHash(v), v.contentHash);
-      assertBarProvenanceIntact(v);
+      assertKnowledgeVintageIntact(v);
       if ((q.finalOnly ?? true) && !v.isFinal) continue;
       // Decision time: the revision must be proven and held by asOf. Legacy is refused; a revision held later is absent.
       if (replay === 'decision_time') {

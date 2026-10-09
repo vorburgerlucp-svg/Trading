@@ -106,13 +106,23 @@ Grade caps: STRICT none, HISTORICAL at most B, LEGACY at most C. The return neve
 
 Old stored runs are not rewritten. Any run without the new fields is treated as unproven by O1 (fail closed), never interpreted as new evidence.
 
-## 10. Storage: migration 008 is rewritten, not 009
+## 10. Storage: migration 008 is restored, the model is in 009
 
-`008_market_bar_provenance` was created on the unreleased branch `feature/market-bar-provenance` and has not been applied to any environment outside the test databases, which are rebuilt on every run. Its content is rewritten in place to the model above.
+Committed migrations are immutable (`docs/MIGRATION_HISTORY.md`). This branch repairs the history that an earlier commit broke:
 
-Reason: the migrator refuses `ALTER TABLE ... DROP` (`ALTER_DROP`). The old constraints (`knowledge_shape`, `captured_is_retrieval`, the trigger function) must be replaced, and a later migration cannot remove them. Keeping them would forbid the new combinations.
+- `008_market_bar_provenance.sql` is restored byte-for-byte from `de4c3f4`, the version that was committed and checksummed. Its checksum is the one a database that applied it recorded. It is never edited again.
+- `009_market_bar_knowledge_v2.sql` adds the model above as separate, additive fields: `knowledge_source_v2`, `known_at_v2`, `vintage_v2`, `vintage_policy_v2` and `knowledge_vintage_hash`. It drops and renames nothing. It replaces only the trigger function (`CREATE OR REPLACE`), which keeps every 008 rule and adds the V2 rules.
+- The 008 columns keep their meaning. For rows written after 009 they are the compatibility mirror of the V2 values, written and checked by the database (`market_bars_v1_mirrors_v2`): a contemporaneous capture is `captured_by_nexus` at its retrieval; a backfill is `historical_bar_reconstruction` (008 has no knowledge time for it, V2 knows it from its retrieval); a provider publication is `provider_published_at` at its publication time. Quant, scanner, backtest and the brain never see the 008 fields.
+- Rows written before 009 have NULL V2 fields. They are V2 unproven: nothing is inferred for them from the 008 columns, and decision-time replay refuses them. They become proven only when NEXUS captures a new revision.
+- A database that applied the rewritten 008 of `ce4a919` fails the checksum check and must be recreated. That variant was never released.
 
-Consequence: any database that applied the `de4c3f4` version of 008 fails the checksum verification and must be recreated. This is fail closed by design. The decision needs your confirmation before this branch is merged.
+**Capture window (owner decision, policy `bar-vintage:v1`):** intraday 15 minutes, daily 2 hours, boundary inclusive. It means NEXUS captured this revision sufficiently close to market completion under the policy. It does **not** mean the provider guarantees this was the immutable original market-time vintage. The completion is the calendar's actual completion, never a fixed hour: with completion at 20:00 UTC (July), 22:00 qualifies and 22:01 does not; with completion at 21:00 UTC (January), the boundary moves to 23:00. The window decides the vintage only. The decision-time gate is `known_at_v2`. The database and the application both enforce the same rule (`market_bars_vintage_v2_window`, `barVintageOf`).
+
+**Hashes.** `knowledge_vintage_hash` covers the key, content, retrieval, observation, gate, knowledge time, knowledge source, vintage and policy. `provenance_hash` keeps the rule of 008 (golden values in `test/persistence/bar-compat.test.ts`).
+
+**F10 (quote provenance): OPEN, latent, not implemented here.** The Twelve Data quote path keeps `availableAt = retrievedAt`. Quotes are not part of this repair.
+
+**Trigger.** `nexus_market_bar_revision()` keeps its 008 rules (sequential revisions, a final bar is not replaced by an in-progress one, a correction is not visible before the revision it replaces, a revision is not visible before it was known). 009 adds: V2 knowledge moves forward only (a later revision is not known before the knowledge floor of the one before, which is its retrieval for a row without V2), and a revision is not visible before NEXUS knew it.
 
 ## 11. Unchanged in this branch
 
@@ -154,9 +164,10 @@ Implemented on `feature/bar-knowledge-evidence-integration`. `npm run check`: ty
 2. **Mode names.** `historical_research` and `decision_time` replace `historical_reconstruction` and `strict_point_in_time`, which described the data rather than the question.
 3. **Backtest STRICT_PIT_DATA needs two conditions**, not one: known at the simulated use time (necessary by the specification) and contemporaneous vintage. A simulated timeline is market history. Replaying a backfill at its retrieval time simulates a different market, so it is not strict.
 4. **Derived bars with unproven inputs** (split adjustment with an unproven split) carry `legacy_unproven` with no time and no vintage. They make no claim.
-5. **Final-bar knowledge tolerates five minutes of retrieval clock skew**, in the application and in the database, the same tolerance the other retrieval checks use.
+5. **Final-bar knowledge does not tolerate clock skew.** A final bar is not known before its completion, in the application and in the database (`market_bars_knowledge_not_before_completion`, `market_bars_known_at_v2_not_before_completion`). The retrieval timestamps keep the five-minute tolerance. Consequence: if NEXUS's clock lags the provider's completion by more than the bar is late, the capture is refused (fail closed). NEXUS's clock must be synchronised.
 6. **Scanner default.** A scanner definition without `useCase` is a live scanner. Research must be requested.
-7. **Migration 008 is rewritten in place** (section 10). This is the one decision that needs your confirmation before the branch is merged.
+7. **Migration 008 is restored, not rewritten; the model is in 009** (section 10). The restored 008 is the released bytes of `de4c3f4`. The model is additive, so no database that applied the released 008 is broken.
+8. **The vintage follows the capture window in the domain too.** A bar whose vintage contradicts `bar-vintage:v1` (for example an in-progress bar labelled as a reconstruction) is quarantined at ingest, the same rule the database enforces.
 
 ### 13.3 The signal bar
 
@@ -195,7 +206,9 @@ Old runs are not rewritten. A quant run without `barDataProvenance`, a scanner c
 | Data quality and backtest grading | H, I |
 | O1 lineage carries provenance; blocks knowledge-not-proven; does not claim reconstruction as strict vintage | `evidence-validation.test.ts`, O1 block |
 | Strong backtest evidence respects dataProvenance | `evidence-validation.test.ts`, O1 block |
-| PostgreSQL roundtrip, combinations, tampering | `bar-knowledge.pg.test.ts` |
+| PostgreSQL roundtrip, tampering, legacy rows | `bar-knowledge.pg.test.ts` |
+| Upgrade from the released 008 (critical), fresh database, V2 combinations, trigger rules, capture-window boundary (real calendar, intraday ms) | `schema-history.pg.test.ts` (A-E) |
+| Released 008 byte-identical, checksums 001-009 pinned; V1 mirror and golden hashes of the released rule | `migration-immutability.test.ts`, `bar-compat.test.ts` |
 
 ### 13.6 Remaining limitations
 

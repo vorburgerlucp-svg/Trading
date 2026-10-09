@@ -9,10 +9,12 @@ import { encodeJson } from '../json-codec.js';
 import { barContentHash, barKey, corporateActionContentHash, quoteContentHash } from '../../market-data/bar-validation.js';
 import { BarKnowledgeNotProvenError, hasKnownAt, isKnownAt, knowledgeOf } from '../../market-data/bar-replay.js';
 import { selectReplayRevision } from '../../market-data/corporate-actions.js';
+import { barProvenanceHashV1, v1MirrorOf } from './bar-compat.js';
 import {
+  MarketDataIntegrityError,
   MarketDataStoreError,
-  assertBarProvenanceIntact,
   assertIntact,
+  assertKnowledgeVintageIntact,
   assertProvenanceIntact,
   corporateActionKey,
   planBars,
@@ -57,14 +59,19 @@ interface BarRow {
   retrieved_at: Date;
   ingest_seq_text: string;
   content_hash: string;
-  knowledge_source: string | null;
-  known_at: Date | null;
-  vintage: string | null;
-  vintage_policy: string | null;
+  /** Migration 008: the compatibility mirror of the knowledge model, and its integrity hash. */
+  knowledge_provenance: string | null;
+  revision_known_at: Date | null;
   provenance_hash: string | null;
+  /** Migration 009: the knowledge and vintage model. NULL on a row written before it: legacy, nothing is inferred for it. */
+  knowledge_source_v2: string | null;
+  known_at_v2: Date | null;
+  vintage_v2: string | null;
+  vintage_policy_v2: string | null;
+  knowledge_vintage_hash: string | null;
 }
 
-/** A NULL provenance is a row stored before provenance existed: its knowledge is unproven, and nothing is inferred for it. */
+/** A row without the V2 model is legacy: its knowledge is unproven, and nothing is inferred for it from the 008 columns. */
 function toBar(r: BarRow): StoredBar {
   const bar: StoredBar = {
     instrumentId: r.instrument_id,
@@ -83,16 +90,31 @@ function toBar(r: BarRow): StoredBar {
     availableAt: ts(r.available_at),
     retrievedAt: ts(r.retrieved_at),
     knowledge:
-      r.knowledge_source === null
+      r.knowledge_source_v2 === null
         ? { knownAt: null, knowledgeSource: 'legacy_unproven', vintage: 'legacy_unproven', vintagePolicy: null }
-        : { knownAt: ts(r.known_at!), knowledgeSource: r.knowledge_source as BarKnowledgeSource, vintage: r.vintage as BarVintage, vintagePolicy: r.vintage_policy },
+        : { knownAt: ts(r.known_at_v2!), knowledgeSource: r.knowledge_source_v2 as BarKnowledgeSource, vintage: r.vintage_v2 as BarVintage, vintagePolicy: r.vintage_policy_v2 },
     revision: r.revision,
     ingestSeq: Number(r.ingest_seq_text),
     contentHash: r.content_hash,
-    provenanceHash: r.provenance_hash,
+    knowledgeVintageHash: r.knowledge_vintage_hash,
   };
   if (r.volume !== null) bar.volume = Decimal.from(r.volume);
   return bar;
+}
+
+/**
+ * Migration 008 on the same row, checked on every read. Its hash verifies with the rule of its release. Where the row has the V2
+ * model, its 008 values must be the mirror of that model. Any other combination is an alteration and fails closed.
+ */
+function assertCompatIntact(r: BarRow, bar: StoredBar): void {
+  const storedKnownAt = r.revision_known_at === null ? null : ts(r.revision_known_at);
+  if (r.knowledge_source_v2 !== null) {
+    const mirror = v1MirrorOf(bar.knowledge);
+    if (mirror.knowledgeProvenance !== r.knowledge_provenance || mirror.revisionKnownAt !== storedKnownAt) {
+      throw new MarketDataIntegrityError('bar ' + barKey(bar) + ' has 008 knowledge values that do not mirror its knowledge model (stored data was altered)');
+    }
+  }
+  if (r.provenance_hash !== null) assertIntact('bar provenance (008)', barKey(bar), barProvenanceHashV1(bar, { knowledgeProvenance: r.knowledge_provenance, revisionKnownAt: storedKnownAt }), r.provenance_hash);
 }
 
 interface QuoteRow {
@@ -192,7 +214,7 @@ function toAction(r: ActionRow): StoredCorporateAction {
   return a;
 }
 
-const BAR_COLUMNS = 'instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq::text AS ingest_seq_text, content_hash, knowledge_source, known_at, vintage, vintage_policy, provenance_hash';
+const BAR_COLUMNS = 'instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq::text AS ingest_seq_text, content_hash, knowledge_provenance, revision_known_at, provenance_hash, knowledge_source_v2, known_at_v2, vintage_v2, vintage_policy_v2, knowledge_vintage_hash';
 const QUOTE_COLUMNS = 'instrument_id, source_id, observed_at, revision, last_price, bid, ask, open, high, low, previous_close, volume, currency, market_open, available_at, retrieved_at, ingest_seq::text AS ingest_seq_text, content_hash';
 const ACTION_COLUMNS = "instrument_id, source_id, action_key, revision, type, to_char(ex_date, 'YYYY-MM-DD') AS ex_date_text, ratio_from, ratio_to, cash_amount, currency, old_symbol, new_symbol, announced_at, available_at, retrieved_at, ingest_seq::text AS ingest_seq_text, content_hash, knowledge_provenance, knowledge_at, provenance_hash";
 
@@ -309,10 +331,12 @@ export class PostgresMarketDataStore implements MarketDataStore {
       },
       async (client, rows) => {
         const col = <K extends keyof StoredBar>(k: K) => rows.map((r) => r[k]);
+        // The 008 values are the mirror of the V2 knowledge, and their hash is the 008 rule: both written here, never by the domain.
+        const mirror = rows.map((r) => v1MirrorOf(r.knowledge));
         await client.query(
-          `INSERT INTO market_bars (instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq, content_hash, knowledge_source, known_at, vintage, vintage_policy, provenance_hash)
-           SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::timestamptz[], $7::timestamptz[], $8::int[], $9::numeric[], $10::numeric[], $11::numeric[], $12::numeric[], $13::numeric[], $14::boolean[], $15::timestamptz[], $16::timestamptz[], $17::timestamptz[], $18::bigint[], $19::text[], $20::text[], $21::timestamptz[], $22::text[], $23::text[], $24::text[])
-           AS t(instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq, content_hash, knowledge_source, known_at, vintage, vintage_policy, provenance_hash)
+          `INSERT INTO market_bars (instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq, content_hash, knowledge_provenance, revision_known_at, provenance_hash, knowledge_source_v2, known_at_v2, vintage_v2, vintage_policy_v2, knowledge_vintage_hash)
+           SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::timestamptz[], $7::timestamptz[], $8::int[], $9::numeric[], $10::numeric[], $11::numeric[], $12::numeric[], $13::numeric[], $14::boolean[], $15::timestamptz[], $16::timestamptz[], $17::timestamptz[], $18::bigint[], $19::text[], $20::text[], $21::timestamptz[], $22::text[], $23::text[], $24::timestamptz[], $25::text[], $26::text[], $27::text[])
+           AS t(instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq, content_hash, knowledge_provenance, revision_known_at, provenance_hash, knowledge_source_v2, known_at_v2, vintage_v2, vintage_policy_v2, knowledge_vintage_hash)
            ORDER BY ingest_seq`,
           [
             col('instrumentId'),
@@ -334,11 +358,14 @@ export class PostgresMarketDataStore implements MarketDataStore {
             col('retrievedAt'),
             rows.map((r) => String(r.ingestSeq)),
             col('contentHash'),
+            mirror.map((m) => m.knowledgeProvenance),
+            mirror.map((m) => m.revisionKnownAt),
+            rows.map((r, i) => barProvenanceHashV1(r, mirror[i]!)),
             rows.map((r) => r.knowledge.knowledgeSource),
             rows.map((r) => r.knowledge.knownAt),
             rows.map((r) => r.knowledge.vintage),
             rows.map((r) => r.knowledge.vintagePolicy),
-            col('provenanceHash'),
+            col('knowledgeVintageHash'),
           ],
         );
       },
@@ -366,7 +393,8 @@ export class PostgresMarketDataStore implements MarketDataStore {
     for (const r of rows) {
       const bar = toBar(r);
       assertIntact('bar', barKey(bar), barContentHash(bar), bar.contentHash);
-      assertBarProvenanceIntact(bar);
+      assertKnowledgeVintageIntact(bar);
+      assertCompatIntact(r, bar);
       if (replay === 'decision_time') {
         if (!hasKnownAt(knowledgeOf(bar))) {
           refused.push({ instrumentId: bar.instrumentId, startTime: bar.startTime, provenance: knowledgeOf(bar).knowledgeSource });

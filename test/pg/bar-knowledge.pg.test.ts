@@ -12,28 +12,23 @@ import { PostgresMarketDataStore } from '../../src/persistence/postgres/postgres
 import { AAPL, FIXTURE_SOURCE, PRODUCTION_LIKE_SOURCE, dailyBars } from '../market-data/fixtures.js';
 import { createTestDatabase, pgAvailable, pgInfo, pgSkipReason, type TestDatabase } from './db.js';
 
-// Bar knowledge on PostgreSQL (see docs/BAR_KNOWLEDGE_EVIDENCE.md).
+// Bar knowledge on PostgreSQL: the store writes and reads both models; the database rules are in schema-history.pg.test.ts.
 
 const XNAS = getCalendar('XNAS')!;
 const SERIES = { instrumentId: AAPL.instrumentId, source: PRODUCTION_LIKE_SOURCE.sourceId, interval: '1d' as const, session: 'regular' as const, adjustment: 'raw' as const };
 const ROW = (close: string) => ({ open: close, high: close, low: close, close, volume: '1000' });
-const HASH = 'a'.repeat(64);
 const POLICY = BAR_VINTAGE_POLICY_VERSION;
-const received = (retrievedAt: string, vintage: 'contemporaneous' | 'historical_reconstruction' = 'historical_reconstruction'): BarRevisionKnowledge & { vintage: string; vintagePolicy: string } => ({
+const received = (retrievedAt: string, vintage: 'contemporaneous' | 'historical_reconstruction'): BarRevisionKnowledge => ({
   knownAt: retrievedAt,
   knowledgeSource: 'captured_by_nexus',
   vintage,
   vintagePolicy: POLICY,
-} as BarRevisionKnowledge & { vintage: string; vintagePolicy: string });
+});
 
-function bar(date: string, close: string, retrievedAt: string, knowledge: unknown): MarketBar {
+function bar(date: string, close: string, retrievedAt: string, knowledge: BarRevisionKnowledge): MarketBar {
   const [b] = dailyBars(XNAS, date, [ROW(close)], { retrievedAt, source: PRODUCTION_LIKE_SOURCE.sourceId });
-  return { ...b!, knowledge } as unknown as MarketBar;
+  return { ...b!, knowledge };
 }
-
-/** Direct insert of one revision. The application path is tested through the store below. */
-const INSERT = `INSERT INTO market_bars (instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq, content_hash, knowledge_source, known_at, vintage, vintage_policy, provenance_hash)
-  VALUES ('ins_aapl', $1, '1d', 'regular', 'raw', '2026-09-25T04:00:00Z', '2026-09-26T04:00:00Z', $2::integer, 250, 250, 250, 250, 1000, true, '2026-09-25T20:00:00Z', '2026-09-25T20:00:00Z', $3, $2::bigint, $8, $4, $5, $6, $7, $8)`;
 
 describe.skipIf(!pgAvailable)('bar knowledge on PostgreSQL' + (pgAvailable ? '' : ' (NOT RUN: ' + pgSkipReason + ')'), () => {
   let db: TestDatabase | null = null;
@@ -48,58 +43,6 @@ describe.skipIf(!pgAvailable)('bar knowledge on PostgreSQL' + (pgAvailable ? '' 
     await store.registerSource(PRODUCTION_LIKE_SOURCE);
     return db;
   }
-  const insert = (d: TestDatabase, revision: number, retrieved: string, source: string | null, knownAt: string | null, vintage: string | null, policy: string | null = POLICY) =>
-    d.pool.query(INSERT, [PRODUCTION_LIKE_SOURCE.sourceId, revision, retrieved, source, knownAt, vintage, policy, HASH]);
-
-  describe('the database accepts only the combinations the model allows', () => {
-    it('a captured revision is known exactly at its retrieval', async () => {
-      const d = await fresh();
-      await expect(insert(d, 1, '2026-09-25T20:02:00Z', 'captured_by_nexus', '2026-09-25T20:01:00Z', 'contemporaneous')).rejects.toThrow(/market_bars_captured_is_retrieval|market_bars_knowledge_shape/);
-    });
-
-    it('a backfill is known at its retrieval, not at its completion (no knowledge before retrieval)', async () => {
-      const d = await fresh();
-      await expect(insert(d, 1, '2026-10-09T12:00:00Z', 'captured_by_nexus', '2026-10-09T12:00:00Z', 'historical_reconstruction')).resolves.toBeDefined();
-    });
-
-    it('a provider publication time cannot be later than the retrieval', async () => {
-      const d = await fresh();
-      await expect(insert(d, 1, '2026-09-25T20:02:00Z', 'provider_published_at', '2026-09-25T21:00:00Z', 'contemporaneous')).rejects.toThrow(/market_bars_knowledge_shape/);
-    });
-
-    it('a known source needs a vintage and a vintage policy', async () => {
-      const d = await fresh();
-      await expect(insert(d, 1, '2026-09-25T20:02:00Z', 'captured_by_nexus', '2026-09-25T20:02:00Z', null, null)).rejects.toThrow(/market_bars_knowledge_shape|market_bars_provenance_required/);
-    });
-
-    it('a vintage without a knowledge source is refused (the two questions are not mixed)', async () => {
-      const d = await fresh();
-      await expect(insert(d, 1, '2026-09-25T20:02:00Z', null, null, 'contemporaneous', null)).rejects.toThrow(/market_bars_knowledge_shape/);
-    });
-
-    it('a final bar cannot be known before it was complete', async () => {
-      const d = await fresh();
-      // Ten minutes before completion is beyond the five minutes of retrieval clock skew the application tolerates.
-      await expect(insert(d, 1, '2026-09-25T19:50:00Z', 'captured_by_nexus', '2026-09-25T19:50:00Z', 'contemporaneous')).rejects.toThrow(/market_bars_knowledge_not_before_completion/);
-    });
-
-    it('legacy_unproven is not a stored label: a legacy row carries NULL, and new rows must state their knowledge', async () => {
-      const d = await fresh();
-      await expect(insert(d, 1, '2026-09-25T20:02:00Z', 'legacy_unproven', null, 'legacy_unproven')).rejects.toThrow(/market_bars_knowledge_source_values|market_bars_knowledge_shape/);
-      await expect(insert(d, 1, '2026-09-25T20:02:00Z', null, null, null, null)).rejects.toThrow(/market_bars_provenance_required/);
-    });
-
-    it('the vintage must be one of the two proven values', async () => {
-      const d = await fresh();
-      await expect(insert(d, 1, '2026-09-25T20:02:00Z', 'captured_by_nexus', '2026-09-25T20:02:00Z', 'guessed')).rejects.toThrow(/market_bars_vintage_values/);
-    });
-
-    it('a later revision cannot be known before an earlier one', async () => {
-      const d = await fresh();
-      await insert(d, 1, '2026-10-09T12:00:00Z', 'captured_by_nexus', '2026-10-09T12:00:00Z', 'historical_reconstruction');
-      await expect(insert(d, 2, '2026-10-08T09:00:00Z', 'captured_by_nexus', '2026-10-08T09:00:00Z', 'historical_reconstruction')).rejects.toThrow(/cannot be known before an earlier revision|cannot become available before it was retrieved or known/);
-    });
-  });
 
   it('roundtrip: a fresh process reads the same knowledge, decision-time and research modes as the in-memory store', async () => {
     const d = await fresh();
@@ -124,20 +67,34 @@ describe.skipIf(!pgAvailable)('bar knowledge on PostgreSQL' + (pgAvailable ? '' 
     ]);
   });
 
-  it('a privileged change of the vintage (which passes every CHECK) is detected on read', async () => {
+  it('a privileged change that passes every CHECK (the availability gate) is detected on read by the knowledge hash', async () => {
     const d = await fresh();
     await new PostgresMarketDataStore(d.pool).ingestBars(AAPL, [bar('2026-09-24', '250', '2026-10-09T12:00:00.000Z', received('2026-10-09T12:00:00.000Z', 'historical_reconstruction'))], '2026-10-09T12:00:00.000Z');
     const privileged = await d.privilegedClient();
     try {
-      await privileged.query("SET session_replication_role = 'replica'"); // a superuser bypassing NEXUS
-      await privileged.query("UPDATE market_bars SET vintage = 'contemporaneous' WHERE start_time = '2026-09-24T04:00:00Z'");
+      await privileged.query("SET session_replication_role = 'replica'"); // a superuser bypassing NEXUS's triggers (CHECK constraints still apply)
+      // Later than its observation and still within every constraint, but not the value NEXUS stored.
+      await privileged.query("UPDATE market_bars SET available_at = available_at + INTERVAL '1 hour' WHERE start_time = '2026-09-24T04:00:00Z'");
     } finally {
       await privileged.end();
     }
-    await expect(new PostgresMarketDataStore(d.extraPool()).readBars({ ...SERIES, asOf: '2026-10-10T00:00:00.000Z', replay: 'decision_time' })).rejects.toBeInstanceOf(MarketDataIntegrityError);
+    await expect(new PostgresMarketDataStore(d.extraPool()).readBars({ ...SERIES, asOf: '2026-10-10T00:00:00.000Z', replay: 'historical_research' })).rejects.toBeInstanceOf(MarketDataIntegrityError);
   });
 
-  // Migration 008 on existing data: legacy rows keep their values and get no invented knowledge.
+  it('a privileged change of the 008 integrity hash is detected on read', async () => {
+    const d = await fresh();
+    await new PostgresMarketDataStore(d.pool).ingestBars(AAPL, [bar('2026-09-24', '250', '2026-10-09T12:00:00.000Z', received('2026-10-09T12:00:00.000Z', 'historical_reconstruction'))], '2026-10-09T12:00:00.000Z');
+    const privileged = await d.privilegedClient();
+    try {
+      await privileged.query("SET session_replication_role = 'replica'");
+      await privileged.query("UPDATE market_bars SET provenance_hash = $1 WHERE start_time = '2026-09-24T04:00:00Z'", ['e'.repeat(64)]);
+    } finally {
+      await privileged.end();
+    }
+    await expect(new PostgresMarketDataStore(d.extraPool()).readBars({ ...SERIES, asOf: '2026-10-10T00:00:00.000Z', replay: 'historical_research' })).rejects.toBeInstanceOf(MarketDataIntegrityError);
+  });
+
+  // Migration 008 + 009 on existing data: legacy rows keep their values and get no invented knowledge.
   it('legacy rows written before provenance: not rewritten, no invented knownAt, refused by decision-time replay, labelled in research', async () => {
     if (!pgInfo.available) throw new Error('PostgreSQL not available: ' + pgInfo.reason);
     const { connection, adminDatabase } = pgInfo;
@@ -148,7 +105,7 @@ describe.skipIf(!pgAvailable)('bar knowledge on PostgreSQL' + (pgAvailable ? '' 
     await admin.query('CREATE DATABASE ' + name);
     await admin.end();
     const pool = createPool({ ...connection, database: name, max: 2, applicationName: 'nexus-test' });
-    const legacy = dailyBars(XNAS, '2020-01-10', [ROW('400')], { retrievedAt: '2026-10-09T12:00:00.000Z', source: PRODUCTION_LIKE_SOURCE.sourceId })[0]!;
+    const legacy = dailyBars(XNAS, '2020-01-10', [ROW('400')], { retrievedAt: '2026-10-09T12:00:00.000Z', source: PRODUCTION_LIKE_SOURCE.sourceId })[0]! as MarketBar;
     try {
       await migrate(pool, loadMigrations().filter((m) => m.version <= 7));
       await new PostgresMarketDataStore(pool).registerSource(PRODUCTION_LIKE_SOURCE);
@@ -158,17 +115,20 @@ describe.skipIf(!pgAvailable)('bar knowledge on PostgreSQL' + (pgAvailable ? '' 
         [AAPL.instrumentId, PRODUCTION_LIKE_SOURCE.sourceId, legacy.startTime, legacy.endTime, legacy.observedAt, legacy.retrievedAt, barContentHash(legacy)],
       );
       const applied = await migrate(pool, loadMigrations());
-      expect(applied.applied).toEqual([8]);
-      const row = (await pool.query("SELECT observed_at, available_at, retrieved_at, knowledge_source, known_at, vintage, vintage_policy, provenance_hash FROM market_bars WHERE start_time = $1", [legacy.startTime])).rows[0];
+      expect(applied.applied).toEqual([8, 9]);
+      const row = (await pool.query('SELECT observed_at, available_at, retrieved_at, knowledge_provenance, revision_known_at, provenance_hash, knowledge_source_v2, known_at_v2, vintage_v2, vintage_policy_v2, knowledge_vintage_hash FROM market_bars WHERE start_time = $1', [legacy.startTime])).rows[0];
       expect(row).toEqual({
         observed_at: new Date(legacy.observedAt),
         available_at: new Date(legacy.observedAt),
         retrieved_at: new Date(legacy.retrievedAt),
-        knowledge_source: null,
-        known_at: null,
-        vintage: null,
-        vintage_policy: null,
+        knowledge_provenance: null,
+        revision_known_at: null,
         provenance_hash: null,
+        knowledge_source_v2: null,
+        known_at_v2: null,
+        vintage_v2: null,
+        vintage_policy_v2: null,
+        knowledge_vintage_hash: null,
       });
       const store = new PostgresMarketDataStore(pool);
       const [research] = await store.readBars({ ...SERIES, asOf: '2026-10-10T00:00:00.000Z', replay: 'historical_research' });
