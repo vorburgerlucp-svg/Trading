@@ -1,4 +1,5 @@
-import type { BarReplayMode, MarketBar } from '../market-data/market-data-types.js';
+import type { BarReplayMode, CorporateActionKnowledgeProvenance, CorporateActionType, MarketBar, StoredCorporateAction } from '../market-data/market-data-types.js';
+import type { TradingCalendar } from '../market-data/sessions.js';
 import type { Decimal } from '../money/decimal.js';
 import type { CostModelConfig } from './cost-model.js';
 import type { IntrabarFillPolicy } from './execution-model.js';
@@ -10,6 +11,9 @@ export type PositionSizing =
 
 export interface BacktestPosition {
   instrumentId: string;
+  /** Stable identity of the buy fill this position originates from. A close resolves that fill by this id, never by quantity. */
+  entryFillId: string;
+  /** Quantity and per-share basis are economic values: a split changes them. The entry fill itself never changes. */
   quantity: Decimal;
   entryPrice: Decimal;
   entryTime: string;
@@ -43,6 +47,9 @@ export interface BacktestEquityPoint {
   at: string;
   cash: Decimal;
   marketValue: Decimal;
+  /** Unsettled dividend entitlements. Economic value, never spendable cash, never used for sizing. Absent before backtest-engine:v5. */
+  receivablesValue?: Decimal;
+  /** cash + marketValue + receivablesValue. */
   equity: Decimal;
 }
 
@@ -111,6 +118,116 @@ export interface BacktestRunResult {
    * Absent only in backtest-engine:v1 runs, which had no warm-up gate and therefore cannot prove one.
    */
   warmup?: BacktestWarmupResult;
+  /** Portfolio currency the cash and any receivable are denominated in. Required from backtest-engine:v5. */
+  portfolioCurrency?: string;
+  /** Corporate-action accounting of this run. Present when the run was given corporate-action input (backtest-engine:v5). */
+  corporateActions?: BacktestCorporateActionResult;
+}
+
+/** Every reason a corporate-action limitation or refusal is reported under. Distinct codes are never merged into one warning. */
+export type CorporateActionReasonCode =
+  | 'CORPORATE_ACTION_CALENDAR_UNPROVEN'
+  | 'CORPORATE_ACTION_TIMING_UNPROVEN'
+  | 'CORPORATE_ACTION_ORDER_AMBIGUOUS'
+  | 'CORPORATE_ACTION_DOUBLE_ADJUSTMENT_RISK'
+  | 'CORPORATE_ACTION_FX_NOT_MODELED'
+  | 'CORPORATE_ACTION_REVISION_CONFLICT'
+  | 'CORPORATE_ACTION_PENDING_AT_END'
+  | 'CORPORATE_ACTION_CLAIM_NOT_PROVEN'
+  | 'DIVIDEND_PAYMENT_DATE_UNKNOWN'
+  | 'FRACTIONAL_CASH_IN_LIEU_NOT_MODELED'
+  /** Not a limitation: the action lies before the first bar, so no position could have existed for it. Recorded in rejected, never in reasons. */
+  | 'ACTION_BEFORE_SERIES';
+
+/** Corporate-action input of a backtest: the replay-selected records and the calendar that gives their effective instants. */
+export interface CorporateActionInput {
+  /** One revision per actionKey; an exact duplicate (same revision and content) is applied once. */
+  actions: readonly StoredCorporateAction[];
+  /** The instrument's calendar. The effective instant of an ex-date is its regular session open. */
+  calendar: TradingCalendar;
+}
+
+/** A dividend entitlement. An economic asset that is not spendable cash until it is settled (V1: never, see DIVIDEND_PAYMENT_DATE_UNKNOWN). */
+export interface DividendReceivable {
+  receivableId: string;
+  actionKey: string;
+  revision: number;
+  instrumentId: string;
+  entitledQuantity: Decimal;
+  amountPerShare: Decimal;
+  currency: string;
+  grossAmount: Decimal;
+  exDate: string;
+  entitledAt: string;
+  /** The provider states no payment date. Never invented. */
+  paymentDate: null;
+  settlement: 'UNSETTLED';
+  settledAt: null;
+}
+
+export type CorporateActionTransformation =
+  | {
+      kind: 'split';
+      quantityFactor: string;
+      priceFactor: string;
+      quantityBefore: string | null;
+      quantityAfter: string | null;
+      /** Attached price levels that were transformed (pending order or open position). */
+      levelsAdjusted: string[];
+      /** The post-split quantity has a fractional part. No quantity was rounded. */
+      fractional: boolean;
+    }
+  | { kind: 'dividend_entitlement'; entitledQuantity: string; amountPerShare: string; currency: string | null; receivableId: string | null }
+  | { kind: 'symbol_change'; oldSymbol: string | null; newSymbol: string | null; economicEffect: 'none' };
+
+export interface AppliedCorporateAction {
+  actionKey: string;
+  revision: number;
+  type: CorporateActionType;
+  exDate: string;
+  /** The regular session open of exDate (calendar). */
+  effectiveAt: string;
+  /** The usable instant of the event that applied the action (at or after effectiveAt). */
+  appliedAt: string;
+  provenance: CorporateActionKnowledgeProvenance;
+  /** When NEXUS provably knew the record; applied only if this was at or before appliedAt. */
+  knowledgeAt: string | null;
+  retrievedAt: string;
+  contentHash: string;
+  ingestSeq: number;
+  beforeStateFingerprint: string;
+  afterStateFingerprint: string;
+  transformation: CorporateActionTransformation;
+}
+
+/** Split value neutrality: quantity × reference price before and after the split (see docs/BACKTEST_CORPORATE_ACTIONS_O2.md). */
+export interface ValueNeutralityCheck {
+  actionKey: string;
+  revision: number;
+  referencePrice: string;
+  valueBefore: string;
+  valueAfter: string;
+  difference: string;
+  neutral: boolean;
+}
+
+export interface BacktestCorporateActionResult {
+  engineVersion: string;
+  policyVersion: string;
+  calendar: { calendarId: string; timezone: string; source: string };
+  applied: AppliedCorporateAction[];
+  /** Actions not applied, with the reason. Only ACTION_BEFORE_SERIES appears here: other refusals fail the run. */
+  rejected: Array<{ actionKey: string; revision: number; code: CorporateActionReasonCode; reason: string }>;
+  /** Effective after the last bar, so not applied. */
+  pending: Array<{ actionKey: string; revision: number; type: CorporateActionType; exDate: string; effectiveAt: string }>;
+  dividendReceivables: DividendReceivable[];
+  /** Always empty in V1: settlement needs a provider payment date, which is not available. */
+  settledDividends: DividendReceivable[];
+  valueNeutralityChecks: ValueNeutralityCheck[];
+  /** The limitations of this run, one code each. Empty only when the accounting is complete. */
+  reasons: CorporateActionReasonCode[];
+  /** True only when accounting ran and no limitation was recorded. The quality grade is derived from this. */
+  complete: boolean;
 }
 
 export interface BacktestWarmupResult {
@@ -146,10 +263,15 @@ export interface BacktestQualityContext {
 export interface BacktestInput {
   bars: readonly MarketBar[];
   initialCapital: Decimal;
+  /** ISO 4217. Required, never defaulted: cash, dividends and the fingerprint depend on it. */
+  portfolioCurrency: string;
   sizing: PositionSizing;
   costModel: CostModelConfig;
   intrabarPolicy?: IntrabarFillPolicy;
+  /** The caller's request. The grade uses what the engine proves, so a `modeled` request can be refused (see quality). */
   quality: BacktestQualityContext;
+  /** Corporate-action accounting. When given, the bars must be raw and the position is adjusted for each action. */
+  corporateActions?: CorporateActionInput;
   /**
    * When a bar is used. historical_research (default): at its market gate. decision_time: at the instant NEXUS held it, so the engine
    * never acts before NEXUS had the bar. A legacy bar throws in decision_time mode.

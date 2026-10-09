@@ -36,7 +36,7 @@ function strategy(requiredBars: number, preferredBars: number): BacktestStrategy
 
 const quality = { pointInTimeUniverse: true, dataComplete: true, corporateActions: 'not_modeled' as const, providerProduction: true, minimumTrades: 1 };
 const zeroCost = { commissionBps: 0, spreadBps: 0, slippageBps: 0, minCommission: '0' };
-const run = (bars: MarketBar[], s: BacktestStrategy) => runBacktest({ bars, strategy: s, initialCapital: Decimal.from(1000), sizing: { type: 'fixed_cash', amount: '100' }, costModel: zeroCost, quality });
+const run = (bars: MarketBar[], s: BacktestStrategy) => runBacktest({ bars, strategy: s, portfolioCurrency: 'USD', initialCapital: Decimal.from(1000), sizing: { type: 'fixed_cash', amount: '100' }, costModel: zeroCost, quality });
 
 describe.skipIf(!pgAvailable)('PostgreSQL backtest warm-up roundtrip' + (pgAvailable ? '' : ' (NOT RUN: ' + pgSkipReason + ')'), () => {
   let db: TestDatabase | null = null;

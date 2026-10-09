@@ -2,6 +2,8 @@
 
 Prepared for implementation after the next model-usage reset.
 
+> **Section 0 (terminology update, 2026-10-09).** This spec predates the knowledge and provenance model. Where it says `availableAt` for a corporate action, read the knowledge time `knowledge.knowledgeAt` (proven, or none) and the capture time `retrievedAt`. The authoritative distinction is: `exDate` is the economic effective date; `knowledge.knowledgeAt` is when NEXUS knew the record; `retrievedAt` is the capture; the replay purpose is `economic` or `information`. Reason codes carry the `CORPORATE_ACTION_` prefix where applicable (for example `CORPORATE_ACTION_DOUBLE_ADJUSTMENT_RISK`, not `DOUBLE_ADJUSTMENT_RISK`). The effective instant is the regular session open of the ex-date in the instrument's calendar, never a UTC string slice. Where this spec and `docs/BACKTEST_CORPORATE_ACTIONS_O2.md` differ, the O2 document is the implementation decision and it is the one that was built. Implementation status and the decisions taken: `docs/BACKTEST_CORPORATE_ACTIONS_O2.md`.
+
 Base for design review:
 `feature/backtest-warmup-enforcement`
 commit `50f5800464ded59d3dbb02eca5410d5626d4881c`

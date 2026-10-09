@@ -1,12 +1,13 @@
-// Single-instrument deterministic Backtest Engine core (backtest-engine:v3).
+// Single-instrument deterministic Backtest Engine core (backtest-engine:v5).
 //
 // Event convention per final bar becoming usable (its usable instant: its gate, or for a proven revision the instant NEXUS held it):
+//   0. corporate actions effective at this bar's open are applied (corporate-action-engine:v1), when accounting is enabled
 //   1. process a market order created from an earlier bar at this bar's OPEN
 //   2. process protective stop/take-profit over this bar
 //   3. mark the portfolio at this bar's CLOSE, now that the bar is available
 //   4. warm-up gate: while fewer than requiredBars bars are available at this event, stop here.
 //      The strategy is not called, so warm-up can create no decision, no order and no fill.
-//   5. evaluate the strategy using only bars whose usable instant is <= this event time
+//   5. evaluate the strategy using only bars whose usable instant is <= this event time, on the split-normalised view
 //   6. create (but never fill) new market orders for a later bar
 //
 // This intentionally forbids same-bar execution from final-close decisions.
@@ -17,23 +18,45 @@ import { parseUtc } from '../market-data/time.js';
 import { Decimal } from '../money/decimal.js';
 import { hashOf } from '../persistence/canonical-json.js';
 import { DeterministicCostModel } from './cost-model.js';
+import { CORPORATE_ACTION_REASON_TEXT, CorporateActionLedger, type AttachedLevels } from './corporate-action-engine.js';
 import { isEligibleNextBar, protectiveExitForLong } from './execution-model.js';
 import { backtestMetrics } from './performance.js';
 import { PointInTimeBarState, buildBarAvailabilityQueue } from './point-in-time.js';
 import { assessBacktestQuality } from './quality.js';
 import { desiredLongQuantity } from './sizing.js';
-import type { BacktestBarKnowledge, BacktestFill, BacktestInput, BacktestPosition, BacktestQuality, BacktestRunResult, BacktestTrade, BacktestWarmupResult } from './backtest-types.js';
+import type {
+  BacktestBarKnowledge,
+  BacktestFill,
+  BacktestInput,
+  BacktestPosition,
+  BacktestQuality,
+  BacktestRunResult,
+  BacktestTrade,
+  BacktestWarmupResult,
+  CorporateActionReasonCode,
+} from './backtest-types.js';
 import type { BacktestStrategy, StrategyDecision } from './strategy.js';
 import { validateWarmupPlan, type WarmupPlan } from './warmup.js';
 
-/** v4: the replay mode decides when a bar is used (market gate, or the instant NEXUS held it); quality counts knowledge at use and vintage. */
-export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v4';
+/** v5: corporate actions on open positions, lineage by entry fill id, derived corporate-action quality, receivables in equity. */
+export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v5';
 
 interface PendingOrder {
   side: 'buy' | 'sell';
   decisionBar: MarketBar;
   stopLoss: Decimal | null;
   takeProfit: Decimal | null;
+}
+
+/** The price levels attached to a pending entry, as the corporate-action engine transforms them. */
+function levelsOf(order: PendingOrder | null): AttachedLevels | null {
+  return order === null ? null : { stopLoss: order.stopLoss, takeProfit: order.takeProfit };
+}
+
+/** The pending entry with the levels the corporate-action engine transformed (a split changes its price levels). */
+function withLevels(order: PendingOrder | null, levels: AttachedLevels | null): PendingOrder | null {
+  if (order === null || levels === null) return order;
+  return { ...order, stopLoss: levels.stopLoss, takeProfit: levels.takeProfit };
 }
 
 function minDecimal(a: Decimal, b: Decimal): Decimal {
@@ -113,19 +136,19 @@ function applyWarmupToQuality(base: BacktestQuality, w: { requiredWarmupMet: boo
   return base;
 }
 
+const ISO_CURRENCY = /^[A-Z]{3}$/;
+
 export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrategy }): BacktestRunResult {
   // The engine owns its data. Bars are copied into frozen objects before any strategy sees them, so a strategy can
   // neither change the input nor change the identity computed from it.
   const input = { ...rawInput, bars: rawInput.bars.map((b) => Object.freeze({ ...b })) };
   if (!input.initialCapital.isPositive()) throw new Error('initial capital must be positive');
+  if (!ISO_CURRENCY.test(input.portfolioCurrency)) throw new Error('portfolio currency must be an ISO 4217 code');
   if (input.bars.length === 0) throw new Error('backtest requires bars');
   const warmup = validateWarmupPlan(input.strategy.warmup);
   const instrumentId = input.bars[0]!.instrumentId;
   if (input.bars.some((b) => b.instrumentId !== instrumentId)) throw new Error('V1 backtest is single-instrument');
   if (input.bars.some((b) => !b.isFinal)) throw new Error('backtest accepts final bars only');
-  if (input.quality.corporateActions === 'modeled') {
-    throw new Error('Backtest Engine V1 cannot claim corporate actions are modeled; open-position split/dividend handling is not implemented yet');
-  }
   const first = input.bars[0]!;
   const starts = new Set<string>();
   for (const bar of input.bars) {
@@ -135,6 +158,10 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     if (starts.has(bar.startTime)) throw new Error('backtest bars contain a duplicate startTime');
     starts.add(bar.startTime);
   }
+  // Explicit accounting needs raw prices: the position is adjusted here, so split-adjusted bars would adjust it twice.
+  if (input.corporateActions && first.adjustment !== 'raw') {
+    throw new Error('CORPORATE_ACTION_DOUBLE_ADJUSTMENT_RISK: ' + CORPORATE_ACTION_REASON_TEXT.CORPORATE_ACTION_DOUBLE_ADJUSTMENT_RISK + ' (got ' + first.adjustment + ')');
+  }
   const replay: BarReplayMode = input.replay ?? 'historical_research';
   assertChronologicalAvailability(input.bars, replay);
 
@@ -142,6 +169,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
   const state = new PointInTimeBarState(replay);
   const costModel = new DeterministicCostModel(input.costModel);
   const intrabarPolicy = input.intrabarPolicy ?? 'conservative';
+  const ledger = input.corporateActions ? new CorporateActionLedger(input.corporateActions, input.portfolioCurrency, first) : null;
   let cash = input.initialCapital;
   let position: BacktestPosition | null = null;
   let pending: PendingOrder | null = null;
@@ -156,6 +184,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
   let preferredWarmupCompleteAt: string | null = null;
   let fillSequence = 0;
   let tradeSequence = 0;
+  let lastRawClose: Decimal | null = null;
   const fills: BacktestFill[] = [];
   const trades: BacktestTrade[] = [];
   const equityCurve: BacktestRunResult['equityCurve'] = [];
@@ -173,11 +202,12 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     const quote = costModel.quote(rawPrice, 'sell', openPosition.quantity);
     const exitFill = addFill({ instrumentId, side: 'sell', reason, at: bar.startTime, rawPrice, executionPrice: quote.executionPrice, quantity: openPosition.quantity, commission: quote.commission });
     const exitNet = quote.executionPrice.times(openPosition.quantity).minus(quote.commission);
-    const entryCost = openPosition.entryPrice.times(openPosition.quantity).plus(openPosition.entryCommission);
+    // The entry is resolved by its immutable id. Its cost is the entry fill itself: a split changes the per-share basis, never the total.
+    const entryFill = fills.find((f) => f.fillId === openPosition.entryFillId);
+    if (!entryFill || entryFill.side !== 'buy') throw new Error('entry fill missing for open position');
+    const entryCost = entryFill.executionPrice.times(entryFill.quantity).plus(entryFill.commission);
     const pnl = exitNet.minus(entryCost);
     const returnPct = entryCost.isZero() ? 0 : pnl.dividedBy(entryCost, 12, 'half_even').times(100).toNumber();
-    const entryFill = fills.find((f) => f.side === 'buy' && f.at === openPosition.entryTime && f.quantity.eq(openPosition.quantity));
-    if (!entryFill) throw new Error('entry fill missing for open position');
     trades.push({ tradeId: 'trade_' + String(++tradeSequence).padStart(6, '0'), instrumentId, entry: entryFill, exit: exitFill, pnl, returnPct });
     cash = cash.plus(exitNet);
     position = null;
@@ -187,6 +217,14 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     const bar = event.bar;
     state.advance(event);
 
+    // 0. Corporate actions effective at this bar's open, before anything is processed at that open.
+    if (ledger) {
+      const step = ledger.applyDue({ bar, eventMs: parseUtc(event.availableAt), position, levels: levelsOf(pending), lastRawClose });
+      position = step.position;
+      pending = withLevels(pending, step.levels);
+    }
+
+    // 1. Market order created earlier, at this bar's open.
     if (pending && isEligibleNextBar(pending.decisionBar, bar)) {
       if (pending.side === 'buy' && !position) {
         const estimatedExecution = costModel.executionPrice(bar.open, 'buy');
@@ -199,7 +237,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
           if (total.lte(cash)) {
             const fill = addFill({ instrumentId, side: 'buy', reason: 'market_entry', at: bar.startTime, rawPrice: bar.open, executionPrice: quote.executionPrice, quantity, commission: quote.commission });
             cash = cash.minus(total);
-            position = { instrumentId, quantity, entryPrice: quote.executionPrice, entryTime: fill.at, entryCommission: quote.commission, stopLoss: pending.stopLoss, takeProfit: pending.takeProfit };
+            position = { instrumentId, entryFillId: fill.fillId, quantity, entryPrice: quote.executionPrice, entryTime: fill.at, entryCommission: quote.commission, stopLoss: pending.stopLoss, takeProfit: pending.takeProfit };
           }
         }
       } else if (pending.side === 'sell' && position) {
@@ -208,15 +246,19 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
       pending = null;
     }
 
+    // 2. Protective exits over this bar.
     if (position && (position.stopLoss !== null || position.takeProfit !== null)) {
       const protective = protectiveExitForLong(bar, position.stopLoss, position.takeProfit, intrabarPolicy);
       if (protective?.kind === 'ambiguous') ambiguousBars++;
       else if (protective?.rawFillPrice) closePosition(bar, protective.rawFillPrice, protective.kind);
     }
 
+    // 3. Mark at close. Receivables are economic value in equity, never cash.
+    const receivablesValue = ledger ? ledger.receivablesValue() : Decimal.ZERO;
     const marketValue = position ? position.quantity.times(bar.close) : Decimal.ZERO;
-    const equity = cash.plus(marketValue);
-    equityCurve.push({ at: event.availableAt, cash, marketValue, equity });
+    const equity = cash.plus(marketValue).plus(receivablesValue);
+    equityCurve.push({ at: event.availableAt, cash, marketValue, receivablesValue, equity });
+    lastRawClose = bar.close;
 
     // 4. Warm-up gate (hard). Warm-up events stay in the equity history but never reach the strategy.
     const history = Object.freeze(state.historyAt(instrumentId, event.availableAt));
@@ -225,7 +267,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
       continue;
     }
 
-    // 5. Evaluation. Each tradable event is evaluated exactly once.
+    // 5. Evaluation. Each tradable event is evaluated exactly once, on the split-normalised view when accounting is enabled.
     tradableBars++;
     if (position) exposedPoints++;
     strategyEvaluations++;
@@ -233,8 +275,9 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     if (history.length < warmup.preferredBars) evaluationsBelowPreferred++;
     else preferredWarmupCompleteAt ??= event.availableAt;
 
+    const view = ledger ? ledger.strategyView(history, bar, parseUtc(event.availableAt)) : { history, currentBar: bar };
     // A frozen copy of the open position: the strategy reads its levels, the engine alone changes them.
-    const decision = input.strategy.evaluate({ instrumentId, asOf: event.availableAt, currentBar: bar, history, position: position === null ? null : Object.freeze({ ...position }) });
+    const decision = input.strategy.evaluate({ instrumentId, asOf: event.availableAt, currentBar: view.currentBar, history: view.history, position: position === null ? null : Object.freeze({ ...position }) });
     if (!pending) {
       if (decision.action === 'ENTER_LONG' && !position) pending = decisionToPending(decision, bar);
       else if (decision.action === 'EXIT_LONG' && position) pending = decisionToPending(decision, bar);
@@ -246,7 +289,13 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
   const preferredWarmupMet = strategyEvaluations > 0 && evaluationsBelowPreferred === 0;
   const endingEquity = equityCurve.at(-1)?.equity ?? cash;
   const metrics = backtestMetrics({ startingCapital: input.initialCapital, endingEquity, trades, equityCurve, totalFees, exposedPoints, tradablePoints: tradableBars });
-  const assessed = assessBacktestQuality(input.quality, trades.length, ambiguousBars, costModel.isZeroCost(), barKnowledgeAtUse(input.bars, replay));
+
+  // Quality is derived from what the engine proved. A caller's `modeled` that the engine did not prove is refused, as a reason.
+  const corporateActions = ledger ? ledger.result() : undefined;
+  const caReasons: CorporateActionReasonCode[] = corporateActions ? [...corporateActions.reasons] : [];
+  if (input.quality.corporateActions === 'modeled' && (!corporateActions || !corporateActions.complete)) caReasons.push('CORPORATE_ACTION_CLAIM_NOT_PROVEN');
+  const modeled = corporateActions !== undefined && corporateActions.complete && caReasons.length === 0;
+  const assessed = assessBacktestQuality({ ...input.quality, corporateActions: modeled ? 'modeled' : 'not_modeled' }, trades.length, ambiguousBars, costModel.isZeroCost(), barKnowledgeAtUse(input.bars, replay), caReasons);
   const quality = applyWarmupToQuality(assessed, { requiredWarmupMet, preferredWarmupMet, barsProcessed, requiredBars: warmup.requiredBars, preferredBars: warmup.preferredBars, strategyEvaluations, evaluationsBelowPreferred });
   const warmupResult: BacktestWarmupResult = {
     algorithmVersion: warmup.algorithmVersion,
@@ -267,11 +316,13 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     strategyFingerprint,
     warmup: warmupPlanOf(warmup),
     initialCapital: input.initialCapital,
+    portfolioCurrency: input.portfolioCurrency,
     sizing: input.sizing,
     costModel: costModel.config,
     intrabarPolicy,
     qualityContext: input.quality,
     replay,
+    corporateActions: ledger ? ledger.fingerprintRows() : null,
     bars: input.bars.map(barFingerprint),
   });
 
@@ -285,6 +336,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     strategyFingerprint,
     inputFingerprint,
     initialCapital: input.initialCapital,
+    portfolioCurrency: input.portfolioCurrency,
     costModel: costModel.config,
     sizing: input.sizing,
     intrabarPolicy,
@@ -297,5 +349,6 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     quality,
     ambiguousBars,
     warmup: warmupResult,
+    ...(corporateActions ? { corporateActions } : {}),
   };
 }

@@ -69,7 +69,7 @@ const quality = { pointInTimeUniverse: true, dataComplete: true, corporateAction
 const zeroCost = { commissionBps: 0, spreadBps: 0, slippageBps: 0, minCommission: '0' };
 
 function run(bars: MarketBar[], strategy: BacktestStrategy): BacktestRunResult {
-  return runBacktest({ bars, strategy, initialCapital: Decimal.from(1000), sizing: { type: 'fixed_cash', amount: '100' }, costModel: zeroCost, quality });
+  return runBacktest({ bars, strategy, portfolioCurrency: 'USD', initialCapital: Decimal.from(1000), sizing: { type: 'fixed_cash', amount: '100' }, costModel: zeroCost, quality });
 }
 
 describe('Backtest warm-up enforcement (O3)', () => {
@@ -207,8 +207,8 @@ describe('Backtest warm-up enforcement (O3)', () => {
     expect(() => run(series(10), recorder(plan(0), enterOnFirst).strategy)).toThrow(WarmupPlanError);
   });
 
-  it('engine version: backtest-engine:v4 (v2 warm-up gate; v4 replay mode and knowledge at use)', () => {
-    expect(BACKTEST_ENGINE_VERSION).toBe('backtest-engine:v4');
+  it('engine version: backtest-engine:v5 (v2 warm-up gate; v4 replay mode and knowledge at use; v5 corporate actions)', () => {
+    expect(BACKTEST_ENGINE_VERSION).toBe('backtest-engine:v5');
   });
 
   it('integrity: a run below the gate that shows a fill, or a flipped warm-up flag, fails verification', () => {

@@ -64,7 +64,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const result = runBacktest({
       bars,
       strategy: enterThenExit(1, 3),
-      initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,
@@ -86,7 +86,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const result = runBacktest({
       bars,
       strategy: enterThenExit(1, 99, { stop: '95', tp: '120' }),
-      initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,
@@ -104,7 +104,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const result = runBacktest({
       bars,
       strategy: enterThenExit(1, 99, { stop: '95', tp: '110' }),
-      initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,
@@ -125,7 +125,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const base = {
       bars,
       strategy,
-      initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash' as const, amount: '500' },
       quality,
     };
@@ -143,7 +143,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const result = runBacktest({
       bars: [delayedFirst, second, third],
       strategy: enterThenExit(1, 99),
-      initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,
@@ -152,15 +152,18 @@ describe('Backtest Engine point-in-time execution', () => {
     expect(result.fills[0]?.rawPrice.toString()).toBe('104');
   });
 
-  it('refuses to claim corporate actions are modeled before the engine can apply them to open positions', () => {
-    expect(() => runBacktest({
+  it('a caller claim of modeled corporate actions is not trusted: without accounting it is refused as a reason and the grade is C', () => {
+    const run = runBacktest({
       bars: [bar(0, '100', '101', '99', '100'), bar(1, '101', '102', '100', '101')],
       strategy: enterThenExit(1, 99),
-      initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality: { ...quality, corporateActions: 'modeled' },
-    })).toThrow(/cannot claim corporate actions are modeled/);
+    });
+    expect(run.quality.grade).toBe('C');
+    expect(run.quality.reasons.some((r) => r.startsWith('CORPORATE_ACTION_CLAIM_NOT_PROVEN:'))).toBe(true);
+    expect(run.corporateActions).toBeUndefined();
   });
 
   it('rejects mixed series instead of silently combining different adjustments or sources', () => {
@@ -169,7 +172,7 @@ describe('Backtest Engine point-in-time execution', () => {
     expect(() => runBacktest({
       bars: [a, b],
       strategy: enterThenExit(1, 99),
-      initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,
@@ -185,7 +188,7 @@ describe('Backtest Engine point-in-time execution', () => {
     ];
     const common = {
       bars,
-      initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash' as const, amount: '500' },
       costModel: zeroCost,
       quality,
@@ -202,7 +205,7 @@ describe('Backtest Engine point-in-time execution', () => {
     const result = runBacktest({
       bars: [bar(0, '100', '101', '99', '100'), bar(1, '101', '102', '100', '101'), bar(2, '102', '103', '101', '102')],
       strategy: enterThenExit(1, 99),
-      initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,
@@ -218,7 +221,7 @@ describe('Backtest Engine point-in-time execution', () => {
     expect(() => runBacktest({
       bars: [inverted, second],
       strategy: enterThenExit(1, 2),
-      initialCapital: Decimal.from(1000),
+      portfolioCurrency: 'USD', initialCapital: Decimal.from(1000),
       sizing: { type: 'fixed_cash', amount: '500' },
       costModel: zeroCost,
       quality,

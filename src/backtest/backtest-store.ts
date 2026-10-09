@@ -1,7 +1,9 @@
 import { parseUtc } from '../market-data/time.js';
+import { Decimal } from '../money/decimal.js';
 import { hashOf } from '../persistence/canonical-json.js';
 import { isoMs, sealFor, verifySeal, type EvidenceSeal, type Sealed } from '../persistence/evidence-seal.js';
-import type { BacktestRunResult } from './backtest-types.js';
+import { CORPORATE_ACTION_ENGINE_VERSION, CORPORATE_ACTION_POLICY_VERSION, CORPORATE_ACTION_REASON_TEXT } from './corporate-action-engine.js';
+import type { BacktestCorporateActionResult, BacktestRunResult } from './backtest-types.js';
 
 export class BacktestRunConflictError extends Error {
   override readonly name = 'BacktestRunConflictError';
@@ -41,7 +43,52 @@ function verifyWarmup(run: BacktestRunResult): void {
   if (run.fills.some((fill) => parseUtc(fill.at) < firstMs)) throw new BacktestRunIntegrityError('fill before the first strategy evaluation');
 }
 
+const HEX64 = /^[0-9a-f]{64}$/;
+
+/**
+ * The corporate-action audit must agree with itself and with the run. Each limitation is one code, the grade is never A or B while a
+ * limitation is recorded, every applied action has both state fingerprints, every split was value-neutral, and a dividend receivable
+ * is never settled (V1 has no payment date) and never cash.
+ */
+function verifyCorporateActions(run: BacktestRunResult, ca: BacktestCorporateActionResult): void {
+  if (ca.engineVersion !== CORPORATE_ACTION_ENGINE_VERSION || ca.policyVersion !== CORPORATE_ACTION_POLICY_VERSION) {
+    throw new BacktestRunIntegrityError('corporate-action engine or policy version does not match this implementation');
+  }
+  if (new Set(ca.reasons).size !== ca.reasons.length) throw new BacktestRunIntegrityError('corporate-action reasons repeat a code');
+  if (ca.complete !== (ca.reasons.length === 0)) throw new BacktestRunIntegrityError('corporate-action completeness does not match its reasons');
+  for (const code of ca.reasons) {
+    if (!(code in CORPORATE_ACTION_REASON_TEXT) || code === 'ACTION_BEFORE_SERIES') throw new BacktestRunIntegrityError('unknown corporate-action reason ' + code);
+    if (!run.quality.reasons.some((r) => r.startsWith(code + ':'))) throw new BacktestRunIntegrityError('quality does not report corporate-action reason ' + code);
+  }
+  if (ca.reasons.length > 0 && (run.quality.grade === 'A' || run.quality.grade === 'B')) throw new BacktestRunIntegrityError('a run with a corporate-action limitation cannot be graded ' + run.quality.grade);
+  if (ca.pending.length > 0 && !ca.reasons.includes('CORPORATE_ACTION_PENDING_AT_END')) throw new BacktestRunIntegrityError('pending corporate actions are not reported as a limitation');
+  for (const a of ca.applied) {
+    if (!HEX64.test(a.beforeStateFingerprint) || !HEX64.test(a.afterStateFingerprint)) throw new BacktestRunIntegrityError('applied action ' + a.actionKey + ' has no state fingerprints');
+    if (parseUtc(a.appliedAt) < parseUtc(a.effectiveAt)) throw new BacktestRunIntegrityError('action ' + a.actionKey + ' was applied before its effective instant');
+    if (a.knowledgeAt !== null && parseUtc(a.knowledgeAt) > parseUtc(a.appliedAt)) throw new BacktestRunIntegrityError('action ' + a.actionKey + ' was applied before it was known');
+  }
+  for (const c of ca.valueNeutralityChecks) {
+    if (c.neutral !== true) throw new BacktestRunIntegrityError('split ' + c.actionKey + ' is not value-neutral');
+  }
+  for (const r of ca.dividendReceivables) {
+    if (r.settlement !== 'UNSETTLED' || r.settledAt !== null || r.paymentDate !== null) throw new BacktestRunIntegrityError('receivable ' + r.receivableId + ' is settled without a payment date');
+    if (!Decimal.from(r.grossAmount).eq(Decimal.from(r.entitledQuantity).times(r.amountPerShare))) throw new BacktestRunIntegrityError('receivable ' + r.receivableId + ' gross amount does not match its quantity and rate');
+  }
+  if (ca.settledDividends.length !== 0) throw new BacktestRunIntegrityError('dividend settlement is not supported in V1');
+}
+
 export function verifyBacktestRun(run: BacktestRunResult): BacktestRunResult {
+  if (run.engineVersion === 'backtest-engine:v5') {
+    if (typeof run.portfolioCurrency !== 'string' || !/^[A-Z]{3}$/.test(run.portfolioCurrency)) throw new BacktestRunIntegrityError('portfolio currency is missing or invalid');
+  }
+  if (run.corporateActions) verifyCorporateActions(run, run.corporateActions);
+  for (const point of run.equityCurve) {
+    const receivables = point.receivablesValue ?? Decimal.ZERO;
+    if (!point.equity.eq(point.cash.plus(point.marketValue).plus(receivables))) throw new BacktestRunIntegrityError('equity is not cash + market value + receivables');
+  }
+  if (run.openPosition && !run.fills.some((f) => f.fillId === run.openPosition!.entryFillId && f.side === 'buy')) {
+    throw new BacktestRunIntegrityError('open position does not reference its entry fill');
+  }
   if (!/^[0-9a-f]{64}$/.test(run.inputFingerprint)) throw new BacktestRunIntegrityError('invalid backtest input fingerprint');
   if (!/^[0-9a-f]{64}$/.test(run.strategyFingerprint)) throw new BacktestRunIntegrityError('invalid strategy fingerprint');
   const strategyHash = hashOf({ id: run.strategyId, version: run.strategyVersion, definition: run.strategyDefinition });

@@ -1,4 +1,5 @@
-import type { BacktestBarKnowledge, BacktestDataProvenance, BacktestQuality, BacktestQualityContext } from './backtest-types.js';
+import type { BacktestBarKnowledge, BacktestDataProvenance, BacktestQuality, BacktestQualityContext, CorporateActionReasonCode } from './backtest-types.js';
+import { CORPORATE_ACTION_REASON_TEXT } from './corporate-action-engine.js';
 
 /**
  * Grade of a backtest. Its data provenance caps the grade; the return never enters.
@@ -8,7 +9,15 @@ import type { BacktestBarKnowledge, BacktestDataProvenance, BacktestQuality, Bac
  *   HISTORICAL_RECONSTRUCTION: some bar was used before NEXUS held it, or has a historical vintage. Valid research, at most B.
  *   LEGACY_UNPROVEN: some bar was stored without provenance. At most C.
  */
-export function assessBacktestQuality(context: BacktestQualityContext, tradeCount: number, ambiguousBars: number, zeroCostModel: boolean, bars: BacktestBarKnowledge): BacktestQuality {
+export function assessBacktestQuality(
+  context: BacktestQualityContext,
+  tradeCount: number,
+  ambiguousBars: number,
+  zeroCostModel: boolean,
+  bars: BacktestBarKnowledge,
+  /** The corporate-action limitations the engine recorded. Each is reported under its own code, never merged. */
+  corporateActionReasons: readonly CorporateActionReasonCode[] = [],
+): BacktestQuality {
   const reasons: string[] = [];
   const dataProvenance: BacktestDataProvenance =
     bars.legacy > 0 ? 'LEGACY_UNPROVEN' : bars.knownBeforeUse === bars.total && bars.contemporaneousVintage === bars.total ? 'STRICT_PIT_DATA' : 'HISTORICAL_RECONSTRUCTION';
@@ -21,7 +30,8 @@ export function assessBacktestQuality(context: BacktestQualityContext, tradeCoun
   };
 
   if (!context.pointInTimeUniverse) downgrade('C', 'instrument universe is not point-in-time safe');
-  if (context.corporateActions !== 'modeled') downgrade('C', 'corporate actions are not fully modeled');
+  if (context.corporateActions !== 'modeled' || corporateActionReasons.length > 0) downgrade('C', 'corporate actions are not fully modeled');
+  for (const code of corporateActionReasons) downgrade('C', code + ': ' + CORPORATE_ACTION_REASON_TEXT[code]);
   if (!context.providerProduction) downgrade('B', 'market data source is not production');
   if (bars.legacy > 0) downgrade('C', bars.legacy + ' bar(s) stored without provenance: their knowledge is unproven');
   else if (dataProvenance === 'HISTORICAL_RECONSTRUCTION') {
