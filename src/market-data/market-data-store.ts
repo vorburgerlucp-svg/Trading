@@ -3,8 +3,11 @@
 // Rules shared by every implementation (the PostgreSQL store reuses the planning functions below):
 //   * idempotent: re-delivering an identical record changes nothing (status "unchanged")
 //   * nothing is overwritten: a different record for the same key becomes a new REVISION
-//   * bars and quotes: a revision becomes visible at availableAt, which is raised to max(availableAt, retrievedAt,
-//     previous revision's availableAt) for revisions >= 2 only (the first revision keeps the provider value; finding F9).
+//   * bars: a revision's historical gate (availableAt) is raised to max(given, its knowledge floor, the previous gate) for
+//     revisions >= 2. A proven revision is used only from the instant NEXUS held it, in every mode; an unproven one
+//     (historical reconstruction, legacy) is labelled, and a strict read refuses it (BAR_VINTAGE_NOT_PROVEN). See bar-replay.ts.
+//   * quotes: a revision becomes visible at availableAt, raised to max(availableAt, retrievedAt, previous) for revisions >= 2
+//     only (the first revision keeps the provided value; quote finding F10).
 //     Corporate actions do not use availableAt at all: their information time is a proven knowledge time (corporate-actions.ts).
 //     A provider correction (revision >= 2) therefore never leaks into the past for corporate actions either.
 //   * final → in-progress is refused (final_regression); structurally invalid records are quarantined
@@ -17,6 +20,7 @@ import { hashOf } from '../persistence/canonical-json.js';
 import {
   barContentHash,
   barKey,
+  barProvenanceHash,
   corporateActionContentHash,
   corporateActionProvenanceHash,
   normalizeBar,
@@ -28,9 +32,12 @@ import {
   validateQuote,
   type PriceRules,
 } from './bar-validation.js';
+import { BarVintageNotProvenError, classifyVisibleBar, isProvenKnowledge, knowledgeOf, revisionFloorOf } from './bar-replay.js';
 import { selectReplayRevision, type ReplayPurpose } from './corporate-actions.js';
 import type {
   BarInterval,
+  BarKnowledgeProvenance,
+  BarReplayMode,
   BarSession,
   CorporateAction,
   CorporateActionType,
@@ -75,6 +82,12 @@ export interface BarQuery {
   storedThrough?: number;
   /** Default true: in-progress bars are excluded (no repainting). */
   finalOnly?: boolean;
+  /**
+   * historical_reconstruction (default): unproven revisions are used at their historical gate, labelled by their provenance.
+   * strict_point_in_time: an unproven visible revision makes the read throw BarVintageNotProvenError (fail closed).
+   * In both modes a proven revision is used only from the instant NEXUS held it.
+   */
+  replay?: BarReplayMode;
 }
 
 export interface QuoteQuery {
@@ -192,6 +205,10 @@ interface PlanSpec<In, Out> {
   hashOf: (record: In) => string;
   isFinal: (record: In) => boolean;
   sortValue: (record: In) => number;
+  /** Availability of a later revision (default: max(given, retrievedAt, previous)). Bars floor it by their revision knowledge. */
+  revisionAvailability?: (record: In, previous: Revisioned) => string;
+  /** Extra checks against the previous revision of the same key; issues quarantine the new revision. */
+  againstPrevious?: (record: In, previous: Revisioned & { isFinal: boolean }) => DataQualityIssue[];
   build: (record: In, revision: number, availableAt: string, contentHash: string, ingestSeq: number) => Out;
 }
 
@@ -261,11 +278,17 @@ export function planIngest<In extends { availableAt: string; retrievedAt: string
       quarantine(r, [{ code: 'final_regression', severity: 'critical', message: 'a final record cannot be replaced by an in-progress version' }], spec.sourceOf(r));
       continue;
     }
+    if (prev && spec.againstPrevious) {
+      const conflicts = spec.againstPrevious(r, prev);
+      if (conflicts.length > 0) {
+        quarantine(r, conflicts, spec.sourceOf(r));
+        continue;
+      }
+    }
     let availableAt = r.availableAt;
     if (prev) {
-      // A new revision is only known from the moment NEXUS retrieved it.
-      const candidatesMs = [parseUtc(r.availableAt), parseUtc(r.retrievedAt), parseUtc(prev.availableAt)];
-      availableAt = toUtcIso(Math.max(...candidatesMs));
+      // A new revision is only known from the moment NEXUS retrieved it (or, when it proves more, from that proof).
+      availableAt = spec.revisionAvailability ? spec.revisionAvailability(r, prev) : toUtcIso(Math.max(parseUtc(r.availableAt), parseUtc(r.retrievedAt), parseUtc(prev.availableAt)));
       if (prev.isFinal) providerRevisions++;
     }
     rows.push({ key, row: spec.build(r, prev ? prev.revision + 1 : 1, availableAt, contentHash, ++seq) });
@@ -278,7 +301,7 @@ export function planBars(instrument: IngestInstrument, bars: readonly MarketBar[
     kind: 'bar',
     instrument,
     receivedAt,
-    validate: (b) => validateBar(b, instrument),
+    validate: (b) => validateBar(b, instrument, { ingest: true }),
     normalize: (b) => normalizeBar(b),
     instrumentOf: (b) => b.instrumentId,
     sourceOf: (b) => b.source,
@@ -286,8 +309,32 @@ export function planBars(instrument: IngestInstrument, bars: readonly MarketBar[
     hashOf: barContentHash,
     isFinal: (b) => b.isFinal,
     sortValue: (b) => parseUtc(b.startTime),
-    build: (b, revision, availableAt, contentHash, ingestSeq) => ({ ...stripBar(b), availableAt, revision, contentHash, ingestSeq }),
+    // A later revision is visible from the later of its own gate, its knowledge floor and the previous revision.
+    revisionAvailability: (b, previous) => toUtcIso(Math.max(parseUtc(b.availableAt), parseUtc(revisionFloorOf(b)), parseUtc(previous.availableAt))),
+    againstPrevious: (b, previous) => knowledgeRegression(b, previous as StoredBar),
+    build: (b, revision, availableAt, contentHash, ingestSeq) => storedBar({ ...stripBar(b), availableAt, revision, contentHash, ingestSeq }),
   });
+}
+
+/** A proven revision cannot be known before an earlier proven revision of the same bar: knowledge only moves forward. */
+function knowledgeRegression(record: MarketBar, previous: StoredBar): DataQualityIssue[] {
+  const now = knowledgeOf(record);
+  const before = knowledgeOf(previous);
+  if (isProvenKnowledge(now) && isProvenKnowledge(before) && parseUtc(now.revisionKnownAt!) < parseUtc(before.revisionKnownAt!)) {
+    return [{ code: 'invalid_time', severity: 'critical', message: 'a later revision cannot be known before an earlier proven revision (knowledge would move backwards)' }];
+  }
+  return [];
+}
+
+function storedBar(stored: Omit<StoredBar, 'provenanceHash'>): StoredBar {
+  const withoutHash: Omit<StoredBar, 'provenanceHash'> = stored;
+  return { ...withoutHash, provenanceHash: barProvenanceHash(withoutHash) };
+}
+
+/** Integrity of the provenance fields of a stored bar. Rows without a hash (legacy) have nothing to verify. */
+export function assertBarProvenanceIntact(b: StoredBar): void {
+  if (b.provenanceHash === null) return;
+  assertIntact('bar provenance', barKey(b), barProvenanceHash(b), b.provenanceHash);
 }
 
 export function quoteKey(q: Pick<MarketQuote, 'instrumentId' | 'source' | 'observedAt'>): string {
@@ -391,6 +438,7 @@ function stripBar(b: MarketBar): MarketBar {
     observedAt: b.observedAt,
     availableAt: b.availableAt,
     retrievedAt: b.retrievedAt,
+    knowledge: { provenance: b.knowledge.provenance, revisionKnownAt: b.knowledge.revisionKnownAt },
   };
 }
 
@@ -483,19 +531,30 @@ export class InMemoryMarketDataStore implements MarketDataStore {
     if (!d) return [];
     const asOf = parseUtc(q.asOf);
     const storedThrough = q.storedThrough ?? Number.POSITIVE_INFINITY;
+    const replay = q.replay ?? 'historical_reconstruction';
     const from = q.from === undefined ? Number.NEGATIVE_INFINITY : parseUtc(q.from);
     const to = q.to === undefined ? Number.POSITIVE_INFINITY : parseUtc(q.to);
     const out: StoredBar[] = [];
+    const refused: Array<{ instrumentId: string; startTime: string; provenance: BarKnowledgeProvenance }> = [];
     for (const revisions of d.bars.values()) {
       const first = revisions[0]!;
       if (first.source !== q.source || first.interval !== q.interval || first.session !== q.session || first.adjustment !== q.adjustment) continue;
       const start = parseUtc(first.startTime);
       if (start < from || start >= to) continue;
       const v = visibleRevision(revisions, asOf, storedThrough);
-      if (!v || ((q.finalOnly ?? true) && !v.isFinal)) continue;
+      if (!v) continue;
       assertIntact('bar', barKey(v), barContentHash(v), v.contentHash);
+      assertBarProvenanceIntact(v);
+      if ((q.finalOnly ?? true) && !v.isFinal) continue;
+      const state = classifyVisibleBar(v, asOf);
+      if (state === 'not_yet_held') continue;
+      if (state === 'unproven' && replay === 'strict_point_in_time') {
+        refused.push({ instrumentId: v.instrumentId, startTime: v.startTime, provenance: knowledgeOf(v).provenance });
+        continue;
+      }
       out.push(v);
     }
+    if (refused.length > 0) throw new BarVintageNotProvenError(refused);
     return out.sort((a, b) => parseUtc(a.startTime) - parseUtc(b.startTime));
   }
 

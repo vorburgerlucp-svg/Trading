@@ -11,6 +11,7 @@ import {
   type DataQualityIssue,
   type MarketBar,
   type MarketQuote,
+  type StoredBar,
   type StoredCorporateAction,
 } from './market-data-types.js';
 import { HOUR_MS, MINUTE_MS, isLocalDate, parseUtc, toUtcIso } from './time.js';
@@ -54,7 +55,7 @@ function price(value: unknown, field: string, rules: PriceRules, issues: DataQua
 }
 
 /** Structural checks of one bar. Empty result = structurally valid. */
-export function validateBar(bar: MarketBar, rules: PriceRules = {}): DataQualityIssue[] {
+export function validateBar(bar: MarketBar, rules: PriceRules = {}, options: { ingest?: boolean } = {}): DataQualityIssue[] {
   const issues: DataQualityIssue[] = [];
   const at = typeof bar?.startTime === 'string' ? bar.startTime : undefined;
   if (!bar || typeof bar !== 'object') return [critical('invalid_number', 'bar is not an object')];
@@ -84,6 +85,8 @@ export function validateBar(bar: MarketBar, rules: PriceRules = {}): DataQuality
     if (bar.isFinal === true && isIntraday(bar.interval) && end !== null && end > retrieved + CLOCK_SKEW_MS) issues.push(critical('future_timestamp', 'a final bar cannot end after it was retrieved', at));
   }
   if (start !== null && available !== null && available < start) issues.push(critical('invalid_time', 'availableAt before the bar started', at));
+  if (observed !== null && available !== null && available < observed) issues.push(critical('invalid_time', 'availableAt before observedAt', at));
+  issues.push(...barKnowledgeIssues(bar, observed, retrieved, at, options.ingest === true));
   if (bar.isFinal === true && isIntraday(bar.interval) && end !== null && available !== null && available < end) issues.push(critical('invalid_time', 'a final intraday bar cannot be available before it ended', at));
 
   const o = price(bar.open, 'open', rules, issues, at);
@@ -106,6 +109,39 @@ export function validateBar(bar: MarketBar, rules: PriceRules = {}): DataQuality
   return issues;
 }
 
+/** Provenances NEXUS may write for a bar revision. legacy_unproven exists only on rows stored before provenance existed. */
+const BAR_INGEST_PROVENANCE = ['captured_by_nexus', 'provider_published_at', 'historical_bar_reconstruction'] as const;
+
+/**
+ * Revision knowledge must be proven by its provenance and must never precede what it proves. A historical reconstruction
+ * has no knowledge time: NEXUS does not claim to have held that exact vintage then. A captured revision is known exactly at
+ * its retrieval. Nothing can be known before a final bar was complete. A legacy row (no provenance) is readable as legacy;
+ * it is refused only at ingest, where nothing may be labelled legacy.
+ */
+function barKnowledgeIssues(bar: MarketBar, observed: number | null, retrieved: number | null, at: string | undefined, ingest: boolean): DataQualityIssue[] {
+  const issues: DataQualityIssue[] = [];
+  const k = bar.knowledge;
+  if (!k || typeof k !== 'object' || k.provenance === 'legacy_unproven') {
+    if (ingest) issues.push(critical('invalid_time', 'knowledge provenance must be one of the ingest provenances (legacy_unproven cannot be ingested)', at));
+    else if (k && typeof k === 'object' && k.revisionKnownAt !== null) issues.push(critical('invalid_time', 'a legacy revision has no knowledge time', at));
+    return issues;
+  }
+  if (!(BAR_INGEST_PROVENANCE as readonly string[]).includes(k.provenance)) {
+    issues.push(critical('invalid_time', 'unknown knowledge provenance', at));
+    return issues;
+  }
+  if (k.provenance === 'historical_bar_reconstruction') {
+    if (k.revisionKnownAt !== null) issues.push(critical('invalid_time', 'a historical reconstruction has no revision knowledge time', at));
+    return issues;
+  }
+  const known = instant(k.revisionKnownAt, 'revisionKnownAt', issues, at);
+  if (known === null || retrieved === null) return issues;
+  if (k.provenance === 'captured_by_nexus' && known !== retrieved) issues.push(critical('invalid_time', 'a captured revision is known exactly at its retrieval', at));
+  if (known > retrieved + CLOCK_SKEW_MS) issues.push(critical('future_timestamp', 'revisionKnownAt is after retrievedAt: NEXUS cannot have held what it did not yet retrieve', at));
+  if (bar.isFinal === true && observed !== null && known < observed) issues.push(critical('invalid_time', 'a final bar cannot be known before it was complete (look-ahead)', at));
+  return issues;
+}
+
 /** Same bar with canonical UTC timestamps. Call only after validateBar() returned no issues. */
 export function normalizeBar<T extends MarketBar>(bar: T): T {
   return {
@@ -115,7 +151,28 @@ export function normalizeBar<T extends MarketBar>(bar: T): T {
     observedAt: toUtcIso(parseUtc(bar.observedAt)),
     availableAt: toUtcIso(parseUtc(bar.availableAt)),
     retrievedAt: toUtcIso(parseUtc(bar.retrievedAt)),
+    knowledge: {
+      provenance: bar.knowledge.provenance,
+      revisionKnownAt: bar.knowledge.revisionKnownAt === null ? null : toUtcIso(parseUtc(bar.knowledge.revisionKnownAt)),
+    },
   };
+}
+
+/**
+ * Integrity of what the content hash does not cover: the bar's observability and gate, when NEXUS retrieved it, and what
+ * proves its revision knowledge. Verified on every read; a privileged change of any of them fails closed.
+ */
+export function barProvenanceHash(bar: Pick<StoredBar, 'instrumentId' | 'source' | 'interval' | 'session' | 'adjustment' | 'startTime' | 'contentHash' | 'retrievedAt' | 'observedAt' | 'availableAt' | 'knowledge'>): string {
+  return hashOf({
+    contentVersion: 'market-bar-provenance:v1',
+    key: barKey(bar),
+    contentHash: bar.contentHash,
+    retrievedAt: bar.retrievedAt,
+    observedAt: bar.observedAt,
+    availableAt: bar.availableAt,
+    knowledgeProvenance: bar.knowledge.provenance,
+    revisionKnownAt: bar.knowledge.revisionKnownAt,
+  });
 }
 
 /** Identity of a bar within its series (one row per revision in storage). */

@@ -4,6 +4,7 @@ import { MarketDataQualityService, type BarSeriesContext } from '../../src/marke
 import { assessBarFreshness, assessQuoteFreshness } from '../../src/market-data/freshness.js';
 import type { MarketBar } from '../../src/market-data/market-data-types.js';
 import { CONTINUOUS_24X7, getCalendar } from '../../src/market-data/sessions.js';
+import { parseUtc, toUtcIso } from '../../src/market-data/time.js';
 import { Decimal } from '../../src/money/decimal.js';
 import { AAPL, BTC, FIXTURE_SOURCE, PRODUCTION_LIKE_SOURCE, dailyBars, flat, intradayBars, randomOhlcv } from './fixtures.js';
 
@@ -57,7 +58,8 @@ describe('MarketDataQualityService', () => {
   it('saubere Serie: ok, für Backtest nutzbar; Test-Fixture-Quelle ist nie handelbar', () => {
     const r = quality.assessBars(fiveMin(20), stockCtx('2026-11-01T00:00:00Z', 'backtest'));
     expect(r).toMatchObject({ valid: true, usableForBacktest: true, usableForTrading: false });
-    expect(r.issues.map((i) => i.code)).toEqual(['non_production_source']);
+    // The fixture is a backfill: the honest vintage warning is part of its quality, the structure is clean.
+    expect(r.issues.map((i) => i.code)).toEqual(['non_production_source', 'vintage_not_proven']);
   });
 
   it('Duplikate: identisch = Warnung, widersprüchlich = kritisch', () => {
@@ -101,7 +103,10 @@ describe('MarketDataQualityService', () => {
   });
 
   it('fehlende Bars am Fensterrand und veraltete Daten (kalenderabhängig)', () => {
-    const bars = fiveMin(10); // 13:30 … 14:15
+    const bars = fiveMin(10).map((b) => {
+      const at = toUtcIso(parseUtc(b.observedAt) + 60_000); // captured live: trading use needs proven revisions
+      return { ...b, retrievedAt: at, knowledge: { provenance: 'captured_by_nexus' as const, revisionKnownAt: at } };
+    }); // 13:30 … 14:15
     const r = quality.assessBars(bars, { ...stockCtx('2026-10-07T15:00:00Z', 'trading'), sourceInfo: PRODUCTION_LIKE_SOURCE, window: { from: '2026-10-07T13:30:00Z', to: '2026-10-07T15:00:00Z' } });
     expect(r.issues.map((i) => i.code)).toEqual(expect.arrayContaining(['missing_bars', 'stale']));
     expect(r.usableForTrading).toBe(false);

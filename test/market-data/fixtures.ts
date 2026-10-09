@@ -2,7 +2,7 @@
 // production code never ships or invents market data.
 
 import { Decimal } from '../../src/money/decimal.js';
-import type { BarInterval, BarSession, Instrument, MarketBar, MarketDataSource, PriceAdjustment } from '../../src/market-data/market-data-types.js';
+import type { BarInterval, BarRevisionKnowledge, BarSession, Instrument, MarketBar, MarketDataSource, PriceAdjustment } from '../../src/market-data/market-data-types.js';
 import { INTERVAL_MS, isIntraday } from '../../src/market-data/market-data-types.js';
 import type { TradingCalendar } from '../../src/market-data/sessions.js';
 import { addDays, parseUtc, toUtcIso } from '../../src/market-data/time.js';
@@ -102,6 +102,8 @@ export interface BarSpec {
   adjustment?: PriceAdjustment;
   /** Retrieval long after the bars (backfill); bars are final with availableAt = completion. */
   retrievedAt?: string;
+  /** Revision knowledge; default: a historical reconstruction. */
+  knowledge?: BarRevisionKnowledge;
 }
 
 /** Final daily bars on consecutive trading dates of a calendar, starting at `firstDate`. */
@@ -152,6 +154,8 @@ export function bar(r: Ohlcv, start: number, end: number, completion: number, sp
     observedAt: toUtcIso(completion),
     availableAt: toUtcIso(completion),
     retrievedAt,
+    // Fixtures are backfills by default (retrieved long after completion): reconstructions, never captures.
+    knowledge: spec.knowledge ?? { provenance: 'historical_bar_reconstruction', revisionKnownAt: null },
   };
   if (r.volume !== undefined) b.volume = Decimal.from(r.volume);
   return b;

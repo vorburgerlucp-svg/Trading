@@ -77,7 +77,8 @@ describe.skipIf(!pgAvailable)('PostgreSQL market data' + (pgAvailable ? '' : ' (
       await expect(insert({ high: '9.5' })).rejects.toThrow(/market_bars_ohlc/);
       await expect(insert({ seq: 8 })).rejects.toThrow(/does not follow head/);
       await expect(insert({ revision: 2 })).rejects.toThrow(/first revision/);
-      await expect(insert({ available: '2026-10-07T13:58:00Z' })).rejects.toThrow(/market_bars_final_intraday/);
+      // A final intraday bar cannot be available before it ended: enforced by market_bars_final_intraday (004) and, since 008, also by market_bars_available_not_before_observed.
+      await expect(insert({ available: '2026-10-07T13:58:00Z' })).rejects.toThrow(/market_bars_final_intraday|market_bars_available_not_before_observed/);
       // a later revision of an existing final bar that is "in progress" again
       await expect(insert({ start: '2026-10-07T13:30:00Z', end: '2026-10-07T13:35:00Z', revision: 2, final: false, available: '2026-11-08T00:00:00Z', retrieved: '2026-11-08T00:00:00Z' })).rejects.toThrow(/cannot be replaced by an in-progress/);
       // a revision visible before it was retrieved

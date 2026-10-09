@@ -1,15 +1,23 @@
 // Point-in-time market state for scanner/backtest consumers.
 //
-// Core invariant: a consumer at T may only observe records with availableAt <= T.
-// Events are ordered by availability, never by bar start/end. This prevents a later-delivered
-// instrument from leaking its close into portfolio valuation at another instrument's decision time.
+// Core invariant: a consumer at T may only observe bars whose usable instant is <= T. For a proven revision that instant is the
+// later of its historical gate and the instant NEXUS held it (barUsableFromMs); a reconstruction is usable from its gate.
+// Events are ordered by usability, never by bar start/end. This prevents a later-delivered instrument from leaking its close
+// into portfolio valuation at another instrument's decision time.
 
+import { barUsableFromMs } from '../market-data/bar-replay.js';
 import type { MarketBar } from '../market-data/market-data-types.js';
-import { parseUtc } from '../market-data/time.js';
+import { parseUtc, toUtcIso } from '../market-data/time.js';
+
+/** The instant from which NEXUS may use this bar (ISO UTC). */
+export function usableAtOf(bar: MarketBar): string {
+  return toUtcIso(barUsableFromMs(bar));
+}
 
 export interface BarAvailabilityEvent {
   kind: 'bar';
   instrumentId: string;
+  /** The bar's usable instant (see usableAtOf). */
   availableAt: string;
   bar: MarketBar;
 }
@@ -19,7 +27,7 @@ export function buildBarAvailabilityQueue(series: Readonly<Record<string, readon
   for (const [instrumentId, bars] of Object.entries(series)) {
     for (const bar of bars) {
       if (bar.instrumentId !== instrumentId) throw new Error('series key does not match bar instrumentId');
-      events.push({ kind: 'bar', instrumentId, availableAt: bar.availableAt, bar });
+      events.push({ kind: 'bar', instrumentId, availableAt: usableAtOf(bar), bar });
     }
   }
   return events.sort((a, b) => {
@@ -39,7 +47,7 @@ export class PointInTimeBarState {
   advance(event: BarAvailabilityEvent): void {
     const eventTime = parseUtc(event.availableAt);
     if (eventTime < this.currentTime) throw new Error('point-in-time state cannot move backwards');
-    if (parseUtc(event.bar.availableAt) !== eventTime) throw new Error('event availability does not match bar availability');
+    if (barUsableFromMs(event.bar) !== eventTime) throw new Error('event availability does not match bar availability');
     this.currentTime = eventTime;
     const history = this.historyByInstrument.get(event.instrumentId);
     if (history) {
@@ -65,7 +73,7 @@ export class PointInTimeBarState {
   historyAt(instrumentId: string, asOf: string): readonly MarketBar[] {
     const t = parseUtc(asOf);
     if (t > this.currentTime) throw new Error('cannot query point-in-time state beyond the processed event time');
-    return (this.historyByInstrument.get(instrumentId) ?? []).filter((bar) => parseUtc(bar.availableAt) <= t);
+    return (this.historyByInstrument.get(instrumentId) ?? []).filter((bar) => barUsableFromMs(bar) <= t);
   }
 
   snapshot(asOf: string): ReadonlyMap<string, MarketBar> {

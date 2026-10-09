@@ -7,9 +7,11 @@
 import { Decimal } from '../../money/decimal.js';
 import { encodeJson } from '../json-codec.js';
 import { barContentHash, barKey, corporateActionContentHash, quoteContentHash } from '../../market-data/bar-validation.js';
+import { BarVintageNotProvenError, classifyVisibleBar, knowledgeOf } from '../../market-data/bar-replay.js';
 import { selectReplayRevision } from '../../market-data/corporate-actions.js';
 import {
   MarketDataStoreError,
+  assertBarProvenanceIntact,
   assertIntact,
   assertProvenanceIntact,
   corporateActionKey,
@@ -27,8 +29,8 @@ import {
   type MarketDataStore,
   type QuoteQuery,
 } from '../../market-data/market-data-store.js';
-import type { CorporateAction, CorporateActionKnowledgeProvenance, MarketBar, MarketDataSource, MarketQuote, QuarantineRecord, StoredBar, StoredCorporateAction, StoredQuote } from '../../market-data/market-data-types.js';
-import { canonicalUtc } from '../../market-data/time.js';
+import type { BarKnowledgeProvenance, CorporateAction, CorporateActionKnowledgeProvenance, MarketBar, MarketDataSource, MarketQuote, QuarantineRecord, StoredBar, StoredCorporateAction, StoredQuote } from '../../market-data/market-data-types.js';
+import { canonicalUtc, parseUtc } from '../../market-data/time.js';
 import type { PgClient, PgPool } from './pool.js';
 
 const CHUNK = 1000;
@@ -55,8 +57,12 @@ interface BarRow {
   retrieved_at: Date;
   ingest_seq_text: string;
   content_hash: string;
+  knowledge_provenance: string | null;
+  revision_known_at: Date | null;
+  provenance_hash: string | null;
 }
 
+/** A NULL provenance is a row stored before provenance existed: its knowledge is unproven, and nothing is inferred for it. */
 function toBar(r: BarRow): StoredBar {
   const bar: StoredBar = {
     instrumentId: r.instrument_id,
@@ -74,9 +80,14 @@ function toBar(r: BarRow): StoredBar {
     observedAt: ts(r.observed_at),
     availableAt: ts(r.available_at),
     retrievedAt: ts(r.retrieved_at),
+    knowledge:
+      r.knowledge_provenance === null
+        ? { provenance: 'legacy_unproven', revisionKnownAt: null }
+        : { provenance: r.knowledge_provenance as BarKnowledgeProvenance, revisionKnownAt: r.revision_known_at === null ? null : ts(r.revision_known_at) },
     revision: r.revision,
     ingestSeq: Number(r.ingest_seq_text),
     contentHash: r.content_hash,
+    provenanceHash: r.provenance_hash,
   };
   if (r.volume !== null) bar.volume = Decimal.from(r.volume);
   return bar;
@@ -179,7 +190,7 @@ function toAction(r: ActionRow): StoredCorporateAction {
   return a;
 }
 
-const BAR_COLUMNS = 'instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq::text AS ingest_seq_text, content_hash';
+const BAR_COLUMNS = 'instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq::text AS ingest_seq_text, content_hash, knowledge_provenance, revision_known_at, provenance_hash';
 const QUOTE_COLUMNS = 'instrument_id, source_id, observed_at, revision, last_price, bid, ask, open, high, low, previous_close, volume, currency, market_open, available_at, retrieved_at, ingest_seq::text AS ingest_seq_text, content_hash';
 const ACTION_COLUMNS = "instrument_id, source_id, action_key, revision, type, to_char(ex_date, 'YYYY-MM-DD') AS ex_date_text, ratio_from, ratio_to, cash_amount, currency, old_symbol, new_symbol, announced_at, available_at, retrieved_at, ingest_seq::text AS ingest_seq_text, content_hash, knowledge_provenance, knowledge_at, provenance_hash";
 
@@ -297,9 +308,9 @@ export class PostgresMarketDataStore implements MarketDataStore {
       async (client, rows) => {
         const col = <K extends keyof StoredBar>(k: K) => rows.map((r) => r[k]);
         await client.query(
-          `INSERT INTO market_bars (instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq, content_hash)
-           SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::timestamptz[], $7::timestamptz[], $8::int[], $9::numeric[], $10::numeric[], $11::numeric[], $12::numeric[], $13::numeric[], $14::boolean[], $15::timestamptz[], $16::timestamptz[], $17::timestamptz[], $18::bigint[], $19::text[])
-           AS t(instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq, content_hash)
+          `INSERT INTO market_bars (instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq, content_hash, knowledge_provenance, revision_known_at, provenance_hash)
+           SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::timestamptz[], $7::timestamptz[], $8::int[], $9::numeric[], $10::numeric[], $11::numeric[], $12::numeric[], $13::numeric[], $14::boolean[], $15::timestamptz[], $16::timestamptz[], $17::timestamptz[], $18::bigint[], $19::text[], $20::text[], $21::timestamptz[], $22::text[])
+           AS t(instrument_id, source_id, bar_interval, session, adjustment, start_time, end_time, revision, open, high, low, close, volume, is_final, observed_at, available_at, retrieved_at, ingest_seq, content_hash, knowledge_provenance, revision_known_at, provenance_hash)
            ORDER BY ingest_seq`,
           [
             col('instrumentId'),
@@ -321,6 +332,9 @@ export class PostgresMarketDataStore implements MarketDataStore {
             col('retrievedAt'),
             rows.map((r) => String(r.ingestSeq)),
             col('contentHash'),
+            rows.map((r) => r.knowledge.provenance),
+            rows.map((r) => r.knowledge.revisionKnownAt),
+            col('provenanceHash'),
           ],
         );
       },
@@ -339,11 +353,26 @@ export class PostgresMarketDataStore implements MarketDataStore {
        ) v WHERE (NOT $10::boolean OR v.is_final) ORDER BY v.start_time`,
       params,
     );
-    return rows.map((r) => {
+    // Same rule as the in-memory store: the highest visible revision per bar (above) is used only if it is proven and held by asOf,
+    // or, in historical reconstruction, labelled as unproven. A strict replay refuses an unproven one.
+    const replay = q.replay ?? 'historical_reconstruction';
+    const asOfMs = parseUtc(q.asOf);
+    const out: StoredBar[] = [];
+    const refused: Array<{ instrumentId: string; startTime: string; provenance: BarKnowledgeProvenance }> = [];
+    for (const r of rows) {
       const bar = toBar(r);
       assertIntact('bar', barKey(bar), barContentHash(bar), bar.contentHash);
-      return bar;
-    });
+      assertBarProvenanceIntact(bar);
+      const state = classifyVisibleBar(bar, asOfMs);
+      if (state === 'not_yet_held') continue;
+      if (state === 'unproven' && replay === 'strict_point_in_time') {
+        refused.push({ instrumentId: bar.instrumentId, startTime: bar.startTime, provenance: knowledgeOf(bar).provenance });
+        continue;
+      }
+      out.push(bar);
+    }
+    if (refused.length > 0) throw new BarVintageNotProvenError(refused);
+    return out;
   }
 
   ingestQuotes(instrument: IngestInstrument, quotes: readonly MarketQuote[], receivedAt: string): Promise<IngestSummary> {

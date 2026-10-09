@@ -2,10 +2,12 @@
 // except through ProviderInstrumentMapping.
 //
 // Prices are exact Decimals (never binary floats). Every instant is a UTC ISO string ("...Z").
-// Every piece of market information carries three timestamps (point-in-time):
-//   observedAt  – when the value was true at the source (bar close / quote time)
-//   availableAt – when it became available; a replay at T only sees availableAt <= T
+// Every piece of market information carries point-in-time facts (see docs/MARKET_BAR_PROVENANCE.md for bars):
+//   observedAt  – MARKET OBSERVABILITY: when the value was true at the source (bar completion / quote time)
+//   availableAt – replay gate of the default historical reconstruction: a replay at T uses it only if availableAt <= T.
+//                 For bars it is never a claim that NEXUS held the value then (that is `knowledge`).
 //   retrievedAt – when NEXUS fetched it
+//   knowledge   – DATA REVISION KNOWLEDGE of a bar revision: how, and from when, this exact revision is provably known
 
 import type { Decimal } from '../money/decimal.js';
 
@@ -59,6 +61,28 @@ export type BarSession = 'regular' | 'extended' | 'continuous';
 /** Raw and adjusted data are different series and are never mixed. */
 export type PriceAdjustment = 'raw' | 'split_adjusted' | 'total_return_adjusted';
 
+/**
+ * How a bar REVISION is known. Market observability (observedAt) is not knowledge: a revision of a bar completed in 2020 can be
+ * retrieved in 2026, and then it is a reconstruction, not proof that NEXUS held it in 2020.
+ *   captured_by_nexus                NEXUS received this revision live. revisionKnownAt = retrievedAt. Strong.
+ *   provider_published_at            the provider states when this revision was published. revisionKnownAt = that time. Not used by Twelve Data.
+ *   historical_bar_reconstruction    a historical backfill: window, values and market existence are known; the exact vintage is not. revisionKnownAt = null.
+ *   legacy_unproven                  stored before provenance existed. revisionKnownAt = null. Never invented, never strict.
+ */
+export type BarKnowledgeProvenance = 'captured_by_nexus' | 'provider_published_at' | 'historical_bar_reconstruction' | 'legacy_unproven';
+
+/** Provenances that prove when a revision was known. Only these can support strict point-in-time use. */
+export const PROVEN_BAR_PROVENANCE: readonly BarKnowledgeProvenance[] = ['captured_by_nexus', 'provider_published_at'];
+
+export interface BarRevisionKnowledge {
+  provenance: BarKnowledgeProvenance;
+  /** ISO UTC instant from which this exact revision is provably held. null unless the provenance proves it. */
+  revisionKnownAt: string | null;
+}
+
+/** How a replay reads bars. Strict replay refuses what it cannot prove (fail closed). */
+export type BarReplayMode = 'historical_reconstruction' | 'strict_point_in_time';
+
 export interface MarketBar {
   instrumentId: string;
   interval: BarInterval;
@@ -77,9 +101,14 @@ export interface MarketBar {
   adjustment: PriceAdjustment;
   /** False while the bar is still forming. Signals and backtests use final bars only by default. */
   isFinal: boolean;
+  /** MARKET OBSERVABILITY: the instant the value was complete (final bar) or observed (in-progress bar) at the source. */
   observedAt: string;
+  /** Historical replay gate (market observability plus the NEXUS revision floor). Not a knowledge claim: see `knowledge`. */
   availableAt: string;
+  /** NEXUS capture of this revision. */
   retrievedAt: string;
+  /** DATA REVISION KNOWLEDGE: how this exact revision is known. Required on every bar. */
+  knowledge: BarRevisionKnowledge;
 }
 
 /** A bar as stored: every change of a bar becomes a new revision, nothing is overwritten. */
@@ -87,7 +116,10 @@ export interface StoredBar extends MarketBar {
   revision: number;
   /** Position in the per-instrument ingest sequence (reproducibility anchor, see storedThrough). */
   ingestSeq: number;
+  /** Economic content identity (change detection between revisions). Excludes provenance and retrieval. */
   contentHash: string;
+  /** Integrity of observability, gate, retrieval and knowledge. null for legacy rows, where there was nothing to protect. */
+  provenanceHash: string | null;
 }
 
 export interface MarketQuote {
@@ -213,7 +245,9 @@ export type DataQualityCode =
   | 'calendar_coverage'
   | 'final_regression'
   | 'revised'
-  | 'provider_disagreement';
+  | 'provider_disagreement'
+  | 'vintage_not_proven'
+  | 'legacy_provenance_unproven';
 
 export interface DataQualityIssue {
   code: DataQualityCode;

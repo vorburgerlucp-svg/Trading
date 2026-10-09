@@ -24,6 +24,11 @@ export interface ScannerDefinition {
   filters: ScannerFilter[];
   ranking: ScannerRankingRule[];
   maxCandidates: number;
+  /**
+   * live_trading (default): every input must be trading-usable, which requires proven bar revisions. research: valid data is enough;
+   * historical reconstructions may be scanned, and every candidate says whether its bars were strict point in time.
+   */
+  useCase?: 'live_trading' | 'research';
 }
 
 export interface ScannerSnapshot {
@@ -46,6 +51,8 @@ export interface ScannerCandidate {
   rankingScore: number;
   rank: number;
   dataQualityStatus: string;
+  /** Whether every bar behind the candidate's quant run was a proven revision held by asOf. */
+  strictPointInTime: boolean;
 }
 
 export interface ScannerCoverage {

@@ -7,7 +7,7 @@ import { CorporateActionTimingError, SPLIT_ADJUSTMENT_VERSION, splitAdjustBars }
 import type { FreshnessUseCase } from '../market-data/freshness.js';
 import type { InstrumentRegistry } from '../market-data/instrument-registry.js';
 import type { MarketDataStore } from '../market-data/market-data-store.js';
-import type { BarInterval, BarSession, MarketBar, PriceAdjustment } from '../market-data/market-data-types.js';
+import type { BarInterval, BarReplayMode, BarSession, MarketBar, PriceAdjustment } from '../market-data/market-data-types.js';
 import { calendarForInstrument } from '../market-data/sessions.js';
 import { canonicalUtc, toUtcIso } from '../market-data/time.js';
 import { computeQuant, quantResultHash } from './quant-engine.js';
@@ -36,6 +36,11 @@ export interface QuantRunRequest {
   /** Pin to an earlier ingest sequence (replay); default: the current head. */
   storedThrough?: number;
   useCase?: FreshnessUseCase;
+  /**
+   * historical_reconstruction (default): unproven bars are used from their historical gate and the run says so (barDataProvenance).
+   * strict_point_in_time: a bar whose revision is not proven makes the read fail closed (BarVintageNotProvenError).
+   */
+  replay?: BarReplayMode;
 }
 
 export class QuantService {
@@ -49,11 +54,12 @@ export class QuantService {
     const instrument = this.deps.registry.get(request.instrumentId);
     if (!instrument) throw new Error('unknown instrument ' + request.instrumentId);
     const asOf = canonicalUtc(request.asOf);
+    const replay = request.replay ?? 'historical_reconstruction';
     if (request.adjustment !== 'split_adjusted') {
-      return this.deps.store.readBars({ instrumentId: request.instrumentId, source: request.source, interval: request.interval, session: request.session, adjustment: request.adjustment, asOf, storedThrough, ...(request.from ? { from: request.from } : {}) });
+      return this.deps.store.readBars({ instrumentId: request.instrumentId, source: request.source, interval: request.interval, session: request.session, adjustment: request.adjustment, asOf, storedThrough, replay, ...(request.from ? { from: request.from } : {}) });
     }
     // Derived adjustment from raw bars + corporate actions known at asOf (never provider-adjusted data mixed in).
-    const raw = await this.deps.store.readBars({ instrumentId: request.instrumentId, source: request.source, interval: request.interval, session: request.session, adjustment: 'raw', asOf, storedThrough, ...(request.from ? { from: request.from } : {}) });
+    const raw = await this.deps.store.readBars({ instrumentId: request.instrumentId, source: request.source, interval: request.interval, session: request.session, adjustment: 'raw', asOf, storedThrough, replay, ...(request.from ? { from: request.from } : {}) });
     const calendar = calendarForInstrument(instrument);
     if (!calendar) throw new Error('split adjustment needs a trading calendar for ' + request.instrumentId);
     // Information replay: only splits whose knowledge is provable at asOf may shape a quant series. An effective split that

@@ -11,9 +11,11 @@
 // stored and carry availableAt = max(bar, knowledge of the splits applied): an adjusted price is only knowable once the split is.
 
 import { Decimal, type RoundingMode } from '../money/decimal.js';
+import { isProvenKnowledge as isProvenBarKnowledge, knowledgeOf } from './bar-replay.js';
 import {
   DataQualityError,
   PROVEN_KNOWLEDGE_PROVENANCE,
+  type BarRevisionKnowledge,
   type CorporateActionKnowledge,
   type CorporateActionKnowledgeProvenance,
   type MarketBar,
@@ -110,6 +112,20 @@ function toApplication(a: StoredCorporateAction): SplitApplication {
   };
 }
 
+/**
+ * Revision knowledge of an adjusted bar: it is only as well known as its inputs. A legacy bar stays legacy and a reconstruction
+ * stays a reconstruction; a proven bar with a split whose knowledge is unproven is a reconstruction too. A fully proven adjusted
+ * bar is known from the later of its own knowledge and the knowledge of every split applied. Nothing is invented.
+ */
+function derivedBarKnowledge(bar: MarketBar, splits: readonly StoredCorporateAction[]): BarRevisionKnowledge {
+  const own = knowledgeOf(bar);
+  if (!isProvenBarKnowledge(own) || splits.some((a) => !isProvenKnowledge(a.knowledge))) {
+    return { provenance: own.provenance === 'legacy_unproven' ? 'legacy_unproven' : 'historical_bar_reconstruction', revisionKnownAt: null };
+  }
+  const knownMs = Math.max(parseUtc(own.revisionKnownAt!), ...splits.map((a) => parseUtc(a.knowledge.knowledgeAt!)));
+  return { provenance: own.provenance, revisionKnownAt: toUtcIso(knownMs) };
+}
+
 /** Trading date of a bar for split purposes (a split takes effect at the start of its ex-date session). */
 function barTradingDate(bar: MarketBar, calendar: TradingCalendar): string {
   const start = parseUtc(bar.startTime);
@@ -177,6 +193,7 @@ export function splitAdjustBars(rawBars: readonly MarketBar[], actions: readonly
       adjustment: 'split_adjusted',
       availableAt: toUtcIso(availableAt),
       retrievedAt: toUtcIso(retrievedAt),
+      knowledge: derivedBarKnowledge(bar, later),
     };
     if (bar.volume !== undefined) adjusted.volume = bar.volume.times(den).dividedBy(num, bar.volume.scale + SPLIT_PRICE_EXTRA_SCALE, ROUNDING);
     else delete adjusted.volume;

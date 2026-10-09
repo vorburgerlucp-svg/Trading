@@ -53,6 +53,7 @@ function scannerRun(o: { c: string; asOf?: string; candidates: { instrumentId: s
     rankingScore: 1 - i / 10,
     rank: i + 1,
     dataQualityStatus: 'fresh',
+    strictPointInTime: true,
   }));
   const definition = { id: 'momentum', version: '1', universeId: 'universe-test', interval: '1d', filters: [], ranking: [], maxCandidates: 10 };
   return {
@@ -131,7 +132,7 @@ function backtestRun(o: { c: string; instrumentId?: string; grade?: BacktestRunR
       totalFees: D('0'),
       exposurePct: 10,
     },
-    quality: { grade, reasons: grade === 'INVALID' ? ['market data is incomplete'] : [], insufficientSample: o.insufficientSample ?? false },
+    quality: { grade, reasons: grade === 'INVALID' ? ['market data is incomplete'] : [], insufficientSample: o.insufficientSample ?? false, dataProvenance: 'STRICT_PIT_DATA' as const },
     ambiguousBars: 0,
     // One evaluation on the single bar, before any fixture fill, with the whole history at preferredBars = requiredBars = 1.
     warmup: { algorithmVersion: 'test-warmup:v1', requiredBars: 1, preferredBars: 1, requiredWarmupMet: true, preferredWarmupMet: true, firstStrategyEvaluationAt: '2026-09-01T00:00:00.000Z', preferredWarmupCompleteAt: '2026-09-01T00:00:00.000Z', warmupBars: 0, tradableBars: 1, strategyEvaluations: 1, evaluationsBelowPreferred: 0 },

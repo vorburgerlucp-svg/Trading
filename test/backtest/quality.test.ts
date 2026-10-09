@@ -8,6 +8,7 @@ describe('BacktestQuality', () => {
       3,
       0,
       false,
+      { total: 0, proven: 0, historical: 0, legacy: 0 },
     );
     expect(result.grade).toBe('C');
     expect(result.insufficientSample).toBe(true);
@@ -21,6 +22,7 @@ describe('BacktestQuality', () => {
       100,
       0,
       false,
+      { total: 0, proven: 0, historical: 0, legacy: 0 },
     );
     expect(result.grade).toBe('INVALID');
   });

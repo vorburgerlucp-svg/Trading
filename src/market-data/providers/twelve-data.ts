@@ -15,6 +15,7 @@ import {
   isIntraday,
   type AssetClass,
   type BarInterval,
+  type BarRevisionKnowledge,
   type BarSession,
   type CorporateAction,
   type Instrument,
@@ -61,6 +62,11 @@ export interface TwelveDataOptions {
   deps?: ResilienceDeps;
   /** Delay after a bar's completion before it counts as final (provider settlement). */
   settleMs?: { intraday: number; daily: number };
+  /**
+   * A final bar fetched no later than this after its completion is captured live (NEXUS holds that revision from its retrieval).
+   * Later fetches are historical reconstructions. Explicit policy, reviewed in code (docs/MARKET_BAR_PROVENANCE.md, section 3.5).
+   */
+  captureWindowMs?: { intraday: number; daily: number };
   license?: LicenseClass;
   licenseNote?: string;
   calendarFor?: (instrument: Instrument) => TradingCalendar | null;
@@ -79,6 +85,13 @@ function defaultFetch(): FetchLike {
   };
 }
 
+/**
+ * Live-capture window after a final bar's completion. 15 minutes intraday covers a polling cycle and stays well above the 60 s
+ * settlement delay; 2 hours daily covers the same for the end of day. Both are conservative choices for the owner to confirm: a
+ * different value only moves bars between the two classes, it never creates knowledge.
+ */
+export const DEFAULT_CAPTURE_WINDOW_MS = Object.freeze({ intraday: 15 * 60_000, daily: 2 * 3_600_000 });
+
 function sessionFor(instrument: Instrument): BarSession {
   return instrument.assetClass === 'crypto' || instrument.assetClass === 'forex' ? 'continuous' : 'regular';
 }
@@ -96,6 +109,7 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
   private readonly clock: () => Date;
   private readonly caller: ResilientCaller;
   private readonly settle: { intraday: number; daily: number };
+  private readonly captureWindow: { intraday: number; daily: number };
   private readonly calendarFor: (instrument: Instrument) => TradingCalendar | null;
   /** Non-secret settings only. The key is NEVER kept in an enumerable field (JSON/inspect/log safe). */
   private readonly settings: { environment: 'production' | 'demo'; license?: LicenseClass; licenseNote?: string; maxPages?: number; minimalRequests: boolean };
@@ -108,6 +122,7 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
     this.clock = options.clock ?? (() => new Date());
     this.caller = new ResilientCaller(PROVIDER, options.resilience, options.deps ?? REAL_DEPS);
     this.settle = options.settleMs ?? { intraday: 60_000, daily: 15 * 60_000 };
+    this.captureWindow = options.captureWindowMs ?? DEFAULT_CAPTURE_WINDOW_MS;
     this.calendarFor = options.calendarFor ?? calendarForInstrument;
     this.settings = {
       environment: options.environment,
@@ -248,7 +263,14 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
         completion = calendar?.dailyBarCompletion(v.datetime) ?? end;
       }
       const isFinal = completion + (isIntraday(interval) ? this.settle.intraday : this.settle.daily) <= retrievedMs;
-      const known = isFinal ? toUtcIso(completion) : retrievedAt;
+      // MARKET OBSERVABILITY: the completion of a final bar; the observation instant of an in-progress bar.
+      const observed = isFinal ? toUtcIso(completion) : retrievedAt;
+      // DATA REVISION KNOWLEDGE. An in-progress bar is the current bar, fetched now: NEXUS holds it from this retrieval. A final
+      // bar is captured live only if fetched within the capture window after its completion; any later fetch (a backfill) is a
+      // historical reconstruction. The provider publishes no vintage or publication time, so none is claimed.
+      const captureWindow = isIntraday(interval) ? this.captureWindow.intraday : this.captureWindow.daily;
+      const live = !isFinal || retrievedMs - completion <= captureWindow;
+      const knowledge: BarRevisionKnowledge = live ? { provenance: 'captured_by_nexus', revisionKnownAt: retrievedAt } : { provenance: 'historical_bar_reconstruction', revisionKnownAt: null };
       const bar: MarketBar = {
         instrumentId: instrument.instrumentId,
         interval,
@@ -262,9 +284,11 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
         session,
         adjustment: request.adjustment,
         isFinal,
-        observedAt: known,
-        availableAt: known,
+        observedAt: observed,
+        // Historical replay gate: the provider's completion claim, as before. Not knowledge (see `knowledge`).
+        availableAt: observed,
         retrievedAt,
+        knowledge,
       };
       // FX "volume" from aggregators is not traded volume: treated as unavailable, never used.
       if (v.volume !== undefined && instrument.assetClass !== 'forex') bar.volume = Decimal.from(v.volume);

@@ -21,7 +21,7 @@ function bar(instrumentId: string, startTime: string, availableAt: string, close
     isFinal: true,
     observedAt: availableAt,
     availableAt,
-    retrievedAt: availableAt,
+    retrievedAt: availableAt, knowledge: { provenance: 'historical_bar_reconstruction', revisionKnownAt: null },
   };
 }
 

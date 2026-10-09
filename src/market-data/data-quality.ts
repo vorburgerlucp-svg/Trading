@@ -8,6 +8,7 @@
 //   warning  – usable with care (gaps, stale, partial bars, out-of-order input, calendar uncertainty)
 
 import { barContentHash, validateBar, validateQuote } from './bar-validation.js';
+import { barUsableFromMs, countBarProvenance } from './bar-replay.js';
 import { assessBarFreshness, assessQuoteFreshness, type FreshnessPolicy, type FreshnessUseCase } from './freshness.js';
 import { isIntraday, type BarInterval, type BarSession, type DataQualityIssue, type DataQualityResult, type Instrument, type MarketBar, type MarketDataSource, type MarketQuote, type PriceAdjustment, type Severity } from './market-data-types.js';
 import type { SessionScope, TradingCalendar } from './sessions.js';
@@ -98,7 +99,7 @@ export class MarketDataQualityService {
         continue;
       }
       const start = parseUtc(bar.startTime);
-      if (parseUtc(bar.availableAt) > asOf || start >= asOf) {
+      if (barUsableFromMs(bar) > asOf || start >= asOf) {
         c.add({ code: 'not_yet_available', severity: 'error', message: 'bar was not available at asOf ' + ctx.asOf + ' (look-ahead)', at: bar.startTime });
         continue;
       }
@@ -194,14 +195,25 @@ export class MarketDataQualityService {
       }
     }
 
+    // Revision knowledge: bars used without a proof of their revision are labelled, never presented as strict point in time.
+    // A historical reconstruction is fine for research; trading needs proven revisions only.
+    const provenance = countBarProvenance(unique);
+    if (provenance.historical > 0) {
+      c.add({ code: 'vintage_not_proven', severity: 'warning', message: provenance.historical + ' bar(s) are historical reconstructions: their exact vintage is not proven', count: provenance.historical });
+    }
+    if (provenance.legacy > 0) {
+      c.add({ code: 'legacy_provenance_unproven', severity: 'warning', message: provenance.legacy + ' bar(s) stored without provenance: their revision knowledge is unproven', count: provenance.legacy });
+    }
+
     // Trading needs a known production source; unknown provenance is never tradable.
     const production = ctx.sourceInfo?.environment === 'production';
     return c.result((issues, severity) => {
       const has = (code: DataQualityIssue['code']) => issues.some((i) => i.code === code);
       const valid = RANK[severity] < RANK.error;
+      const vintageProven = !has('vintage_not_proven') && !has('legacy_provenance_unproven');
       return {
         usableForBacktest: valid && !has('partial_bar') && unique.length > 0,
-        usableForTrading: valid && !stale && !has('partial_bar') && unique.length > 0 && ctx.calendar !== null && !freshnessAssumed && production && !has('missing_bars'),
+        usableForTrading: valid && !stale && !has('partial_bar') && unique.length > 0 && ctx.calendar !== null && !freshnessAssumed && production && !has('missing_bars') && vintageProven,
       };
     });
   }

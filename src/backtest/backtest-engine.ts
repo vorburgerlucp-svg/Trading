@@ -1,16 +1,17 @@
-// Single-instrument deterministic Backtest Engine core (backtest-engine:v2).
+// Single-instrument deterministic Backtest Engine core (backtest-engine:v3).
 //
-// Event convention per final bar becoming available:
+// Event convention per final bar becoming usable (its usable instant: its gate, or for a proven revision the instant NEXUS held it):
 //   1. process a market order created from an earlier bar at this bar's OPEN
 //   2. process protective stop/take-profit over this bar
 //   3. mark the portfolio at this bar's CLOSE, now that the bar is available
 //   4. warm-up gate: while fewer than requiredBars bars are available at this event, stop here.
 //      The strategy is not called, so warm-up can create no decision, no order and no fill.
-//   5. evaluate the strategy using only bars with availableAt <= this event time
+//   5. evaluate the strategy using only bars whose usable instant is <= this event time
 //   6. create (but never fill) new market orders for a later bar
 //
 // This intentionally forbids same-bar execution from final-close decisions.
 
+import { barUsableFromMs, countBarProvenance, knowledgeOf } from '../market-data/bar-replay.js';
 import type { MarketBar } from '../market-data/market-data-types.js';
 import { parseUtc } from '../market-data/time.js';
 import { Decimal } from '../money/decimal.js';
@@ -25,7 +26,8 @@ import type { BacktestFill, BacktestInput, BacktestPosition, BacktestQuality, Ba
 import type { BacktestStrategy, StrategyDecision } from './strategy.js';
 import { validateWarmupPlan, type WarmupPlan } from './warmup.js';
 
-export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v2';
+/** v3: bars are timed by their usable instant (proven revisions from the instant NEXUS held them) and graded by provenance. */
+export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v3';
 
 interface PendingOrder {
   side: 'buy' | 'sell';
@@ -39,7 +41,8 @@ function minDecimal(a: Decimal, b: Decimal): Decimal {
 }
 
 function barFingerprint(bar: MarketBar): unknown[] {
-  return [bar.instrumentId, bar.startTime, bar.endTime, bar.open, bar.high, bar.low, bar.close, bar.volume ?? null, bar.availableAt, bar.isFinal, bar.source, bar.adjustment];
+  const knowledge = knowledgeOf(bar);
+  return [bar.instrumentId, bar.startTime, bar.endTime, bar.open, bar.high, bar.low, bar.close, bar.volume ?? null, bar.observedAt, bar.availableAt, bar.retrievedAt, knowledge.provenance, knowledge.revisionKnownAt, bar.isFinal, bar.source, bar.adjustment];
 }
 
 function decisionToPending(decision: StrategyDecision, currentBar: MarketBar): PendingOrder | null {
@@ -56,7 +59,7 @@ function assertChronologicalAvailability(bars: readonly MarketBar[]): void {
   const ordered = [...bars].sort((a, b) => parseUtc(a.startTime) - parseUtc(b.startTime));
   let previousAvailable = Number.NEGATIVE_INFINITY;
   for (const bar of ordered) {
-    const available = parseUtc(bar.availableAt);
+    const available = barUsableFromMs(bar);
     if (available < previousAvailable) {
       throw new Error('V1 backtest does not support per-instrument availability inversion; an older bar arrived after a newer bar');
     }
@@ -80,6 +83,7 @@ function applyWarmupToQuality(base: BacktestQuality, w: { requiredWarmupMet: boo
       grade: 'INVALID',
       reasons: ['INSUFFICIENT_WARMUP_HISTORY: ' + w.barsProcessed + ' bar(s) available, requiredBars ' + w.requiredBars + '; the strategy was never evaluated, so no order or fill exists', ...base.reasons],
       insufficientSample: base.insufficientSample,
+      dataProvenance: base.dataProvenance,
     };
   }
   if (!w.preferredWarmupMet) {
@@ -223,7 +227,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
   const preferredWarmupMet = strategyEvaluations > 0 && evaluationsBelowPreferred === 0;
   const endingEquity = equityCurve.at(-1)?.equity ?? cash;
   const metrics = backtestMetrics({ startingCapital: input.initialCapital, endingEquity, trades, equityCurve, totalFees, exposedPoints, tradablePoints: tradableBars });
-  const assessed = assessBacktestQuality(input.quality, trades.length, ambiguousBars, costModel.isZeroCost());
+  const assessed = assessBacktestQuality(input.quality, trades.length, ambiguousBars, costModel.isZeroCost(), countBarProvenance(input.bars));
   const quality = applyWarmupToQuality(assessed, { requiredWarmupMet, preferredWarmupMet, barsProcessed, requiredBars: warmup.requiredBars, preferredBars: warmup.preferredBars, strategyEvaluations, evaluationsBelowPreferred });
   const warmupResult: BacktestWarmupResult = {
     algorithmVersion: warmup.algorithmVersion,

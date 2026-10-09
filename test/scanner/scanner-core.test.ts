@@ -11,7 +11,11 @@ import { AAPL, PRODUCTION_LIKE_SOURCE, dailyBars, randomOhlcv } from '../market-
 const XNAS = getCalendar('XNAS')!;
 
 function quant() {
-  const bars = dailyBars(XNAS, '2026-01-05', randomOhlcv(220, 77), { source: PRODUCTION_LIKE_SOURCE.sourceId });
+  // Bars captured live: NEXUS held each revision one minute after its completion, so trading use is proven (not a backfill).
+  const bars = dailyBars(XNAS, '2026-01-05', randomOhlcv(220, 77), { source: PRODUCTION_LIKE_SOURCE.sourceId }).map((b) => {
+    const at = toUtcIso(parseUtc(b.observedAt) + 60_000);
+    return { ...b, retrievedAt: at, knowledge: { provenance: 'captured_by_nexus' as const, revisionKnownAt: at } };
+  });
   // Trading freshness belongs to the scanner contract. Keep the fixture at the first instant after
   // the latest final bar instead of choosing a later wall-clock date that would correctly be stale.
   const asOf = toUtcIso(parseUtc(bars.at(-1)!.availableAt) + 60_000);
@@ -146,5 +150,33 @@ describe('market scanner core', () => {
     expect(run.candidates).toHaveLength(0);
     expect(run.coverage.duplicateInstruments).toEqual([AAPL.instrumentId]);
     expect(run.rankingComplete).toBe(false);
+  });
+});
+
+describe('bar provenance in the scanner (live trading versus research)', () => {
+  // The default fixture bars are backfills (historical reconstructions): their vintage is not proven.
+  function reconstructedQuant() {
+    const bars = dailyBars(XNAS, '2026-01-05', randomOhlcv(220, 77), { source: PRODUCTION_LIKE_SOURCE.sourceId });
+    const asOf = toUtcIso(parseUtc(bars.at(-1)!.availableAt) + 60_000);
+    const q = computeQuant(
+      { instrument: AAPL, calendar: XNAS, series: { source: PRODUCTION_LIKE_SOURCE.sourceId, interval: '1d', session: 'regular', adjustment: 'raw' }, bars, asOf, sourceInfo: PRODUCTION_LIKE_SOURCE, useCase: 'analysis' },
+      { createdAt: '2026-12-31T00:00:00.000Z' },
+    );
+    return { q, asOf };
+  }
+
+  it('a live scan refuses a candidate built on reconstructed bars, and says why', () => {
+    const { q, asOf } = reconstructedQuant();
+    expect(q.barDataProvenance.strictPointInTime).toBe(false);
+    const run = runMarketScanner(definition(), scannerUniverse(asOf), [scannerSnapshot(q, asOf)], asOf);
+    expect(run.candidates).toHaveLength(0);
+    expect(run.rejected[0]!.reasons).toEqual(expect.arrayContaining(['market data not usable for trading', 'bar revisions not proven point in time: a historical reconstruction cannot back a live signal']));
+  });
+
+  it('a research scan may use the same candidate and marks it as not strict point in time', () => {
+    const { q, asOf } = reconstructedQuant();
+    const run = runMarketScanner({ ...definition(), useCase: 'research' }, scannerUniverse(asOf), [scannerSnapshot(q, asOf)], asOf);
+    expect(run.candidates).toHaveLength(1);
+    expect(run.candidates[0]).toMatchObject({ instrumentId: AAPL.instrumentId, strictPointInTime: false });
   });
 });

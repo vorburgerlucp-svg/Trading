@@ -64,10 +64,14 @@ export interface BacktestMetrics {
   exposurePct: number;
 }
 
+/** The revision knowledge of the bars a backtest used (see docs/MARKET_BAR_PROVENANCE.md). */
+export type BacktestDataProvenance = 'STRICT_PIT_DATA' | 'HISTORICAL_RECONSTRUCTION' | 'LEGACY_UNPROVEN';
+
 export interface BacktestQuality {
   grade: 'A' | 'B' | 'C' | 'INVALID';
   reasons: string[];
   insufficientSample: boolean;
+  dataProvenance: BacktestDataProvenance;
 }
 
 export interface BacktestRunResult {

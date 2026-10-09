@@ -54,7 +54,14 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
       else if (parseUtc(snapshot.averageVolumeAvailableAt) > asOfMs) reasons.push('average volume not yet available at scanner asOf');
     }
     if (snapshot.quant.mode !== 'final_only') reasons.push('in-progress quant result');
-    if (!snapshot.quant.dataQuality.usableForTrading) reasons.push('market data not usable for trading');
+    if (definition.useCase === 'research') {
+      // Research: valid data is enough. Reconstructed bars are allowed and are marked on the candidate; nothing is presented as strict.
+      if (!snapshot.quant.dataQuality.valid) reasons.push('market data invalid');
+    } else {
+      if (!snapshot.quant.dataQuality.usableForTrading) reasons.push('market data not usable for trading');
+      // A live signal may rest only on revisions NEXUS can prove it held.
+      if (!snapshot.quant.barDataProvenance.strictPointInTime) reasons.push('bar revisions not proven point in time: a historical reconstruction cannot back a live signal');
+    }
 
     const evaluations = definition.filters.map((filter) => evaluateScannerFilter(snapshot, filter));
     const failed = evaluations.filter((e) => !e.passed).map((e) => e.code + ': ' + e.reason);
@@ -118,6 +125,7 @@ export function runMarketScanner(definition: ScannerDefinition, universe: Univer
     rankingScore: x.score,
     rank: index + 1,
     dataQualityStatus: x.snapshot.quant.dataQuality.severity,
+    strictPointInTime: x.snapshot.quant.barDataProvenance.strictPointInTime,
   }));
 
   return {

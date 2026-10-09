@@ -29,7 +29,7 @@ function bar(index: number, open: string, close: string): MarketBar {
     isFinal: true,
     observedAt: new Date(end).toISOString(),
     availableAt: new Date(end).toISOString(),
-    retrievedAt: new Date(end).toISOString(),
+    retrievedAt: new Date(end).toISOString(), knowledge: { provenance: 'historical_bar_reconstruction', revisionKnownAt: null },
   };
 }
 
@@ -59,6 +59,7 @@ function scannerRun(): ScannerRun {
       rankingScore: 12.5,
       rank: 1,
       dataQualityStatus: 'ok',
+      strictPointInTime: true,
     }],
     rejected: [],
   };

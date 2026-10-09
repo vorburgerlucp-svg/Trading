@@ -143,16 +143,17 @@ describe.skipIf(!pgAvailable)('corporate action provenance on PostgreSQL' + (pgA
       await migrate(pool, loadMigrations().filter((m) => m.version <= 6));
       const before = new PostgresMarketDataStore(pool);
       await before.registerSource(FIXTURE_SOURCE);
-      await before.ingestBars(AAPL, dailyBars(XNAS, '2020-08-27', ROWS.slice(0, 2)), '2026-10-08T00:00:00Z');
       const legacy: CorporateAction = { actionKey: 'split:2020-08-31', instrumentId: AAPL.instrumentId, source: FIXTURE_SOURCE.sourceId, type: 'split', exDate: '2020-08-31', ratioFrom: Decimal.from(1), ratioTo: Decimal.from(4), retrievedAt: '2026-10-07T13:57:30.000Z', knowledge: { provenance: 'legacy_unproven', knowledgeAt: null } };
       await pool.query(
         `INSERT INTO corporate_actions (instrument_id, source_id, action_key, revision, type, ex_date, ratio_from, ratio_to, available_at, retrieved_at, ingest_seq, content_hash)
-         VALUES ($1, $2, 'split:2020-08-31', 1, 'split', '2020-08-31', 1, 4, '2020-08-31T04:00:00.000Z', '2026-10-07T13:57:30.000Z', 3, $3)`,
+         VALUES ($1, $2, 'split:2020-08-31', 1, 'split', '2020-08-31', 1, 4, '2020-08-31T04:00:00.000Z', '2026-10-07T13:57:30.000Z', 1, $3)`,
         [AAPL.instrumentId, FIXTURE_SOURCE.sourceId, corporateActionContentHash(legacy)],
       );
 
       const applied = await migrate(pool, loadMigrations());
-      expect(applied.applied).toEqual([7]);
+      // Bars are written by the current store, after the schema that holds their columns exists.
+      await new PostgresMarketDataStore(pool).ingestBars(AAPL, dailyBars(XNAS, '2020-08-27', ROWS.slice(0, 2)), '2026-10-08T00:00:00Z');
+      expect(applied.applied).toEqual([7, 8]);
 
       const row = (await pool.query("SELECT available_at, retrieved_at, knowledge_provenance, knowledge_at, provenance_hash FROM corporate_actions WHERE action_key = 'split:2020-08-31'")).rows[0];
       expect(row).toEqual({ available_at: new Date('2020-08-31T04:00:00.000Z'), retrieved_at: new Date('2026-10-07T13:57:30.000Z'), knowledge_provenance: null, knowledge_at: null, provenance_hash: null });

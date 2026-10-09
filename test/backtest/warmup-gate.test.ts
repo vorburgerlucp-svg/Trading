@@ -32,7 +32,7 @@ function bar(index: number, close: string, options: { availableAt?: string } = {
     isFinal: true,
     observedAt: iso(end),
     availableAt: options.availableAt ?? iso(end),
-    retrievedAt: iso(end),
+    retrievedAt: iso(end), knowledge: { provenance: 'historical_bar_reconstruction', revisionKnownAt: null },
   };
 }
 
@@ -207,8 +207,8 @@ describe('Backtest warm-up enforcement (O3)', () => {
     expect(() => run(series(10), recorder(plan(0), enterOnFirst).strategy)).toThrow(WarmupPlanError);
   });
 
-  it('engine version: backtest-engine:v2, since the warm-up gate changes the meaning of a run', () => {
-    expect(BACKTEST_ENGINE_VERSION).toBe('backtest-engine:v2');
+  it('engine version: backtest-engine:v3 (v2 warm-up gate; v3 timing by usable instant and provenance grading)', () => {
+    expect(BACKTEST_ENGINE_VERSION).toBe('backtest-engine:v3');
   });
 
   it('integrity: a run below the gate that shows a fill, or a flipped warm-up flag, fails verification', () => {

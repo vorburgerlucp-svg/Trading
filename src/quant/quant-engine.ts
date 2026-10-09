@@ -4,7 +4,8 @@
 // versions + same asOf → bit-identical result (except createdAt) and the same quantRunId.
 //
 // No look-ahead by construction: before anything is computed, the input is cut to bars with
-// availableAt <= asOf and startTime < asOf, and (by default) to final bars. Everything downstream
+// usable instant <= asOf and startTime < asOf, and (by default) to final bars. The usable instant of a proven bar revision is
+// the later of its historical gate and the instant NEXUS held it (bar-replay.ts). Everything downstream
 // — data quality, indicators, swings, levels, the fingerprint — only sees that selection, so bars
 // after asOf can be changed arbitrarily without changing the result. Swings, levels, structure and
 // pivots always use final bars only (an in-progress bar must not confirm a swing).
@@ -15,7 +16,8 @@ import { MarketDataQualityService } from '../market-data/data-quality.js';
 import type { FreshnessUseCase } from '../market-data/freshness.js';
 import { INTERVAL_MS, isIntraday, type DataQualityResult, type Instrument, type IntradayInterval, type MarketBar, type MarketDataSource } from '../market-data/market-data-types.js';
 import type { SessionScope, TradingCalendar } from '../market-data/sessions.js';
-import { canonicalUtc, parseUtc } from '../market-data/time.js';
+import { barUsableFromMs, countBarProvenance, knowledgeOf } from '../market-data/bar-replay.js';
+import { canonicalUtc, parseUtc, toUtcIso } from '../market-data/time.js';
 import { assertPeriod, IndicatorError, qn, type Series } from './indicators/common.js';
 import { ADX_VERSION, adx } from './indicators/adx.js';
 import { ATR_VERSION, atr } from './indicators/atr.js';
@@ -29,9 +31,10 @@ import { VWAP_VERSION, sessionVwap } from './indicators/vwap.js';
 import { MARKET_STRUCTURE_VERSION, marketStructure } from './structure/market-structure.js';
 import { SUPPORT_RESISTANCE_VERSION, supportResistance } from './structure/support-resistance.js';
 import { SWING_VERSION, findSwings } from './structure/swings.js';
-import type { IndicatorValue, QuantIndicators, QuantParameters, QuantPivots, QuantResult, QuantSeriesId, QuantSupportResistance, QuantSwing, WarmupEntry } from './quant-types.js';
+import type { IndicatorValue, QuantBarProvenance, QuantIndicators, QuantParameters, QuantPivots, QuantResult, QuantSeriesId, QuantSupportResistance, QuantSwing, WarmupEntry } from './quant-types.js';
 
-export const QUANT_ENGINE_VERSION = 'quant-engine:v1';
+/** v2: bar provenance is part of the input and of the result (barDataProvenance). Runs of v1 are not replayable identically. */
+export const QUANT_ENGINE_VERSION = 'quant-engine:v2';
 export const DATA_QUALITY_VERSION = 'data-quality:v1';
 
 export const ALGORITHM_VERSIONS: Readonly<Record<string, string>> = Object.freeze({
@@ -101,8 +104,31 @@ function safeMs(iso: string): number {
   }
 }
 
+/** Everything a bar contributes to a run, including when and how it is known: identical OHLC with other knowledge is another input. */
 function fingerprintBars(bars: readonly MarketBar[]): unknown[] {
-  return bars.map((b) => [b.startTime, b.endTime, b.open, b.high, b.low, b.close, b.volume ?? null, b.isFinal]);
+  return bars.map((b) => [b.startTime, b.endTime, b.open, b.high, b.low, b.close, b.volume ?? null, b.isFinal, b.observedAt, b.availableAt, b.retrievedAt, knowledgeOf(b).provenance, knowledgeOf(b).revisionKnownAt]);
+}
+
+/** When a bar may be used; NaN for an unparseable timestamp (so data quality rejects it, fail closed). */
+function usableFromOrNaN(bar: MarketBar): number {
+  try {
+    return barUsableFromMs(bar);
+  } catch {
+    return Number.NaN;
+  }
+}
+
+/** What the input bars were: strict point in time only when every bar is a proven revision held by asOf. */
+export function barProvenanceOf(bars: readonly MarketBar[]): QuantBarProvenance {
+  const counts = countBarProvenance(bars);
+  return {
+    strictPointInTime: counts.total > 0 && counts.proven === counts.total,
+    historicalReconstruction: counts.historical > 0,
+    legacyUnproven: counts.legacy > 0,
+    provenBars: counts.proven,
+    historicalBars: counts.historical,
+    legacyBars: counts.legacy,
+  };
 }
 
 function latest(series: Series, bars: readonly MarketBar[], required: number, reasonIfMissing = 'not enough history'): IndicatorValue<number> {
@@ -272,10 +298,11 @@ export function computeQuant(input: QuantInput, options: { createdAt: string }):
   const useCase: FreshnessUseCase = input.useCase ?? 'analysis';
 
   // 1. Point-in-time cut. Unparseable timestamps stay in so data quality rejects them (fail closed).
+  // A proven revision is used only from the instant NEXUS held it; an unproven one from its historical gate (labelled below).
   const selected = input.bars.filter((b) => {
-    const available = safeMs(b.availableAt);
+    const usableFrom = usableFromOrNaN(b);
     const start = safeMs(b.startTime);
-    if (!Number.isNaN(available) && available > asOfMs) return false;
+    if (!Number.isNaN(usableFrom) && usableFrom > asOfMs) return false;
     if (!Number.isNaN(start) && start >= asOfMs) return false;
     return b.isFinal || input.includeInProgress === true;
   });
@@ -315,6 +342,7 @@ export function computeQuant(input: QuantInput, options: { createdAt: string }):
     useCase,
     inputFingerprint,
     dataQuality: quality,
+    barDataProvenance: barProvenanceOf(selected),
     algorithmVersions: { ...ALGORITHM_VERSIONS, ...(input.derivation ?? {}) },
     parameters: p,
     createdAt: options.createdAt,
@@ -352,7 +380,7 @@ export function computeQuant(input: QuantInput, options: { createdAt: string }):
   const swingPoints = findSwings(finals.map((b) => b.high.toNumber()), finals.map((b) => b.low.toNumber()), p.swings.leftBars, p.swings.rightBars);
   const swings: QuantSwing[] = swingPoints.map((s) => {
     const bar = finals[s.index]!;
-    return { kind: s.kind, index: s.index, price: s.kind === 'high' ? bar.high : bar.low, time: bar.startTime, confirmedIndex: s.confirmedIndex, confirmedAt: finals[s.confirmedIndex]!.availableAt };
+    return { kind: s.kind, index: s.index, price: s.kind === 'high' ? bar.high : bar.low, time: bar.startTime, confirmedIndex: s.confirmedIndex, confirmedAt: toUtcIso(barUsableFromMs(finals[s.confirmedIndex]!)) };
   });
   let sr: QuantSupportResistance;
   if (finals.length === 0) sr = { status: 'insufficient_data', reason: 'no final bars', levels: [] };

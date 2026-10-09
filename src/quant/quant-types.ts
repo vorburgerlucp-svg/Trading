@@ -95,6 +95,19 @@ export interface WarmupEntry {
   ready: boolean;
 }
 
+/**
+ * The revision knowledge of the bars a run used. strictPointInTime only when every bar is a proven revision NEXUS held by asOf.
+ * A run with historical reconstruction bars may be valid research; it is never presented as strict point in time.
+ */
+export interface QuantBarProvenance {
+  strictPointInTime: boolean;
+  historicalReconstruction: boolean;
+  legacyUnproven: boolean;
+  provenBars: number;
+  historicalBars: number;
+  legacyBars: number;
+}
+
 export interface QuantResult {
   /** Derived from inputFingerprint: identical inputs always yield the identical run id. */
   quantRunId: string;
@@ -110,6 +123,7 @@ export interface QuantResult {
   barCount: number;
   inputFingerprint: string;
   dataQuality: DataQualityResult;
+  barDataProvenance: QuantBarProvenance;
   algorithmVersions: Record<string, string>;
   parameters: QuantParameters;
   indicators: QuantIndicators;

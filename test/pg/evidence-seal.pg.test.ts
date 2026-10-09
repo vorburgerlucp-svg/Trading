@@ -32,7 +32,7 @@ function bar(index: number, open: string, close: string): MarketBar {
     isFinal: true,
     observedAt: new Date(end).toISOString(),
     availableAt: new Date(end).toISOString(),
-    retrievedAt: new Date(end).toISOString(),
+    retrievedAt: new Date(end).toISOString(), knowledge: { provenance: 'historical_bar_reconstruction', revisionKnownAt: null },
   };
 }
 

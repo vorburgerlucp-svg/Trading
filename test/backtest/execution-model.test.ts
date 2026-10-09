@@ -22,7 +22,7 @@ function bar(values: { start?: string; open: string; high: string; low: string; 
     isFinal: true,
     observedAt: new Date(Date.parse(startTime) + 300_000).toISOString(),
     availableAt: new Date(Date.parse(startTime) + 300_000).toISOString(),
-    retrievedAt: new Date(Date.parse(startTime) + 300_000).toISOString(),
+    retrievedAt: new Date(Date.parse(startTime) + 300_000).toISOString(), knowledge: { provenance: 'historical_bar_reconstruction', revisionKnownAt: null },
   };
 }
 
