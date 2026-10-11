@@ -132,7 +132,7 @@ describe('explicit selection, connection, mode and license (§5, §6, §11, §13
   });
 
   it('a not-connected connector fails with DATA_NOT_CONNECTED and never returns empty evidence', async () => {
-    const pending = new NotConnectedFinancialConnector({ connectorId: 'fund-mcp', provider: 'lseg', transport: 'rest', capabilities: ['fundamentals'] });
+    const pending = new NotConnectedFinancialConnector({ connectorId: 'fund-mcp', provider: PROVIDER, transport: 'mcp', capabilities: ['fundamentals'] });
     const { gateway } = await setup([{ connectorId: 'fund-mcp', capabilities: ['fundamentals'] }], [{ c: pending as never }]);
     await expect(gateway.fetch(fundamentalsRequest())).rejects.toMatchObject({ code: 'DATA_NOT_CONNECTED' });
   });

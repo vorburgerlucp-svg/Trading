@@ -73,7 +73,11 @@ export type FinancialErrorCode =
   | 'PERIOD_MISMATCH'
   | 'CURRENCY_MISMATCH'
   | 'INSTRUMENT_MAPPING_MISSING'
-  | 'INSTRUMENT_MAPPING_MISMATCH';
+  | 'INSTRUMENT_MAPPING_MISMATCH'
+  | 'CONNECTOR_ID_DUPLICATE'
+  | 'CONNECTOR_IDENTITY_MISMATCH'
+  | 'CONNECTOR_CAPABILITY_MISMATCH'
+  | 'CONNECTOR_PAYLOAD_INVALID';
 
 export class FinancialGatewayError extends Error {
   override readonly name = 'FinancialGatewayError';

@@ -297,10 +297,16 @@ database seal and a retention policy for raw artifacts come in a later version.
 | `INSTRUMENT_MAPPING_MISSING` / `INSTRUMENT_MAPPING_MISMATCH` | identity not resolved or not matching | no |
 | `CURRENCY_MISMATCH` | payload currency differs from request | no |
 | `PERIOD_MISMATCH` | payload period differs from the requested period; nothing is substituted | no |
+| `CONNECTOR_ID_DUPLICATE` | two runtime connectors share a connectorId (gateway constructor) | no |
+| `CONNECTOR_IDENTITY_MISMATCH` | runtime provider or transport differs from the registry declaration | no |
+| `CONNECTOR_CAPABILITY_MISMATCH` | the registry allows a capability the runtime connector does not expose | no |
+| `CONNECTOR_PAYLOAD_INVALID` | malformed `retrievedAt` or `rawPayloadHash` in the connector envelope | no |
 | transport errors | `rate_limited`, `timeout`, `provider_unavailable`, `circuit_open`, `auth_failed`, `not_found`, `bad_request` | per `ResilientCaller` |
 
-Checks run in this order: selection, registration, enabled, capability allowlist, license, mode, connection, instrument mapping, the connector call
-(its tool map), payload validation, requested currency and period, provider symbol. The license comes before the mode, so an unapproved source reports
+Checks run in this order: selection, registration, enabled, capability allowlist, license, mode, runtime connector instance and identity binding,
+runtime capability contract, connection, instrument mapping, the connector call (its tool map), envelope (`retrievedAt`, `rawPayloadHash`), payload
+validation, requested currency and period, provider symbol. Identity and the capability contract are described in
+[docs/FINANCIAL_GOVERNANCE_HARDENING.md](FINANCIAL_GOVERNANCE_HARDENING.md) §4–§5. The license comes before the mode, so an unapproved source reports
 its license.
 
 A failure never returns empty evidence. Health records the failure and changes no mode, license or risk setting.

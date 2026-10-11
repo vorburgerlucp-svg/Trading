@@ -44,10 +44,10 @@ const request = (capability: 'news' | 'fundamentals' | 'portfolio_read', request
 });
 
 describe('MCP allowlist (§9, §17)', () => {
-  it('a capability the registry allows but the server map does not name is refused, and no tool is called', async () => {
+  it('a capability the registry allows but the runtime connector does not expose is refused, and no tool is called', async () => {
     const { connector, calls } = mcpConnector({ fundamentals: 'get_company_fundamentals' }, { get_company_fundamentals: FUNDAMENTALS_RAW }, ['search_company_news']);
     const gateway = await gatewayWith(['fundamentals', 'news'], connector);
-    await expect(gateway.fetch(request('news'))).rejects.toMatchObject({ code: 'TOOL_NOT_ALLOWED' });
+    await expect(gateway.fetch(request('news'))).rejects.toMatchObject({ code: 'CONNECTOR_CAPABILITY_MISMATCH' });
     expect(calls).toHaveLength(0);
   });
 
