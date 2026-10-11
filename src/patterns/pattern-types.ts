@@ -25,8 +25,68 @@ export const PATTERN_TYPES = Object.freeze([
   'descending_channel',
   'rising_wedge',
   'falling_wedge',
+  'bull_flag',
+  'bear_flag',
+  'bull_pennant',
+  'bear_pennant',
+  'hammer',
+  'inverted_hammer',
+  'hanging_man',
+  'shooting_star',
+  'doji',
+  'dragonfly_doji',
+  'gravestone_doji',
+  'bullish_engulfing',
+  'bearish_engulfing',
+  'morning_star',
+  'evening_star',
+  'piercing_line',
+  'dark_cloud_cover',
+  'bullish_harami',
+  'bearish_harami',
+  'three_white_soldiers',
+  'three_black_crows',
+  'tweezer_top',
+  'tweezer_bottom',
 ] as const);
 export type PatternType = (typeof PATTERN_TYPES)[number];
+
+/** The V1C structural continuation family (docs/PATTERN_ENGINE_V1C.md §14–§18). */
+export const FLAG_TYPES: ReadonlySet<PatternType> = new Set<PatternType>(['bull_flag', 'bear_flag', 'bull_pennant', 'bear_pennant']);
+
+/** The V1C candlestick family (docs/PATTERN_ENGINE_V1C.md §5–§11). Their identity uses the candle tags. */
+export const CANDLE_TYPES: ReadonlySet<PatternType> = new Set<PatternType>([
+  'hammer',
+  'inverted_hammer',
+  'hanging_man',
+  'shooting_star',
+  'doji',
+  'dragonfly_doji',
+  'gravestone_doji',
+  'bullish_engulfing',
+  'bearish_engulfing',
+  'morning_star',
+  'evening_star',
+  'piercing_line',
+  'dark_cloud_cover',
+  'bullish_harami',
+  'bearish_harami',
+  'three_white_soldiers',
+  'three_black_crows',
+  'tweezer_top',
+  'tweezer_bottom',
+]);
+
+/** One participating candle of a candlestick observation (docs/PATTERN_ENGINE_V1C.md §19). Exact decimal text. */
+export interface CandleRecord {
+  role: 'candle_1' | 'candle_2' | 'candle_3';
+  barIndex: number;
+  time: string;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+}
 
 /** The V1B structures, which are not V1: their identity uses the V1B tags. */
 export const PRICE_ACTION_TYPES: ReadonlySet<PatternType> = new Set<PatternType>([
@@ -138,7 +198,8 @@ export interface PatternObservation {
   resolvedAt: string | null;
   anchors: PatternAnchor[];
   confirmation: { direction: 'up' | 'down' | null; level: string | null; buffer: string; confirmedByBarTime: string | null };
-  invalidation: { rule: string; level: string };
+  /** `level` is null where the structure has no invalidation level (candlesticks). */
+  invalidation: { rule: string; level: string | null };
   target: { method: string; price: string | null };
   /** The boundary lines in the original price space, as exact text: intercept (value at bar 0) and slope (per bar). */
   boundaries: Record<string, { intercept: string; slope: string }>;
@@ -149,6 +210,10 @@ export interface PatternObservation {
   levelEvidence?: PatternLevelEvidence | null;
   /** Present on price-action observations only. */
   patternLineage?: PatternLineage | null;
+  /** Present on candlestick observations only: the participating candles, in order. */
+  candles?: CandleRecord[] | null;
+  /** Present on contextual candlestick observations: the prior context that named them (candle-context:v1). */
+  candleContext?: { policy: string; state: 'rising' | 'falling' | 'range' | 'insufficient'; netAtr: string | null } | null;
 }
 
 export interface PatternRun {
@@ -159,6 +224,12 @@ export interface PatternRun {
   lifecycleVersion: string;
   priceActionLifecycleVersion: string;
   levelLineageVersion: string;
+  candlestickPolicyVersion: string;
+  candleGeometryVersion: string;
+  candleContextVersion: string;
+  gapPolicyVersion: string;
+  polePolicyVersion: string;
+  flagPennantPolicyVersion: string;
   supportResistanceVersion: string;
   swingVersion: string;
   atrVersion: string;
@@ -194,6 +265,16 @@ export interface PatternRun {
     rectangleBirthChecks: number;
     /** Consecutive swing windows tested for a channel or a wedge. */
     channelWedgeWindows: number;
+    /** Bars at which a candlestick rule set was evaluated (one per final bar, pairs and triples on the same scan). */
+    candleEvaluations: number;
+    /** Candle groups that passed a candlestick rule before naming. */
+    candleCandidates: number;
+    /** Pole checks run for flags and pennants (both orientations). */
+    flagPoleChecks: number;
+    /** Consecutive swing windows tested as a flag or pennant consolidation. */
+    flagWindows: number;
+    /** Flag and pennant candidates that passed their consolidation rules. */
+    flagCandidates: number;
   };
   createdAt: string;
 }

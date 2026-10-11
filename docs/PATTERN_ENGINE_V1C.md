@@ -210,62 +210,63 @@ Context is not bound (the name depends on context, but the instance is the candl
 
 ## 12. Parameters (policy defaults, not market truth)
 
-Versioned in `PatternParameters` and in the run fingerprint.
+Versioned in `PatternParameters` (`src/patterns/pattern-parameters.ts`) and in the run fingerprint. The keys below are the exact keys of the code.
+Inclusive unless the comment says strict.
 
 ```
 candlestick (candlestick-policy:v1)
-  doji.maxBodyToRange                      0.1    inclusive
-  longWick.minWickToBody                   2.0    inclusive
-  longWick.minWickToRange                  0.6    inclusive
-  smallOppositeWick.maxOppositeWickToRange 0.1    inclusive
-  hammerShape.maxBodyToRange               0.35   inclusive
-  engulfing.minBodyRatio                   1.0    inclusive; equalityPolicy = inclusive
-  harami.maxBodyRatio                      1.0    strict (<)
-  piercing.minPenetration                  0.5    inclusive
-  star.maxMiddleBodyToRange                0.3    inclusive
-  star.minFirstBodyAtr                     1.0    inclusive
-  star.minThirdPenetration                 0.5    inclusive
-  tweezer.maxExtremeDifferenceAtr          0.05   inclusive
-  tweezer.requiresContext                  true
-  soldiersCrows.minBodyToRange             0.6    inclusive
-  soldiersCrows.maxOppositeWickToRange     0.2    inclusive
-  soldiersCrows.minProgressionAtr          0.1    inclusive
-  gapMode                                  'optional' | 'strict'
+  dojiMaxBodyToRange               0.1    body ≤ this × range is doji-sized
+  longWickMinWickToBody            2      long wick ≥ this × body
+  longWickMinWickToRange           0.6    long wick ≥ this × range
+  smallOppositeMaxWickToRange      0.1    opposite wick ≤ this × range
+  hammerMaxBodyToRange             0.35   hammer-shape body ≤ this × range (and > doji size)
+  engulfingMinBodyRatio            1.0    current body ≥ this × previous body; containment inclusive
+  haramiMaxBodyRatio               1.0    STRICT: harami body < this × previous body
+  piercingMinPenetration           0.5    current close ≥ previous close + this × previous body
+  starMaxMiddleBodyToRange         0.3    middle candle body ≤ this × range
+  starMinFirstBodyAtr              1.0    first candle body ≥ this × ATR
+  starMinThirdPenetration          0.5    third candle penetrates this × first body
+  tweezerMaxExtremeDifferenceAtr   0.05   |extreme difference| ≤ this × ATR
+  tweezerRequiresContext           true   tweezer top after rising, bottom after falling
+  soldiersMinBodyToRange           0.6    each body ≥ this × range
+  soldiersMaxOppositeWickToRange   0.2    the opposite wick ≤ this × range
+  soldiersMinProgressionAtr        0.1    each close step ≥ this × ATR
+  gapMode                          optional | strict   (§10)
 candleContext (candle-context:v1)
-  lookbackBars                             5
-  minMoveAtr                               1.0    inclusive
-  trendDefinitionVersion                   'net-close-change:v1'
+  lookbackBars                     5
+  minMoveAtr                       1.0    net close change ≥ this × ATR: rising / falling
+  trendDefinitionVersion           net-close-change:v1
 pole (pole-policy:v1)
-  minMoveAtr                               3.0    inclusive
-  minBars                                  3
-  maxBars                                  20
-  maxInternalRetracement                   0.5    inclusive (of the pole move)
-  minDirectionalEfficiency                 0.5    inclusive
-  maxStartSwings                           6      how far back the pole start is searched
-flag (flag-pennant:v1, flag consolidation)
-  minTouchesPerSide                        2
-  minBars                                  3
-  maxBarsToPoleRatio                       1.0    inclusive
-  maxRetracementOfPole                     0.5    inclusive
-  maxResidualAtr                           0.5    inclusive
-  maxFlatSlopeAtrPerBar                    0.02   inclusive: bull slopes ≤ this (not rising beyond tolerance)
-  maxParallelDiffAtr                       0.03   inclusive
-  maxSwings                                4
-  confirmationWindowBars                   20
-pennant (flag-pennant:v1, pennant consolidation)
-  minTouchesPerSide                        2
-  minBars                                  3
-  maxBarsToPoleRatio                       1.0    inclusive
-  maxRetracementOfPole                     0.5    inclusive
-  maxResidualAtr                           0.5    inclusive
-  minSlopeAtrPerBar                        0.03   inclusive, each side in magnitude
-  minConvergence                           0.3    inclusive
-  maxApexBarsAhead                         20     inclusive
-  maxSwings                                4
-  confirmationWindowBars                   20
+  minMoveAtr                       3.0    pole move ≥ this × ATR
+  minBars                          3
+  maxBars                          20
+  maxInternalRetracement           0.5    largest drawdown ≤ this × pole move
+  minDirectionalEfficiency         0.5    net / Σ|Δclose| ≥ this
+  maxStartSwings                   6      how far back the pole start is searched
+flag (flag-pennant:v1; bull flag, bear flags use the mirrored space)
+  minTouchesPerSide                2
+  minBars                          3
+  maxBarsToPoleRatio               1.0    consolidation bars ≤ this × pole bars
+  maxRetracementOfPole             0.5    (pole end − lowest low) ≤ this × pole move
+  maxResidualAtr                   0.5
+  maxFlatSlopeAtrPerBar            0.02   SIGNED: both slopes ≤ this (not rising beyond it)
+  maxParallelDiffAtr               0.03
+  maxSwings                        6      consolidation window length (swings)
+  confirmationWindowBars           20
+pennant (flag-pennant:v1)
+  minTouchesPerSide                2
+  minBars                          3
+  maxBarsToPoleRatio               1.0
+  maxRetracementOfPole             0.5
+  maxResidualAtr                   0.5
+  minSlopeAtrPerBar                0.03   each side in magnitude
+  minConvergence                   0.3    (w0 − w1) / w0 ≥ this
+  maxApexBarsAhead                 20
+  maxSwings                        6
+  confirmationWindowBars           20
 ```
 
-Validation refuses a value outside its domain.
+Validation refuses a value outside its domain, a pole with minBars above maxBars, and a non-boolean tweezer context flag.
 
 ## 13. Overlaps and taxonomy
 
@@ -302,7 +303,7 @@ consolidation.
 ## 15. Flag and pennant consolidation (flag-pennant:v1)
 
 The consolidation is a bounded, alternating window of confirmed swings that starts at the swing after the pole end. For each consolidation start, the
-longest valid window (up to `maxSwings`) is kept.
+longest valid window (up to `maxSwings`) is kept. A consolidation is the longest valid window known at asOf. When a later swing keeps a window valid, the window extends and the flag takes a new identity: the geometry changed, so this is new evidence, not a lifecycle advance. The earlier geometry remains the true state at its own asOf.
 
 **Shared checks:**
 
@@ -424,3 +425,6 @@ counted as unrelated lineages; a scale change altering normalized classification
 - The optional gap mode makes the strict gap conditions a subset. A pattern detected in optional mode is not verified as a true session gap.
 - A flag or pennant is not linked to a channel or triangle on the same bars (§17).
 - Thresholds are design policy and are not validated out-of-sample. No success rate or expected return is produced.
+- A flag or pennant consolidation extends as swings are confirmed (§15): the identity follows the window known at asOf, so a later swing can give the same pole a new consolidation.
+- The residual rule for flags and pennants is tested at the unit level only through the shared line maths (the same residual rule as the rectangles); no engine fixture has three touches on one side with an off-line touch. This is a known gap in coverage.
+- Piercing line and dark cloud cover have a strict price-gap form (the opening beyond the previous low or high) that is used only in strict mode on a sessioned equity series.

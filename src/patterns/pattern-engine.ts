@@ -10,25 +10,34 @@ import { Decimal } from '../money/decimal.js';
 import { hashOf } from '../persistence/canonical-json.js';
 import { SUPPORT_RESISTANCE_VERSION } from '../quant/structure/support-resistance.js';
 import type { ChartContext } from '../timeframes/chart-context.js';
-import { detectCandidates, originalLine, spaceOf, swingsOf, atrSeriesOf, type Candidate } from './geometry.js';
+import { atrSeriesOf, detectCandidates, originalLine, spaceOf, swingsOf, type Candidate } from './geometry.js';
 import { linesStructuresIn, rectanglesIn } from './geometry-price-action.js';
 import { buildLevelFrames, swingInputsOf } from './levels.js';
 import { walkCandidate, type WalkResult } from './lifecycle.js';
 import { detectPriceAction, type PriceActionDraft } from './price-action.js';
+import { detectCandles, gapStateOf } from './candles.js';
+import { detectFlags } from './flags.js';
 import {
   ATR_VERSION,
+  CANDLESTICK_GAP_POLICY_VERSION,
+  CANDLESTICK_POLICY_VERSION,
+  CANDLE_CONTEXT_VERSION,
+  CANDLE_GEOMETRY_VERSION,
+  FLAG_PENNANT_POLICY_VERSION,
   PATTERN_ENGINE_VERSION,
   PATTERN_GEOMETRY_VERSION,
   PATTERN_LIFECYCLE_VERSION,
   LEVEL_LINEAGE_VERSION,
+  POLE_POLICY_VERSION,
   PRICE_ACTION_LIFECYCLE_VERSION,
   SWING_VERSION,
   V1B_IDENTITY,
+  V1C_IDENTITY,
   V1_IDENTITY,
   resolvePatternParameters,
   type PatternParameters,
 } from './pattern-parameters.js';
-import { PRICE_ACTION_TYPES, PatternError, type PatternDirection, type PatternObservation, type PatternRun, type PatternRunInput, type ReplayMode } from './pattern-types.js';
+import { FLAG_TYPES, PRICE_ACTION_TYPES, PatternError, type PatternDirection, type PatternObservation, type PatternRun, type PatternRunInput, type ReplayMode } from './pattern-types.js';
 import { buildPitView, provenanceOf, type PitView } from './pit-view.js';
 
 export type { PatternRunInput, PatternRun, PatternObservation } from './pattern-types.js';
@@ -96,8 +105,8 @@ function observationOf(c: Candidate, walk: WalkResult, view: PitView, common: Ru
     barIndex: a.index,
     confirmedAt: view.bars[a.confirmedIndex]!.instant,
   }));
-  // The identity tags are frozen per family: V1 ids keep the V1 tags, so a version bump never changes them (docs/PATTERN_ENGINE_V1B.md §2).
-  const tags = PRICE_ACTION_TYPES.has(c.patternType) ? V1B_IDENTITY : V1_IDENTITY;
+  // The identity tags are frozen per family: V1 ids keep the V1 tags, V1B ids the V1B tags, V1C flags the V1C tags (docs/PATTERN_ENGINE_V1C.md §1.1).
+  const tags = FLAG_TYPES.has(c.patternType) ? V1C_IDENTITY : PRICE_ACTION_TYPES.has(c.patternType) ? V1B_IDENTITY : V1_IDENTITY;
   const patternInstanceId =
     'pi_' +
     hashOf({
@@ -109,6 +118,16 @@ function observationOf(c: Candidate, walk: WalkResult, view: PitView, common: Ru
       patternType: c.patternType,
       anchors: anchors.map((a) => [a.role, a.kind, a.time, a.price]),
     }).slice(0, 40);
+  // A flag or pennant belongs to the family of its pole: every consolidation on one pole shares this id, so a consumer counts the pole once.
+  const poleAnchors = anchors.filter((a) => a.role === 'pole_start' || a.role === 'pole_end').map((a) => [a.role, a.kind, a.time, a.price]);
+  const patternLineage = FLAG_TYPES.has(c.patternType)
+    ? {
+        eventFamilyId: 'ef_' + hashOf({ kind: 'pole-family', engine: V1C_IDENTITY.engine, instrumentId: common.instrumentId, interval: common.interval, pole: poleAnchors }).slice(0, 40),
+        parentPatternInstanceId: null,
+        rootPatternInstanceId: patternInstanceId,
+        relationship: 'root' as const,
+      }
+    : undefined;
   const direction: PatternDirection = c.direction === 'neutral' ? (flip(walk.confirmDirection, m) === 'up' ? 'bullish' : flip(walk.confirmDirection, m) === 'down' ? 'bearish' : 'neutral') : c.direction;
   const confirmedDirection = flip(walk.confirmDirection, m);
   const status = walk.status;
@@ -148,6 +167,7 @@ function observationOf(c: Candidate, walk: WalkResult, view: PitView, common: Ru
     geometryMetrics: c.metrics,
     chartContext: chartContextOf(common.ctx),
     evidenceRefs: { patternRunId: common.runId, chartContextId: common.ctx === null ? null : common.ctx.chartContextId },
+    ...(patternLineage !== undefined ? { patternLineage } : {}),
   };
 }
 
@@ -206,6 +226,12 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
     lifecycle: PATTERN_LIFECYCLE_VERSION,
     priceActionLifecycle: PRICE_ACTION_LIFECYCLE_VERSION,
     levelLineage: LEVEL_LINEAGE_VERSION,
+    candlestickPolicy: CANDLESTICK_POLICY_VERSION,
+    candleGeometry: CANDLE_GEOMETRY_VERSION,
+    candleContext: CANDLE_CONTEXT_VERSION,
+    gapPolicy: CANDLESTICK_GAP_POLICY_VERSION,
+    polePolicy: POLE_POLICY_VERSION,
+    flagPennantPolicy: FLAG_PENNANT_POLICY_VERSION,
     supportResistance: SUPPORT_RESISTANCE_VERSION,
     swing: SWING_VERSION,
     atr: ATR_VERSION,
@@ -222,18 +248,40 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
   const common: RunCommon = { instrumentId: input.instrument.instrumentId, interval: input.series.interval, series: { ...input.series }, asOf, runId: patternRunId, runFingerprint: inputFingerprint, ctx };
 
   const byInstance = new Map<string, PatternObservation>();
-  const diagnostics = { swings: 0, candidates: 0, barsWalked: 0, levelEvaluations: 0, breakoutCount: 0, priceActionBarsWalked: 0, rectangleBirthChecks: 0, channelWedgeWindows: 0 };
+  const diagnostics = {
+    swings: 0,
+    candidates: 0,
+    barsWalked: 0,
+    levelEvaluations: 0,
+    breakoutCount: 0,
+    priceActionBarsWalked: 0,
+    rectangleBirthChecks: 0,
+    channelWedgeWindows: 0,
+    candleEvaluations: 0,
+    candleCandidates: 0,
+    flagPoleChecks: 0,
+    flagWindows: 0,
+    flagCandidates: 0,
+  };
   if (computable) {
     const atrs = atrSeriesOf(view, params.tolerance.atrPeriod);
     const real = spaceOf(view, false);
     const mirror = spaceOf(view, true);
     const realSwings = swingsOf(real, params.swing.leftBars, params.swing.rightBars);
+    const mirrorSwings = swingsOf(mirror, params.swing.leftBars, params.swing.rightBars);
     diagnostics.swings = realSwings.length;
     const last = view.bars.length - 1;
 
     // V1 structures: unchanged (docs/PATTERN_ENGINE_V1B.md §1).
     const detection = detectCandidates(view, params);
     const candidates: Candidate[] = [...detection.candidates];
+
+    // V1C flags and pennants: the bull patterns on the real space, the bear patterns on the mirrored space (docs/PATTERN_ENGINE_V1C.md §14–§16).
+    const flagScan = detectFlags(view, params, atrs, realSwings, mirrorSwings);
+    diagnostics.flagPoleChecks = flagScan.poleChecks;
+    diagnostics.flagWindows = flagScan.windows;
+    diagnostics.flagCandidates = flagScan.candidates.length;
+    candidates.push(...flagScan.candidates);
 
     // V1B geometry: rectangles from support/resistance clusters, channels and wedges from fitted swing windows (real space only: their mirror
     // images are the other channel or wedge type, so the real space covers both).
@@ -256,6 +304,19 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
 
     // V1B price action: breakouts, retests and false breaks.
     const pa = detectPriceAction(view, params, atrs, frames, { instrumentId: input.instrument.instrumentId, interval: input.series.interval, series: { ...input.series } });
+    // V1C candlesticks: single candles, two- and three-candle groups, each named by its rule and, where needed, its prior context.
+    const candleScan = detectCandles(view, params, atrs, {
+      instrumentId: input.instrument.instrumentId,
+      interval: input.series.interval,
+      series: { ...input.series },
+      gap: gapStateOf(input.instrument.assetClass, input.series.session),
+    });
+    diagnostics.candleEvaluations = candleScan.evaluations;
+    diagnostics.candleCandidates = candleScan.candidates;
+    for (const d of candleScan.drafts) {
+      const observation = finalizeDraft(d, common);
+      if (!byInstance.has(observation.patternInstanceId)) byInstance.set(observation.patternInstanceId, observation);
+    }
     diagnostics.levelEvaluations = pa.levelEvaluations;
     diagnostics.breakoutCount = pa.breakoutCount;
     diagnostics.priceActionBarsWalked = pa.barsWalked;
@@ -273,6 +334,12 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
     lifecycleVersion: PATTERN_LIFECYCLE_VERSION,
     priceActionLifecycleVersion: PRICE_ACTION_LIFECYCLE_VERSION,
     levelLineageVersion: LEVEL_LINEAGE_VERSION,
+    candlestickPolicyVersion: CANDLESTICK_POLICY_VERSION,
+    candleGeometryVersion: CANDLE_GEOMETRY_VERSION,
+    candleContextVersion: CANDLE_CONTEXT_VERSION,
+    gapPolicyVersion: CANDLESTICK_GAP_POLICY_VERSION,
+    polePolicyVersion: POLE_POLICY_VERSION,
+    flagPennantPolicyVersion: FLAG_PENNANT_POLICY_VERSION,
     supportResistanceVersion: SUPPORT_RESISTANCE_VERSION,
     swingVersion: SWING_VERSION,
     atrVersion: ATR_VERSION,
@@ -299,6 +366,11 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
       priceActionBarsWalked: diagnostics.priceActionBarsWalked,
       rectangleBirthChecks: diagnostics.rectangleBirthChecks,
       channelWedgeWindows: diagnostics.channelWedgeWindows,
+      candleEvaluations: diagnostics.candleEvaluations,
+      candleCandidates: diagnostics.candleCandidates,
+      flagPoleChecks: diagnostics.flagPoleChecks,
+      flagWindows: diagnostics.flagWindows,
+      flagCandidates: diagnostics.flagCandidates,
     },
     createdAt: options.createdAt ?? '1970-01-01T00:00:00.000Z',
   };

@@ -165,7 +165,8 @@ describe('breakout identity, deduplication and look-ahead (§4.1, §5, §6, §7,
     const a = run(RES, asOfAfter(RES, 56));
     const b = run(RES, asOfAfter(RES, 56), { parameters: { priceAction: { retestWindowBars: 15 } } });
     expect(b.patternRunId).not.toBe(a.patternRunId);
-    expect(a.engineVersion).toBe('pattern-engine:v1b');
+    // The run engine version is bumped explicitly by V1C; the V1B structure ids do not depend on it (docs/PATTERN_ENGINE_V1C.md §1.1).
+    expect(a.engineVersion).toBe('pattern-engine:v1c');
     expect(a.supportResistanceVersion).toBe('sr:swing-cluster:v1');
     expect(a.priceActionLifecycleVersion).toBe('price-action-lifecycle:v1');
   });

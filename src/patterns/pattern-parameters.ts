@@ -7,13 +7,20 @@ import { SUPPORT_RESISTANCE_VERSION } from '../quant/structure/support-resistanc
 import { SWING_VERSION } from '../quant/structure/swings.js';
 import { ATR_VERSION } from '../quant/indicators/atr.js';
 
-/** The run engine version. V1B bumped it explicitly: the run now produces price-action structures. */
-export const PATTERN_ENGINE_VERSION = 'pattern-engine:v1b';
-export const PATTERN_GEOMETRY_VERSION = 'pattern-geometry:v1b';
+/** The run engine version. V1C bumped it explicitly: the run now produces flags, pennants and candlestick patterns. */
+export const PATTERN_ENGINE_VERSION = 'pattern-engine:v1c';
+export const PATTERN_GEOMETRY_VERSION = 'pattern-geometry:v1c';
 export const PATTERN_LIFECYCLE_VERSION = 'pattern-lifecycle:v1';
 export const PRICE_ACTION_LIFECYCLE_VERSION = 'price-action-lifecycle:v1';
 /** The policy that defines a level's structural lineage (docs/PATTERN_ENGINE_V1B.md §25.3). Hashed into every lineage id and the run fingerprint. */
 export const LEVEL_LINEAGE_VERSION = 'level-lineage:v1';
+/** V1C policies (docs/PATTERN_ENGINE_V1C.md §12). Each is hashed into the run fingerprint. */
+export const CANDLESTICK_POLICY_VERSION = 'candlestick-policy:v1';
+export const CANDLE_GEOMETRY_VERSION = 'candle-geometry:v1';
+export const CANDLE_CONTEXT_VERSION = 'candle-context:v1';
+export const CANDLESTICK_GAP_POLICY_VERSION = 'candlestick-gap-policy:v1';
+export const POLE_POLICY_VERSION = 'pole-policy:v1';
+export const FLAG_PENNANT_POLICY_VERSION = 'flag-pennant:v1';
 export { SWING_VERSION, ATR_VERSION, SUPPORT_RESISTANCE_VERSION };
 
 /**
@@ -26,6 +33,15 @@ export const V1_IDENTITY = Object.freeze({ engine: 'pattern-engine:v1', geometry
  * (docs/PATTERN_ENGINE_V1C.md §1.1). The golden test v1c-regression.test.ts enforces it.
  */
 export const V1B_IDENTITY = Object.freeze({ engine: 'pattern-engine:v1b', geometry: 'pattern-geometry:v1b', lifecycle: 'price-action-lifecycle:v1' });
+/** Identity tags of the V1C flags and pennants (docs/PATTERN_ENGINE_V1C.md §1.1). Literals, like V1B. */
+export const V1C_IDENTITY = Object.freeze({ engine: 'pattern-engine:v1c', geometry: 'pattern-geometry:v1c' });
+/** Identity tags of the V1C candlestick patterns. The candle algorithm and its policies are part of the identity. */
+export const CANDLE_IDENTITY = Object.freeze({
+  engine: 'pattern-engine:v1c',
+  candlestickPolicy: CANDLESTICK_POLICY_VERSION,
+  candleGeometry: CANDLE_GEOMETRY_VERSION,
+  candleContext: CANDLE_CONTEXT_VERSION,
+});
 
 export interface PatternParameters {
   swing: { leftBars: number; rightBars: number };
@@ -117,6 +133,57 @@ export interface PatternParameters {
     maxSwings: number;
     confirmationWindowBars: number;
   };
+  /** Candlestick policy (candlestick-policy:v1). Every threshold is inclusive unless its comment says strict (docs/PATTERN_ENGINE_V1C.md §12). */
+  candlestick: {
+    dojiMaxBodyToRange: string;
+    longWickMinWickToBody: string;
+    longWickMinWickToRange: string;
+    smallOppositeMaxWickToRange: string;
+    hammerMaxBodyToRange: string;
+    engulfingMinBodyRatio: string;
+    /** Strict: the harami body must be below this ratio of the previous body. */
+    haramiMaxBodyRatio: string;
+    piercingMinPenetration: string;
+    starMaxMiddleBodyToRange: string;
+    starMinFirstBodyAtr: string;
+    starMinThirdPenetration: string;
+    tweezerMaxExtremeDifferenceAtr: string;
+    tweezerRequiresContext: boolean;
+    soldiersMinBodyToRange: string;
+    soldiersMaxOppositeWickToRange: string;
+    soldiersMinProgressionAtr: string;
+    gapMode: 'optional' | 'strict';
+  };
+  /** Prior context of a candle (candle-context:v1). Uses only bars before the candle. */
+  candleContext: { lookbackBars: number; minMoveAtr: string; trendDefinitionVersion: string };
+  /** The pole of a flag or pennant (pole-policy:v1). */
+  pole: { minMoveAtr: string; minBars: number; maxBars: number; maxInternalRetracement: string; minDirectionalEfficiency: string; maxStartSwings: number };
+  /** A bull flag's consolidation (flag-pennant:v1). Bear flags use the mirrored space. */
+  flag: {
+    minTouchesPerSide: number;
+    minBars: number;
+    maxBarsToPoleRatio: string;
+    maxRetracementOfPole: string;
+    maxResidualAtr: string;
+    /** Signed: the bull flag's slopes must not exceed this (a rising consolidation beyond it is not a flag). */
+    maxFlatSlopeAtrPerBar: string;
+    maxParallelDiffAtr: string;
+    maxSwings: number;
+    confirmationWindowBars: number;
+  };
+  /** A pennant's consolidation (flag-pennant:v1). */
+  pennant: {
+    minTouchesPerSide: number;
+    minBars: number;
+    maxBarsToPoleRatio: string;
+    maxRetracementOfPole: string;
+    maxResidualAtr: string;
+    minSlopeAtrPerBar: string;
+    minConvergence: string;
+    maxApexBarsAhead: number;
+    maxSwings: number;
+    confirmationWindowBars: number;
+  };
 }
 
 export const DEFAULT_PATTERN_PARAMETERS = Object.freeze({
@@ -196,6 +263,50 @@ export const DEFAULT_PATTERN_PARAMETERS = Object.freeze({
     maxSwings: 6,
     confirmationWindowBars: 30,
   },
+  candlestick: {
+    dojiMaxBodyToRange: '0.1',
+    longWickMinWickToBody: '2',
+    longWickMinWickToRange: '0.6',
+    smallOppositeMaxWickToRange: '0.1',
+    hammerMaxBodyToRange: '0.35',
+    engulfingMinBodyRatio: '1.0',
+    haramiMaxBodyRatio: '1.0',
+    piercingMinPenetration: '0.5',
+    starMaxMiddleBodyToRange: '0.3',
+    starMinFirstBodyAtr: '1.0',
+    starMinThirdPenetration: '0.5',
+    tweezerMaxExtremeDifferenceAtr: '0.05',
+    tweezerRequiresContext: true,
+    soldiersMinBodyToRange: '0.6',
+    soldiersMaxOppositeWickToRange: '0.2',
+    soldiersMinProgressionAtr: '0.1',
+    gapMode: 'optional',
+  },
+  candleContext: { lookbackBars: 5, minMoveAtr: '1.0', trendDefinitionVersion: 'net-close-change:v1' },
+  pole: { minMoveAtr: '3.0', minBars: 3, maxBars: 20, maxInternalRetracement: '0.5', minDirectionalEfficiency: '0.5', maxStartSwings: 6 },
+  flag: {
+    minTouchesPerSide: 2,
+    minBars: 3,
+    maxBarsToPoleRatio: '1.0',
+    maxRetracementOfPole: '0.5',
+    maxResidualAtr: '0.5',
+    maxFlatSlopeAtrPerBar: '0.02',
+    maxParallelDiffAtr: '0.03',
+    maxSwings: 6,
+    confirmationWindowBars: 20,
+  },
+  pennant: {
+    minTouchesPerSide: 2,
+    minBars: 3,
+    maxBarsToPoleRatio: '1.0',
+    maxRetracementOfPole: '0.5',
+    maxResidualAtr: '0.5',
+    minSlopeAtrPerBar: '0.03',
+    minConvergence: '0.3',
+    maxApexBarsAhead: 20,
+    maxSwings: 6,
+    confirmationWindowBars: 20,
+  },
 } satisfies PatternParameters);
 
 /** Overrides are deep-partial: any value may be set, the rest keeps its default. */
@@ -220,6 +331,18 @@ function intParam(value: unknown, field: string, min: number): number {
   return value;
 }
 
+const SIGNED_DECIMAL_TEXT = /^-?\d+(\.\d+)?$/;
+
+function signedDecimalParam(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !SIGNED_DECIMAL_TEXT.test(value)) throw new PatternParameterError(field + ' must be a decimal string');
+  return value;
+}
+
+function boolParam(value: unknown, field: string): boolean {
+  if (typeof value !== 'boolean') throw new PatternParameterError(field + ' must be a boolean');
+  return value;
+}
+
 /** Merges overrides into the defaults and validates every value. Returns a plain, canonical parameter object. */
 export function resolvePatternParameters(overrides: PatternParameterOverrides = {}): PatternParameters {
   const d = DEFAULT_PATTERN_PARAMETERS;
@@ -234,6 +357,12 @@ export function resolvePatternParameters(overrides: PatternParameterOverrides = 
   const rect = o('rectangle');
   const chan = o('channel');
   const wedge = o('wedge');
+  const cand = o('candlestick');
+  const candCtx = o('candleContext');
+  const pole = o('pole');
+  const flag = o('flag');
+  const pennant = o('pennant');
+  if (cand.gapMode !== 'optional' && cand.gapMode !== 'strict') throw new PatternParameterError('candlestick.gapMode must be optional or strict');
   if (tol.mode !== 'atr' && tol.mode !== 'percent') throw new PatternParameterError('tolerance.mode must be atr or percent');
   const resolved: PatternParameters = {
     swing: { leftBars: intParam(swing.leftBars, 'swing.leftBars', 1), rightBars: intParam(swing.rightBars, 'swing.rightBars', 1) },
@@ -321,7 +450,65 @@ export function resolvePatternParameters(overrides: PatternParameterOverrides = 
       maxSwings: intParam(wedge.maxSwings, 'wedge.maxSwings', 4),
       confirmationWindowBars: intParam(wedge.confirmationWindowBars, 'wedge.confirmationWindowBars', 1),
     },
+    candlestick: {
+      dojiMaxBodyToRange: decimalParam(cand.dojiMaxBodyToRange, 'candlestick.dojiMaxBodyToRange'),
+      longWickMinWickToBody: decimalParam(cand.longWickMinWickToBody, 'candlestick.longWickMinWickToBody'),
+      longWickMinWickToRange: decimalParam(cand.longWickMinWickToRange, 'candlestick.longWickMinWickToRange'),
+      smallOppositeMaxWickToRange: decimalParam(cand.smallOppositeMaxWickToRange, 'candlestick.smallOppositeMaxWickToRange'),
+      hammerMaxBodyToRange: decimalParam(cand.hammerMaxBodyToRange, 'candlestick.hammerMaxBodyToRange'),
+      engulfingMinBodyRatio: decimalParam(cand.engulfingMinBodyRatio, 'candlestick.engulfingMinBodyRatio'),
+      haramiMaxBodyRatio: decimalParam(cand.haramiMaxBodyRatio, 'candlestick.haramiMaxBodyRatio'),
+      piercingMinPenetration: decimalParam(cand.piercingMinPenetration, 'candlestick.piercingMinPenetration'),
+      starMaxMiddleBodyToRange: decimalParam(cand.starMaxMiddleBodyToRange, 'candlestick.starMaxMiddleBodyToRange'),
+      starMinFirstBodyAtr: decimalParam(cand.starMinFirstBodyAtr, 'candlestick.starMinFirstBodyAtr'),
+      starMinThirdPenetration: decimalParam(cand.starMinThirdPenetration, 'candlestick.starMinThirdPenetration'),
+      tweezerMaxExtremeDifferenceAtr: decimalParam(cand.tweezerMaxExtremeDifferenceAtr, 'candlestick.tweezerMaxExtremeDifferenceAtr'),
+      tweezerRequiresContext: boolParam(cand.tweezerRequiresContext, 'candlestick.tweezerRequiresContext'),
+      soldiersMinBodyToRange: decimalParam(cand.soldiersMinBodyToRange, 'candlestick.soldiersMinBodyToRange'),
+      soldiersMaxOppositeWickToRange: decimalParam(cand.soldiersMaxOppositeWickToRange, 'candlestick.soldiersMaxOppositeWickToRange'),
+      soldiersMinProgressionAtr: decimalParam(cand.soldiersMinProgressionAtr, 'candlestick.soldiersMinProgressionAtr'),
+      gapMode: cand.gapMode as 'optional' | 'strict',
+    },
+    candleContext: {
+      lookbackBars: intParam(candCtx.lookbackBars, 'candleContext.lookbackBars', 1),
+      minMoveAtr: decimalParam(candCtx.minMoveAtr, 'candleContext.minMoveAtr'),
+      trendDefinitionVersion: String(candCtx.trendDefinitionVersion),
+    },
+    pole: {
+      minMoveAtr: decimalParam(pole.minMoveAtr, 'pole.minMoveAtr'),
+      minBars: intParam(pole.minBars, 'pole.minBars', 1),
+      maxBars: intParam(pole.maxBars, 'pole.maxBars', 1),
+      maxInternalRetracement: decimalParam(pole.maxInternalRetracement, 'pole.maxInternalRetracement'),
+      minDirectionalEfficiency: decimalParam(pole.minDirectionalEfficiency, 'pole.minDirectionalEfficiency'),
+      maxStartSwings: intParam(pole.maxStartSwings, 'pole.maxStartSwings', 2),
+    },
+    flag: {
+      minTouchesPerSide: intParam(flag.minTouchesPerSide, 'flag.minTouchesPerSide', 2),
+      minBars: intParam(flag.minBars, 'flag.minBars', 1),
+      maxBarsToPoleRatio: decimalParam(flag.maxBarsToPoleRatio, 'flag.maxBarsToPoleRatio'),
+      maxRetracementOfPole: decimalParam(flag.maxRetracementOfPole, 'flag.maxRetracementOfPole'),
+      maxResidualAtr: decimalParam(flag.maxResidualAtr, 'flag.maxResidualAtr'),
+      maxFlatSlopeAtrPerBar: signedDecimalParam(flag.maxFlatSlopeAtrPerBar, 'flag.maxFlatSlopeAtrPerBar'),
+      maxParallelDiffAtr: decimalParam(flag.maxParallelDiffAtr, 'flag.maxParallelDiffAtr'),
+      maxSwings: intParam(flag.maxSwings, 'flag.maxSwings', 4),
+      confirmationWindowBars: intParam(flag.confirmationWindowBars, 'flag.confirmationWindowBars', 1),
+    },
+    pennant: {
+      minTouchesPerSide: intParam(pennant.minTouchesPerSide, 'pennant.minTouchesPerSide', 2),
+      minBars: intParam(pennant.minBars, 'pennant.minBars', 1),
+      maxBarsToPoleRatio: decimalParam(pennant.maxBarsToPoleRatio, 'pennant.maxBarsToPoleRatio'),
+      maxRetracementOfPole: decimalParam(pennant.maxRetracementOfPole, 'pennant.maxRetracementOfPole'),
+      maxResidualAtr: decimalParam(pennant.maxResidualAtr, 'pennant.maxResidualAtr'),
+      minSlopeAtrPerBar: decimalParam(pennant.minSlopeAtrPerBar, 'pennant.minSlopeAtrPerBar'),
+      minConvergence: decimalParam(pennant.minConvergence, 'pennant.minConvergence'),
+      maxApexBarsAhead: intParam(pennant.maxApexBarsAhead, 'pennant.maxApexBarsAhead', 1),
+      maxSwings: intParam(pennant.maxSwings, 'pennant.maxSwings', 4),
+      confirmationWindowBars: intParam(pennant.confirmationWindowBars, 'pennant.confirmationWindowBars', 1),
+    },
   };
+  if (resolved.pole.minBars > resolved.pole.maxBars) throw new PatternParameterError('pole min bars must not exceed max bars');
+  if (resolved.candleContext.lookbackBars < 1) throw new PatternParameterError('candleContext.lookbackBars must be positive');
+  if (Decimal.from(resolved.candlestick.haramiMaxBodyRatio).lte(0)) throw new PatternParameterError('candlestick.haramiMaxBodyRatio must be positive');
   if (resolved.headShoulders.minPatternBars > resolved.headShoulders.maxPatternBars) throw new PatternParameterError('headShoulders min must not exceed max');
   if (resolved.double.maxPatternBars < resolved.double.minSeparationBars) throw new PatternParameterError('double.maxPatternBars must be at least minSeparationBars');
   if (resolved.triangle.minPatternBars > resolved.triangle.maxPatternBars) throw new PatternParameterError('triangle min must not exceed max');
