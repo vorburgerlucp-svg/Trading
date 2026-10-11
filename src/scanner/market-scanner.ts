@@ -6,19 +6,21 @@ import type { ScannerCandidate, ScannerCoverage, ScannerDefinition, ScannerRun, 
 
 // v2 adds inputsAvailableAt to the stored run. v3 derives the universe from a persistent selection. v4 makes rankingComplete require the
 // universe to be complete, and refuses live candidates unless the universe evidence is strict. The version is part of the input fingerprint.
-export const MARKET_SCANNER_VERSION = 'market-scanner:v4';
+// v5 makes live universe strength depend on NEXUS's database-sealed knowledge (universe-engine:v2): a proof sealed by asOf, not a claim.
+export const MARKET_SCANNER_VERSION = 'market-scanner:v5';
 
 /**
  * Why a universe does not support a live ranking. Empty when the evidence is strict (complete, production, known at asOf, contemporaneous).
  * Research scans are never blocked by this: they carry the limitation through the evidence instead.
  */
 function liveUniverseReasons(evidence: UniverseEvidence): string[] {
-  if (evidence.status === 'UNAVAILABLE') return ['UNIVERSE_EVIDENCE_UNPROVEN: no universe revision is known at asOf'];
+  if (evidence.status === 'UNAVAILABLE') return ['UNIVERSE_EVIDENCE_UNPROVEN: no universe revision is proven known at asOf'];
   const reasons: string[] = [];
   if (!evidence.complete) reasons.push('UNIVERSE_COVERAGE_INCOMPLETE: the universe source snapshot is not complete');
   if (!evidence.sourceProduction) reasons.push('UNIVERSE_SOURCE_NOT_PRODUCTION: the universe source is not a production source');
-  if (!evidence.decisionTimeKnowledgeProven) reasons.push('UNIVERSE_EVIDENCE_UNPROVEN: the universe revision was not known at asOf');
-  if (!evidence.contemporaneousVintage) reasons.push('UNIVERSE_HISTORICAL_RECONSTRUCTION: the universe membership is a historical reconstruction');
+  if (evidence.knowledgeProof === 'UNSEALED') reasons.push('UNIVERSE_KNOWLEDGE_NOT_SEALED: NEXUS holds no timing proof for this universe revision');
+  else if (!evidence.decisionTimeKnowledgeProven) reasons.push('UNIVERSE_KNOWLEDGE_AFTER_DECISION: NEXUS sealed this universe revision after asOf');
+  if (!evidence.contemporaneousVintageProven) reasons.push('UNIVERSE_HISTORICAL_RECONSTRUCTION: the universe membership is a historical reconstruction');
   return reasons;
 }
 

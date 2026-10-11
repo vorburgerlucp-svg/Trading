@@ -3,7 +3,7 @@ import type { TradingCalendar } from '../market-data/sessions.js';
 import type { Decimal } from '../money/decimal.js';
 import type { CostModelConfig } from './cost-model.js';
 import type { ExecutionClockIdentity } from './execution-clock.js';
-import type { UniverseEvidence } from '../universe/universe-model.js';
+import type { AnyUniverseEvidence } from '../universe/universe-model.js';
 import type { IntrabarFillPolicy } from './execution-model.js';
 
 export type PositionSizing =
@@ -139,7 +139,7 @@ export interface BacktestRunResult {
   /** The execution calendar identity that fixed every executable open of this run. Required from backtest-engine:v7. */
   executionClock?: ExecutionClockIdentity;
   /** The universe evidence the run cited, when it cited one (backtest-engine:v8). */
-  universe?: UniverseEvidence;
+  universe?: AnyUniverseEvidence;
   /** Corporate-action accounting of this run. Present when the run was given corporate-action input (backtest-engine:v5). */
   corporateActions?: BacktestCorporateActionResult;
 }
@@ -304,7 +304,7 @@ export interface BacktestInput {
   /** The caller's request. The grade uses what the engine proves, so a `modeled` request can be refused (see quality). */
   quality: BacktestQualityContext;
   /** The derived universe evidence this run cites (docs/PIT_UNIVERSE_V1.md). The only path by which a universe can improve the grade. */
-  universe?: UniverseEvidence;
+  universe?: AnyUniverseEvidence;
   /** Corporate-action accounting. When given, the bars must be raw and the position is adjusted for each action. */
   corporateActions?: CorporateActionInput;
   /**

@@ -42,10 +42,11 @@ import { validateWarmupPlan, type WarmupPlan } from './warmup.js';
 
 /**
  * v8: the grade uses derived universe evidence (universe-engine:v1), never the caller's pointInTimeUniverse flag. v7 and earlier runs are not reinterpreted.
+ * v9: the grade uses database-sealed knowledge of the universe (universe-engine:v2). A caller's claimed knowledge time never upgrades a grade. v8 runs are not reinterpreted.
  * v7: fills execute at the executable market open (execution-clock:v1), not at a daily bar's window start; a signal fills at an open only
  * if it was usable by then; fills carry explicit timing (OPEN_EXACT or INTRABAR_UNKNOWN). v6 and earlier runs are not reinterpreted.
  */
-export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v8';
+export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v9';
 
 interface PendingOrder {
   side: 'buy' | 'sell';

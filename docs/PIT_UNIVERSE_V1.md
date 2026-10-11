@@ -1,6 +1,6 @@
 # Point-in-Time Universe V1 (universe-engine:v1)
 
-Status: implemented on `feature/pit-universe-v1` (base `c047078`). Not merged. Sections 1–4 are the design record written before the
+Status: implemented on `feature/pit-universe-v1` (base `c047078`). Not merged. Superseded in part by `docs/PIT_UNIVERSE_KNOWLEDGE_SEAL.md` (universe-engine:v2): `knownAt` and `retrievedAt` are source/ingest claims there, and NEXUS's knowledge is a database-sealed timing proof. Where this document says knowledge is proven by `knownAt`, read it as the claim. Sections 1–4 are the design record written before the
 implementation; sections 5–16 describe what was built and verified.
 
 ## 1. Inventory (what existed at c047078)

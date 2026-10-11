@@ -1,4 +1,4 @@
-import { historicalSelection, partialSelection, strictSelection, unavailableSelection } from '../universe/fixtures.js';
+import { historicalSelection, partialSelection, sealedAfterAsOfSelection, strictSelection, unavailableSelection, unsealedSelection } from '../universe/fixtures.js';
 import { describe, expect, it } from 'vitest';
 import { InMemoryBacktestRunStore } from '../../src/backtest/backtest-store.js';
 import { executionClockIdentity } from '../../src/backtest/execution-clock.js';
@@ -109,7 +109,7 @@ function backtestRun(o: { c: string; instrumentId?: string; grade?: BacktestRunR
   const grade = o.grade ?? 'A';
   return {
     backtestRunId: backtestId(o.c),
-    engineVersion: 'backtest-engine:v8',
+    engineVersion: 'backtest-engine:v9',
     instrumentId,
     strategyId: 'breakout',
     strategyVersion: '1',
@@ -325,6 +325,39 @@ describe('Evidence reference validation (NEXUS Brain, read-only, fail closed)', 
     const decision = await ctx.brain.decide(decisionRequest(task(), { quant: cited, requiresCompleteUniverse: true }));
     expect(decision.evidence.warnings.filter((w) => w.code.startsWith('UNIVERSE_'))).toEqual([]);
     expect(decision.evidence.lineage.scanner?.universe).toMatchObject({ status: 'SELECTED', complete: true, sourceProduction: true, strictDecisionTime: true, historicalReconstruction: false });
+  });
+
+  it('Universum ohne Zeitbeweis (UNSEALED): Warnung für Research, fail closed wenn die Entscheidung das volle Universum braucht', async () => {
+    const { readers, cited } = await validLineage({ scanner: { universe: unsealedSelection('universe-test', T0).evidence } });
+    const soft = await setupBrain({ adapters: council(), evidenceReaders: readers });
+    const decision = await soft.brain.decide(decisionRequest(task(), { quant: cited }));
+    expect(decision.evidence.warnings.map((w) => w.code)).toContain('UNIVERSE_KNOWLEDGE_NOT_SEALED');
+    const strict = await setupBrain({ adapters: council(), evidenceReaders: readers });
+    const error = await strict.brain.decide(decisionRequest(task(), { quant: cited, requiresCompleteUniverse: true })).catch((e: unknown) => e);
+    expect((error as EvidenceReferenceError).codes).toEqual(expect.arrayContaining(['UNIVERSE_KNOWLEDGE_NOT_SEALED']));
+  });
+
+  it('Zeitbeweis nach asOf: NEXUS hielt die Revision am Entscheidungszeitpunkt nicht, Warnung für Research, fail closed für das volle Universum', async () => {
+    const { readers, cited } = await validLineage({ scanner: { universe: sealedAfterAsOfSelection('universe-test', T0).evidence } });
+    const soft = await setupBrain({ adapters: council(), evidenceReaders: readers });
+    const decision = await soft.brain.decide(decisionRequest(task(), { quant: cited }));
+    expect(decision.evidence.warnings.map((w) => w.code)).toContain('UNIVERSE_KNOWLEDGE_AFTER_DECISION');
+    const strict = await setupBrain({ adapters: council(), evidenceReaders: readers });
+    const error = await strict.brain.decide(decisionRequest(task(), { quant: cited, requiresCompleteUniverse: true })).catch((e: unknown) => e);
+    expect((error as EvidenceReferenceError).codes).toEqual(expect.arrayContaining(['UNIVERSE_KNOWLEDGE_AFTER_DECISION']));
+  });
+
+  it('Universum aus universe-engine:v1 ist nie stark: seine Behauptungen zählen nicht als Beweis, auch mit strictDecisionTime: true', async () => {
+    const fields = { status: 'SELECTED', universeId: 'universe-test', definitionVersion: '1', sourceId: 'fixture:universe:production', sourceProduction: true, snapshotKey: 'uk_' + 'a'.repeat(40), snapshotRevisionId: 'urev_' + 'b'.repeat(40), revision: 1, effectiveAt: '2020-01-01T00:00:00.000Z', knownAt: '2019-12-31T12:00:00.000Z', vintage: 'contemporaneous', completeness: 'COMPLETE', complete: true, decisionTimeKnowledgeProven: true, contemporaneousVintage: true, historicalReconstruction: false, strictDecisionTime: true, replayMode: 'decision_time', asOf: T0, memberCount: 2 };
+    const legacy = { ...fields, fingerprint: hashOf({ kind: 'universe-evidence:v1', ...fields }) } as unknown as UniverseEvidence;
+    const { readers, cited } = await validLineage({ scanner: { universe: legacy } });
+    const soft = await setupBrain({ adapters: council(), evidenceReaders: readers });
+    const decision = await soft.brain.decide(decisionRequest(task(), { quant: cited }));
+    expect(decision.evidence.warnings.map((w) => w.code)).toContain('UNIVERSE_KNOWLEDGE_NOT_SEALED');
+    expect(decision.evidence.lineage.scanner?.universe).toMatchObject({ evidenceVersion: 'legacy:v1', strictDecisionTime: false, knowledgeProof: 'UNSEALED' });
+    const strict = await setupBrain({ adapters: council(), evidenceReaders: readers });
+    const error = await strict.brain.decide(decisionRequest(task(), { quant: cited, requiresCompleteUniverse: true })).catch((e: unknown) => e);
+    expect((error as EvidenceReferenceError).codes).toEqual(expect.arrayContaining(['UNIVERSE_KNOWLEDGE_NOT_SEALED']));
   });
 
   it('Referenz ohne konfigurierten Reader schlägt fail closed fehl (kein stiller Fallback)', async () => {

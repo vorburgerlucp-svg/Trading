@@ -1,6 +1,6 @@
 import type { BacktestBarKnowledge, BacktestDataProvenance, BacktestQuality, BacktestQualityContext, CorporateActionReasonCode } from './backtest-types.js';
 import { CORPORATE_ACTION_REASON_TEXT } from './corporate-action-engine.js';
-import type { UniverseEvidence } from '../universe/universe-model.js';
+import { isUniverseEvidenceV2, type AnyUniverseEvidence } from '../universe/universe-model.js';
 
 /**
  * Grade of a backtest. Its data provenance caps the grade; the return never enters.
@@ -19,7 +19,7 @@ export function assessBacktestQuality(
   /** The corporate-action limitations the engine recorded. Each is reported under its own code, never merged. */
   corporateActionReasons: readonly CorporateActionReasonCode[] = [],
   /** The derived universe evidence the run cites (BacktestInput.universe). A caller boolean never reaches this. null/undefined: none cited. */
-  universe?: UniverseEvidence | null,
+  universe?: AnyUniverseEvidence | null,
 ): BacktestQuality {
   const reasons: string[] = [];
   const dataProvenance: BacktestDataProvenance =
@@ -36,11 +36,15 @@ export function assessBacktestQuality(
   if (universe === undefined || universe === null) {
     downgrade('C', 'UNIVERSE_EVIDENCE_NOT_PROVIDED: no universe evidence is cited, so the universe is not proven');
     if (context.pointInTimeUniverse) downgrade('C', 'CALLER_UNIVERSE_CLAIM_NOT_PROVEN: a caller asserted point-in-time safety without evidence');
+  } else if (!isUniverseEvidenceV2(universe)) {
+    // universe-engine:v1 evidence: its knowledge was a caller claim. Readable, never graded as proven.
+    downgrade('C', 'UNIVERSE_KNOWLEDGE_NOT_SEALED: the universe evidence predates database-sealed knowledge (universe-engine:v1)');
   } else if (universe.status === 'UNAVAILABLE') {
     downgrade('C', 'UNIVERSE_EVIDENCE_UNPROVEN: no universe revision was known at asOf');
   } else {
     if (!universe.complete) downgrade('C', 'UNIVERSE_COVERAGE_INCOMPLETE: the universe source snapshot is not complete');
     if (!universe.sourceProduction) downgrade('C', 'UNIVERSE_SOURCE_NOT_PRODUCTION: the universe source is not a production source');
+    if (universe.knowledgeProof === 'UNSEALED') downgrade('C', 'UNIVERSE_KNOWLEDGE_NOT_SEALED: NEXUS holds no timing proof for the universe revision');
     if (universe.historicalReconstruction) downgrade('B', 'UNIVERSE_HISTORICAL_RECONSTRUCTION: the universe membership is a historical reconstruction, not strict point-in-time evidence');
   }
   if (context.corporateActions !== 'modeled' || corporateActionReasons.length > 0) downgrade('C', 'corporate actions are not fully modeled');

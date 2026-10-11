@@ -4,7 +4,7 @@ import { registryResolver } from '../../src/universe/instrument-identity.js';
 import { InMemoryUniverseStore } from '../../src/universe/universe-store.js';
 import { sequentialIds } from '../helpers.js';
 import { AAPL } from '../market-data/fixtures.js';
-import { PRODUCTION_UNIVERSE_SOURCE } from './fixtures.js';
+import { PRODUCTION_UNIVERSE_SOURCE, manualClock } from './fixtures.js';
 
 // Identity of a universe member comes from the InstrumentRegistry at the effective instant. A ticker is never identity.
 
@@ -20,18 +20,19 @@ async function registryWithTickerChange() {
   return registry;
 }
 
-function universeWith(registry: InstrumentRegistry) {
-  const store = new InMemoryUniverseStore();
+function universeWith(registry: InstrumentRegistry, clock = manualClock('2026-10-09T12:00:00.000Z')) {
+  const store = new InMemoryUniverseStore({ clock: clock.clock });
   store.registerDefinition({ universeId: 'u', definitionVersion: '1', name: 'fixture universe' });
   store.registerSource(PRODUCTION_UNIVERSE_SOURCE);
-  return { store, resolve: registryResolver(registry) };
+  return { store, clock, resolve: registryResolver(registry) };
 }
 
 describe('universe identity comes from the InstrumentRegistry, never from the ticker', () => {
   it('a ticker change keeps every snapshot on the same instrument, and each ticker counts only at its own time', async () => {
     const registry = await registryWithTickerChange();
-    const { store, resolve } = universeWith(registry);
+    const { store, clock, resolve } = universeWith(registry, manualClock('2019-12-31T12:00:01.000Z'));
     store.ingest({ universeId: 'u', sourceId: SOURCE_ID, effectiveAt: '2020-01-01T00:00:00Z', retrievedAt: '2019-12-31T12:00:00Z', knowledgeSource: 'captured_by_nexus', knownAt: '2019-12-31T12:00:00Z', completeness: 'COMPLETE', members: [{ sourceMemberKey: 'k:fb', providerSymbol: 'FB' }] }, resolve);
+    clock.set('2022-12-31T12:00:01.000Z');
     store.ingest({ universeId: 'u', sourceId: SOURCE_ID, effectiveAt: '2023-01-01T00:00:00Z', retrievedAt: '2022-12-31T12:00:00Z', knowledgeSource: 'captured_by_nexus', knownAt: '2022-12-31T12:00:00Z', completeness: 'COMPLETE', members: [{ sourceMemberKey: 'k:fb', providerSymbol: 'META' }] }, resolve);
 
     expect(store.select({ universeId: 'u', sourceId: SOURCE_ID, asOf: '2021-06-01T00:00:00Z', mode: 'decision_time' }).members).toEqual(['ins_a']);
@@ -39,6 +40,7 @@ describe('universe identity comes from the InstrumentRegistry, never from the ti
     expect(after.members).toEqual(['ins_a']);
     expect(after.revision?.members[0]).toMatchObject({ instrumentId: 'ins_a', providerSymbol: 'META' });
     // The old ticker means nothing after its change: a COMPLETE snapshot that still says FB is refused.
+    clock.set('2023-12-31T12:00:01.000Z');
     expect(() => store.ingest({ universeId: 'u', sourceId: SOURCE_ID, effectiveAt: '2024-01-01T00:00:00Z', retrievedAt: '2023-12-31T12:00:00Z', knowledgeSource: 'captured_by_nexus', knownAt: '2023-12-31T12:00:00Z', completeness: 'COMPLETE', members: [{ sourceMemberKey: 'k:fb', providerSymbol: 'FB' }] }, resolve)).toThrow(/UNIVERSE_MEMBER_UNRESOLVED/);
   });
 
@@ -53,7 +55,7 @@ describe('universe identity comes from the InstrumentRegistry, never from the ti
 
   it('a symbol with no mapping at the instant resolves to nothing, and a partial snapshot keeps it visible', async () => {
     const registry = await registryWithTickerChange();
-    const { store, resolve } = universeWith(registry);
+    const { store, resolve } = universeWith(registry, manualClock('2019-12-31T12:00:01.000Z'));
     const stored = store.ingest({ universeId: 'u', sourceId: SOURCE_ID, effectiveAt: '2020-01-01T00:00:00Z', retrievedAt: '2019-12-31T12:00:00Z', knowledgeSource: 'captured_by_nexus', knownAt: '2019-12-31T12:00:00Z', completeness: 'PARTIAL', members: [{ sourceMemberKey: 'k:fb', providerSymbol: 'FB' }, { sourceMemberKey: 'k:zz', providerSymbol: 'ZZZ' }] }, resolve);
     expect(stored.revision.members.map((m) => m.instrumentId)).toEqual(['ins_a']);
     expect(stored.revision.unresolvedMembers.map((u) => u.providerSymbol)).toEqual(['ZZZ']);

@@ -1,13 +1,18 @@
-// PostgreSQL Point-in-Time Universe store (universe-engine:v1, migration 010). It has the same semantics as InMemoryUniverseStore: both run
-// the pure rules of universe-model.ts, so the two cannot disagree. Writes are append-only (the database rejects UPDATE, DELETE and
-// TRUNCATE). Every read rebuilds a revision from its header and member rows, recomputes its identities and compares it with the stored
-// payload. A mismatch is refused: a tampered revision never becomes evidence.
+// PostgreSQL Point-in-Time Universe store (universe-engine:v2, migrations 010 and 011). It has the same semantics as InMemoryUniverseStore:
+// both run the pure rules of universe-model.ts. Writes are append-only (the database rejects UPDATE, DELETE and TRUNCATE). Every read
+// rebuilds a revision from its header and member rows, checks it against the stored payload and recomputes its identities. A timing
+// proof is read back and verified against the revision it seals. A mismatch is refused: tampered data never becomes evidence.
+//
+// NEXUS's knowledge of a revision is the database clock, read before the commit (recordedAt) and after it (sealedAt, written as its own
+// seal). The clock is the database's. The optional clock option is a test seam only, so the two stores can be compared on equal readings.
 
+import { parseUtc } from '../../market-data/time.js';
 import { hashOf } from '../canonical-json.js';
 import { decodeJson, encodeJson } from '../json-codec.js';
 import {
   UniverseError,
   assertRevisionIntegrity,
+  assertTimingProof,
   canonicalMembers,
   canonicalUnresolved,
   evidenceOf,
@@ -17,16 +22,19 @@ import {
   planRevision,
   prepareRevision,
   selectionOf,
+  timingProofFor,
   type MemberResolver,
+  type SelectedRevision,
   type StoredUniverseRevision,
   type UniverseDefinition,
   type UniverseSelection,
   type UniverseSnapshotInput,
   type UniverseSource,
+  type UniverseTimingProof,
 } from '../../universe/universe-model.js';
 import type { UniverseSelectionQuery } from '../../universe/universe-store.js';
-import type { PgPool, PgClient } from './pool.js';
-import type { Queryable } from './postgres-scanner-backtest-store.js';
+import type { PgClient, PgPool } from './pool.js';
+import { databaseClock, type Queryable } from './postgres-scanner-backtest-store.js';
 
 /** Canonical ISO UTC with milliseconds, exactly as the universe model writes instants. */
 const ISO_MS_SQL = `'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'`;
@@ -95,6 +103,24 @@ interface DefinitionRow {
   definition_hash: string;
 }
 
+interface ProofRow {
+  proof_kind: UniverseTimingProof['proofKind'];
+  result_hash: string;
+  recorded_at: string;
+  sealed_at: string;
+  seal_hash: string;
+}
+
+export interface PostgresUniverseStoreOptions {
+  /**
+   * Test seam only. Production reads the database clock. An injected clock lets PostgreSQL and the in-memory store run on the same readings,
+   * so their outputs can be compared exactly. The database-clock path is tested separately.
+   */
+  clock?: () => Promise<string>;
+  /** Test hook between the commit and the seal. A throw here leaves a committed revision without a timing proof (a crash in that gap). */
+  afterCommit?: () => Promise<void>;
+}
+
 async function rollbackQuietly(client: { query(sql: string): Promise<unknown> }): Promise<void> {
   try {
     await client.query('ROLLBACK');
@@ -104,7 +130,10 @@ async function rollbackQuietly(client: { query(sql: string): Promise<unknown> })
 }
 
 export class PostgresUniverseStore {
-  constructor(private readonly pool: PgPool) {}
+  constructor(
+    private readonly pool: PgPool,
+    private readonly options: PostgresUniverseStoreOptions = {},
+  ) {}
 
   async registerSource(source: UniverseSource): Promise<void> {
     const normalized = normalizeSource(source);
@@ -142,16 +171,24 @@ export class PostgresUniverseStore {
   }
 
   /**
-   * Ingests one complete (or explicitly partial) snapshot. Identical content for the same key is idempotent. Different content is the next
-   * revision. A COMPLETE snapshot with an unresolved member is refused before anything is written.
+   * Ingests one complete (or explicitly partial) snapshot and seals it. Identical content for the same key is idempotent. Different content is
+   * the next revision. A COMPLETE snapshot with an unresolved member is refused before anything is written. APPLIED is returned only after
+   * the seal is written. An already-stored revision without a seal gets a PRESENCE_ATTESTATION at this time.
    */
-  async ingest(input: UniverseSnapshotInput, resolve: MemberResolver): Promise<{ status: 'APPLIED' | 'ALREADY_APPLIED'; revision: StoredUniverseRevision }> {
+  async ingest(
+    input: UniverseSnapshotInput,
+    resolve: MemberResolver,
+  ): Promise<{ status: 'APPLIED' | 'ALREADY_APPLIED'; revision: StoredUniverseRevision; timingProof: UniverseTimingProof }> {
     const client: PgClient = await this.pool.connect();
     try {
       await client.query('BEGIN');
       // One ingest at a time: the ingest sequence and the revision number are decided under this lock.
       await client.query('SELECT pg_advisory_xact_lock($1)', [UNIVERSE_INGEST_LOCK]);
-      const prepared = prepareRevision(input, await this.loadDefinition(client, input.universeId), await this.loadSource(client, input.sourceId), resolve);
+      const definition = await this.loadDefinition(client, input.universeId);
+      const source = await this.loadSource(client, input.sourceId);
+      // Read BEFORE the commit: a lower bound on the commit time.
+      const recordedAt = await this.now(client);
+      const prepared = prepareRevision(input, definition, source, resolve, recordedAt);
       const existing = (
         await client.query<{ snapshot_revision_id: string; revision: number; content_hash: string; known_at: string }>(
           `SELECT snapshot_revision_id, revision, content_hash, to_char(known_at AT TIME ZONE 'UTC', ${ISO_MS_SQL}) AS known_at
@@ -165,7 +202,8 @@ export class PostgresUniverseStore {
         const same = await this.loadVerified(client, plan.snapshotRevisionId);
         await client.query('COMMIT');
         if (!same) throw new UniverseError('UNIVERSE_INTEGRITY_FAILED', 'an identical revision is recorded but cannot be found');
-        return { status: 'ALREADY_APPLIED', revision: same };
+        const timingProof = (await this.loadProof(client, same)) ?? (await this.attest(client, same));
+        return { status: 'ALREADY_APPLIED', revision: same, timingProof };
       }
 
       const rev = plan.revision;
@@ -217,7 +255,11 @@ export class PostgresUniverseStore {
         );
       }
       await client.query('COMMIT');
-      return { status: 'APPLIED', revision: rev };
+      // The commit is durable. A crash here leaves a committed revision with no seal: research can still read it, decision time cannot.
+      if (this.options.afterCommit) await this.options.afterCommit();
+      // Read AFTER the commit, in its own statement: an upper bound on the commit time.
+      const timingProof = await this.seal(client, rev, 'COMMIT_SEAL', recordedAt);
+      return { status: 'APPLIED', revision: rev, timingProof };
     } catch (error) {
       await rollbackQuietly(client);
       throw error;
@@ -227,26 +269,34 @@ export class PostgresUniverseStore {
   }
 
   /**
-   * Selects the revision for a request and derives its evidence. The rule is the one of selectRevision: the latest effective revision, then
-   * its latest revision number; decision_time gates on knownAt; storedThrough gates on the ingest sequence.
+   * Selects the revision for a request and derives its evidence. decision_time gates on a verified timing proof sealed by asOf (the seal's
+   * database clock, not the claimed knownAt). historical_research gates on effectiveAt only. storedThrough gates on the ingest sequence.
    */
   async select(q: UniverseSelectionQuery): Promise<UniverseSelection> {
     const definition = await this.loadDefinition(this.pool, q.universeId);
     if (!definition) throw new UniverseError('UNIVERSE_NOT_FOUND', 'universe ' + q.universeId + ' is not defined');
     const asOf = instantOf(q.asOf, 'asOf');
-    const head = (
+    // The candidates in the order selectRevision ranks them. Every candidate examined is verified: a tampered proof fails closed, it is never
+    // skipped. Candidates after the chosen one are not examined, and they cannot change the choice.
+    const candidates = (
       await this.pool.query<{ snapshot_revision_id: string }>(
         `SELECT snapshot_revision_id FROM universe_snapshot_revisions
-          WHERE universe_id = $1 AND source_id = $2
-            AND effective_at <= $3::timestamptz
-            AND ($4::boolean = false OR known_at <= $3::timestamptz)
-            AND ($5::integer IS NULL OR ingest_seq <= $5::integer)
-          ORDER BY effective_at DESC, revision DESC LIMIT 1`,
-        [q.universeId, q.sourceId, asOf, q.mode === 'decision_time', q.storedThrough ?? null],
+          WHERE universe_id = $1 AND source_id = $2 AND effective_at <= $3::timestamptz
+            AND ($4::integer IS NULL OR ingest_seq <= $4::integer)
+          ORDER BY effective_at DESC, revision DESC`,
+        [q.universeId, q.sourceId, asOf, q.storedThrough ?? null],
       )
-    ).rows[0];
-    const revision = head ? await this.loadVerified(this.pool, head.snapshot_revision_id) : null;
-    const evidence = evidenceOf(revision, {
+    ).rows;
+    let selected: SelectedRevision | null = null;
+    for (const candidate of candidates) {
+      const revision = await this.loadVerified(this.pool, candidate.snapshot_revision_id);
+      if (revision === null) continue;
+      const proof = await this.loadProof(this.pool, revision);
+      if (q.mode === 'decision_time' && (proof === null || parseUtc(proof.sealedAt) > parseUtc(asOf))) continue;
+      selected = { revision, proof };
+      break;
+    }
+    const evidence = evidenceOf(selected, {
       universeId: q.universeId,
       definitionVersion: definition.definitionVersion,
       sourceId: q.sourceId,
@@ -254,12 +304,18 @@ export class PostgresUniverseStore {
       asOf,
       mode: q.mode,
     });
-    return selectionOf(revision, evidence);
+    return selectionOf(selected, evidence);
   }
 
   /** A stored revision, verified on the way out. null when no such revision exists. */
   async revisionById(snapshotRevisionId: string): Promise<StoredUniverseRevision | null> {
     return this.loadVerified(this.pool, snapshotRevisionId);
+  }
+
+  /** NEXUS's timing proof of a revision, verified against it. null when none was written (a crash gap, or a revision before sealing). */
+  async timingProofOf(snapshotRevisionId: string): Promise<UniverseTimingProof | null> {
+    const revision = await this.loadVerified(this.pool, snapshotRevisionId);
+    return revision === null ? null : this.loadProof(this.pool, revision);
   }
 
   /** Every stored revision in ingest order, each verified. For audit. */
@@ -271,6 +327,55 @@ export class PostgresUniverseStore {
       if (revision) out.push(revision);
     }
     return out;
+  }
+
+  /** The database clock, or the test seam. Read as canonical ISO UTC with milliseconds. */
+  private async now(db: Queryable): Promise<string> {
+    return this.options.clock ? instantOf(await this.options.clock(), 'store clock') : databaseClock(db);
+  }
+
+  /** Writes the seal of a revision. Its sealedAt is read in its own statement, after the commit that stored the revision. */
+  private async seal(db: Queryable, revision: StoredUniverseRevision, proofKind: UniverseTimingProof['proofKind'], recordedAt: string): Promise<UniverseTimingProof> {
+    const sealedAt = await this.now(db);
+    const proof = timingProofFor({ snapshotRevisionId: revision.snapshotRevisionId, proofKind, resultHash: hashOf(revision), recordedAt, sealedAt });
+    await db.query(
+      `INSERT INTO universe_revision_seals (snapshot_revision_id, proof_kind, result_hash, recorded_at, sealed_at, seal_hash)
+       VALUES ($1, $2, $3, $4::timestamptz, $5::timestamptz, $6) ON CONFLICT (snapshot_revision_id) DO NOTHING`,
+      [proof.snapshotRevisionId, proof.proofKind, proof.resultHash, proof.recordedAt, proof.sealedAt, proof.sealHash],
+    );
+    // A concurrent seal may have written first: the stored proof is the one that counts.
+    const stored = await this.loadProof(db, revision);
+    if (!stored) throw new UniverseError('UNIVERSE_INTEGRITY_FAILED', 'the timing seal of ' + revision.snapshotRevisionId + ' could not be read back');
+    return stored;
+  }
+
+  /** A presence attestation for a stored revision that has no seal: it proves the revision existed by its sealedAt, never an earlier time. */
+  private async attest(db: Queryable, revision: StoredUniverseRevision): Promise<UniverseTimingProof> {
+    const recordedAt = await this.now(db);
+    return this.seal(db, revision, 'PRESENCE_ATTESTATION', recordedAt);
+  }
+
+  /** Reads and verifies the timing proof of a revision. A proof that does not match the revision it names fails closed. */
+  private async loadProof(db: Queryable, revision: StoredUniverseRevision): Promise<UniverseTimingProof | null> {
+    const row = (
+      await db.query(
+        `SELECT proof_kind, result_hash, to_char(recorded_at AT TIME ZONE 'UTC', ${ISO_MS_SQL}) AS recorded_at,
+                to_char(sealed_at AT TIME ZONE 'UTC', ${ISO_MS_SQL}) AS sealed_at, seal_hash
+           FROM universe_revision_seals WHERE snapshot_revision_id = $1`,
+        [revision.snapshotRevisionId],
+      )
+    ).rows[0] as ProofRow | undefined;
+    if (!row) return null;
+    const proof: UniverseTimingProof = {
+      snapshotRevisionId: revision.snapshotRevisionId,
+      proofKind: row.proof_kind,
+      resultHash: row.result_hash,
+      recordedAt: row.recorded_at,
+      sealedAt: row.sealed_at,
+      sealHash: row.seal_hash,
+    };
+    assertTimingProof(proof, revision);
+    return proof;
   }
 
   private async ingestSeqIn(db: Queryable): Promise<number> {

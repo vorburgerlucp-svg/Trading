@@ -12,7 +12,7 @@ const ASOF = '2020-09-21T20:00:00.000Z';
 
 describe('caller-asserted point-in-time (must not be trusted)', () => {
   it('a universe from a test-fixture source is never production evidence, however complete it looks', () => {
-    const store = new InMemoryUniverseStore();
+    const store = new InMemoryUniverseStore({ clock: () => '2019-12-31T12:00:01.000Z' });
     store.registerDefinition({ universeId: 'u_test_index', definitionVersion: '1', name: 'Test index' });
     store.registerSource({ sourceId: 'hand-typed:test', provider: 'hand-typed', dataset: 'constituents', environment: 'test_fixture', license: 'unreviewed' });
     store.ingest(
@@ -24,7 +24,7 @@ describe('caller-asserted point-in-time (must not be trusted)', () => {
   });
 
   it('a scanner run cannot inherit strict universe evidence from a non-production source', () => {
-    const store = new InMemoryUniverseStore();
+    const store = new InMemoryUniverseStore({ clock: () => '2019-12-31T12:00:01.000Z' });
     store.registerDefinition({ universeId: 'u_test_index', definitionVersion: '1', name: 'Test index' });
     store.registerSource({ sourceId: 'hand-typed:test', provider: 'hand-typed', dataset: 'constituents', environment: 'test_fixture', license: 'unreviewed' });
     store.ingest(

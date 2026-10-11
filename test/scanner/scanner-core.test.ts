@@ -7,6 +7,7 @@ import { runMarketScanner } from '../../src/scanner/market-scanner.js';
 import type { ScannerDefinition, ScannerSnapshot } from '../../src/scanner/scanner-types.js';
 import { AAPL, PRODUCTION_LIKE_SOURCE, dailyBars, randomOhlcv } from '../market-data/fixtures.js';
 import { InMemoryUniverseStore } from '../../src/universe/universe-store.js';
+import { manualClock } from '../universe/fixtures.js';
 import { strictSelection } from '../universe/fixtures.js';
 
 const XNAS = getCalendar('XNAS')!;
@@ -66,11 +67,13 @@ function scannerUniverse(asOf: string, extraMembers: string[] = []) {
 
 describe('point-in-time universe', () => {
   it('a member joins and leaves by effective complete snapshots; each decision sees the list in force', () => {
-    const store = new InMemoryUniverseStore();
+    const clock = manualClock('2025-12-31T00:00:00.000Z');
+    const store = new InMemoryUniverseStore({ clock: clock.clock });
     store.registerDefinition({ universeId: 'U', definitionVersion: '1', name: 'U' });
     store.registerSource({ sourceId: 'fixture:u:production', provider: 'fixture', dataset: 'constituents', environment: 'production', license: 'internal_use' });
+    // Each snapshot is stored by NEXUS on the day it was retrieved, before the decisions that use it.
     const ingest = (effectiveAt: string, retrievedAt: string, ids: string[]) =>
-      store.ingest({ universeId: 'U', sourceId: 'fixture:u:production', effectiveAt, retrievedAt, knowledgeSource: 'captured_by_nexus', knownAt: retrievedAt, completeness: 'COMPLETE', members: ids.map((id) => ({ sourceMemberKey: 'k:' + id, providerSymbol: id })) }, (m) => m.providerSymbol);
+      (clock.set(retrievedAt), store.ingest({ universeId: 'U', sourceId: 'fixture:u:production', effectiveAt, retrievedAt, knowledgeSource: 'captured_by_nexus', knownAt: retrievedAt, completeness: 'COMPLETE', members: ids.map((id) => ({ sourceMemberKey: 'k:' + id, providerSymbol: id })) }, (m) => m.providerSymbol));
     ingest('2026-01-01T00:00:00.000Z', '2025-12-31T00:00:00.000Z', ['A']);
     ingest('2026-02-01T00:00:00.000Z', '2026-01-31T00:00:00.000Z', ['A', 'B']);
     ingest('2026-06-01T00:00:00.000Z', '2026-05-31T00:00:00.000Z', ['B']);

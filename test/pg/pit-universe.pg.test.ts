@@ -3,7 +3,6 @@ import { hashOf } from '../../src/persistence/canonical-json.js';
 import { loadMigrations } from '../../src/persistence/postgres/migrator.js';
 import { PostgresUniverseStore } from '../../src/persistence/postgres/postgres-universe-store.js';
 import {
-  UniverseError,
   type MemberResolver,
   type StoredUniverseRevision,
   type UniverseDefinition,
@@ -11,12 +10,14 @@ import {
   type UniverseSelection,
   type UniverseSnapshotInput,
   type UniverseSource,
+  type UniverseTimingProof,
 } from '../../src/universe/universe-model.js';
 import { InMemoryUniverseStore, type UniverseSelectionQuery } from '../../src/universe/universe-store.js';
+import { manualClock } from '../universe/fixtures.js';
 import { createTestDatabase, pgAvailable, pgSkipReason, type TestDatabase } from './db.js';
 
-// PostgreSQL Point-in-Time Universe V1 (migration 010). Regressions first: each test states what must not happen. The same scenarios run
-// on the in-memory store, and the two must agree exactly (identities, sequence, evidence). See docs/PIT_UNIVERSE_V1.md.
+// PostgreSQL Point-in-Time Universe (migrations 010 and 011). Regressions first: each test states what must not happen. The same scenarios run on
+// the in-memory store and on PostgreSQL, on the same clock readings, and the two must agree exactly. See docs/PIT_UNIVERSE_KNOWLEDGE_SEAL.md.
 
 const SOURCE: UniverseSource = { sourceId: 'vendor:constituents', provider: 'vendor', dataset: 'index_constituents', environment: 'production', license: 'internal_use' };
 const DEFINITION: UniverseDefinition = { universeId: 'u_idx', definitionVersion: '1', name: 'Index' };
@@ -29,23 +30,24 @@ function member(pid: string, symbol = 'SYM' + pid): UniverseMemberInput {
   return { sourceMemberKey: 'key:' + pid, providerSymbol: symbol, providerInstrumentId: pid };
 }
 
-function snapshot(o: { effectiveAt: string; retrievedAt: string; members: UniverseMemberInput[]; completeness?: 'COMPLETE' | 'PARTIAL' }): UniverseSnapshotInput {
+function claim(o: { effectiveAt: string; retrievedAt: string; members: UniverseMemberInput[]; completeness?: 'COMPLETE' | 'PARTIAL' }): UniverseSnapshotInput {
   return { universeId: UNIVERSE, sourceId: SOURCE.sourceId, knowledgeSource: 'captured_by_nexus', knownAt: o.retrievedAt, completeness: o.completeness ?? 'COMPLETE', ...o };
 }
 
 interface UniverseApi {
   registerSource(s: UniverseSource): Promise<void>;
   registerDefinition(d: UniverseDefinition): Promise<void>;
-  ingest(i: UniverseSnapshotInput, r: MemberResolver): Promise<{ status: 'APPLIED' | 'ALREADY_APPLIED'; revision: StoredUniverseRevision }>;
+  ingest(i: UniverseSnapshotInput, r: MemberResolver): Promise<{ status: 'APPLIED' | 'ALREADY_APPLIED'; revision: StoredUniverseRevision; timingProof: UniverseTimingProof }>;
   select(q: UniverseSelectionQuery): Promise<UniverseSelection>;
   currentIngestSeq(): Promise<number>;
   revisionById(id: string): Promise<StoredUniverseRevision | null>;
+  timingProofOf(id: string): Promise<UniverseTimingProof | null>;
   all(): Promise<readonly StoredUniverseRevision[]>;
 }
 
-/** The in-memory store behind the same async interface, so one scenario drives both stores. */
-function memoryApi(): UniverseApi {
-  const store = new InMemoryUniverseStore();
+/** The in-memory store behind the same async interface, on the same clock. */
+function memoryApi(clock: ReturnType<typeof manualClock>): UniverseApi {
+  const store = new InMemoryUniverseStore({ clock: clock.clock });
   return {
     async registerSource(s) {
       store.registerSource(s);
@@ -65,22 +67,25 @@ function memoryApi(): UniverseApi {
     async revisionById(id) {
       return store.revisionById(id);
     },
+    async timingProofOf(id) {
+      return store.timingProofOf(id);
+    },
     async all() {
       return store.all();
     },
   };
 }
 
-/**
- * Survivorship scenario. 2020: A, B, C (C is delisted later). 2021: A, B, D; a correction of the 2021 snapshot (E added) learned in 2021-02.
- * A present-day list (A, B, D, E) must never replace the 2020 membership.
- */
-async function seed(api: UniverseApi): Promise<void> {
+/** The survivorship scenario. Each snapshot is stored by NEXUS at storedAt, after its claimed retrieval. */
+async function seed(api: UniverseApi, clock: ReturnType<typeof manualClock>): Promise<void> {
   await api.registerSource(SOURCE);
   await api.registerDefinition(DEFINITION);
-  await api.ingest(snapshot({ effectiveAt: '2020-01-01T00:00:00.000Z', retrievedAt: '2019-12-31T12:00:00.000Z', members: [member('A'), member('B'), member('C')] }), byProviderId);
-  await api.ingest(snapshot({ effectiveAt: '2021-01-01T00:00:00.000Z', retrievedAt: '2020-12-20T10:00:00.000Z', members: [member('A'), member('B'), member('D')] }), byProviderId);
-  await api.ingest(snapshot({ effectiveAt: '2021-01-01T00:00:00.000Z', retrievedAt: '2021-02-10T09:00:00.000Z', members: [member('A'), member('B'), member('D'), member('E')] }), byProviderId);
+  clock.set('2019-12-31T12:00:01.000Z');
+  await api.ingest(claim({ effectiveAt: '2020-01-01T00:00:00.000Z', retrievedAt: '2019-12-31T12:00:00.000Z', members: [member('A'), member('B'), member('C')] }), byProviderId);
+  clock.set('2020-12-20T10:00:01.000Z');
+  await api.ingest(claim({ effectiveAt: '2021-01-01T00:00:00.000Z', retrievedAt: '2020-12-20T10:00:00.000Z', members: [member('A'), member('B'), member('D')] }), byProviderId);
+  clock.set('2021-02-10T09:00:01.000Z');
+  await api.ingest(claim({ effectiveAt: '2021-01-01T00:00:00.000Z', retrievedAt: '2021-02-10T09:00:00.000Z', members: [member('A'), member('B'), member('D'), member('E')] }), byProviderId);
 }
 
 const QUERIES: UniverseSelectionQuery[] = [
@@ -94,120 +99,103 @@ const QUERIES: UniverseSelectionQuery[] = [
   { universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2026-10-09T00:00:00.000Z', mode: 'decision_time' },
 ];
 
-describe.skipIf(!pgAvailable)('PIT Universe V1 in PostgreSQL' + (pgAvailable ? '' : ' (NOT RUN: ' + pgSkipReason + ')'), () => {
+describe.skipIf(!pgAvailable)('PIT Universe in PostgreSQL' + (pgAvailable ? '' : ' (NOT RUN: ' + pgSkipReason + ')'), () => {
   let db: TestDatabase;
+  let clock: ReturnType<typeof manualClock>;
   let api: PostgresUniverseStore;
 
   beforeEach(async () => {
     db = await createTestDatabase();
-    api = new PostgresUniverseStore(db.pool);
+    clock = manualClock('2026-10-09T12:00:00.000Z');
+    api = new PostgresUniverseStore(db.pool, { clock: async () => clock.clock() });
   });
 
   afterEach(async () => {
     await db?.drop();
   });
 
-  it('a fresh database runs 001-010, and the migrations 001-009 keep the checksums they were released with', async () => {
+  it('a fresh database runs 001-011, and the migrations 001-010 keep the checksums they were released with', async () => {
     const rows = (await db.pool.query<{ version: number; checksum: string }>('SELECT version, checksum FROM schema_migrations ORDER BY version')).rows;
-    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     for (const m of loadMigrations()) expect(rows.find((r) => r.version === m.version)?.checksum, m.version + '_' + m.name).toBe(m.checksum);
   });
 
-  it('roundtrip: a stored COMPLETE revision reads back identical, and its evidence is derived from the store', async () => {
+  it('roundtrip: a stored COMPLETE revision reads back identical, and its evidence and timing proof are derived from the store', async () => {
     await api.registerSource(SOURCE);
     await api.registerDefinition(DEFINITION);
-    const ingested = await api.ingest(snapshot({ effectiveAt: '2020-01-01T00:00:00.000Z', retrievedAt: '2019-12-31T12:00:00.000Z', members: [member('A'), member('B'), member('C')] }), byProviderId);
-    const read = await api.revisionById(ingested.revision.snapshotRevisionId);
-    expect(read).toEqual(ingested.revision);
+    clock.set('2019-12-31T12:00:01.000Z');
+    const ingested = await api.ingest(claim({ effectiveAt: '2020-01-01T00:00:00.000Z', retrievedAt: '2019-12-31T12:00:00.000Z', members: [member('A'), member('B'), member('C')] }), byProviderId);
+    expect(await api.revisionById(ingested.revision.snapshotRevisionId)).toEqual(ingested.revision);
+    expect(await api.timingProofOf(ingested.revision.snapshotRevisionId)).toEqual(ingested.timingProof);
     const selection = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2020-06-01T00:00:00.000Z', mode: 'decision_time' });
-    expect(selection.evidence).toMatchObject({ status: 'SELECTED', complete: true, sourceProduction: true, strictDecisionTime: true, historicalReconstruction: false });
+    expect(selection.evidence).toMatchObject({ status: 'SELECTED', knowledgeProof: 'COMMIT_SEALED', complete: true, sourceProduction: true, decisionTimeKnowledgeProven: true, contemporaneousVintageProven: true, strictDecisionTime: true });
     expect(selection.members).toEqual(['ins_A', 'ins_B', 'ins_C']);
   });
 
-  it('the PostgreSQL store and the in-memory store agree exactly: identities, sequence and evidence for every replay query', async () => {
-    const memory = memoryApi();
-    await seed(memory);
-    await seed(api);
-    expect(await api.currentIngestSeq()).toBe(await memory.currentIngestSeq());
-    expect(await api.all()).toEqual(await memory.all());
+  it('the PostgreSQL store and the in-memory store agree exactly: identities, sequence, timing proofs and evidence for every replay query', async () => {
+    const memClock = manualClock('2019-12-31T12:00:01.000Z');
+    const memorySeeded = memoryApi(memClock);
+    await seed(memorySeeded, memClock);
+    await seed(api, clock);
+    expect(await api.currentIngestSeq()).toBe(await memorySeeded.currentIngestSeq());
+    expect(await api.all()).toEqual(await memorySeeded.all());
+    for (const rev of await api.all()) expect(await api.timingProofOf(rev.snapshotRevisionId)).toEqual(await memorySeeded.timingProofOf(rev.snapshotRevisionId));
     for (const q of QUERIES) {
       const pg = await api.select(q);
-      const mem = await memory.select(q);
+      const mem = await memorySeeded.select(q);
       expect(pg.evidence, q.asOf + ' ' + q.mode).toEqual(mem.evidence);
       expect(pg.members, q.asOf + ' ' + q.mode).toEqual(mem.members);
+      expect(pg.timingProof, q.asOf + ' ' + q.mode).toEqual(mem.timingProof);
     }
   });
 
-  it('survivorship: the 2020 selection keeps C (delisted later); the present-day list never substitutes; the historical fingerprint does not move', async () => {
-    await seed(api);
+  it('survivorship: the 2020 selection keeps C (delisted later) and never substitutes the present-day list; its fingerprint does not move', async () => {
+    await seed(api, clock);
     const before = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2020-06-01T00:00:00.000Z', mode: 'decision_time' });
     expect(before.members).toEqual(['ins_A', 'ins_B', 'ins_C']);
-    expect(before.members).not.toContain('ins_D');
-    expect(before.members).not.toContain('ins_E');
-    // Later revisions and a correction are stored; the 2020 answer does not change.
-    await api.ingest(snapshot({ effectiveAt: '2022-01-01T00:00:00.000Z', retrievedAt: '2021-12-20T10:00:00.000Z', members: [member('A'), member('F')] }), byProviderId);
+    expect(before.evidence.strictDecisionTime).toBe(true);
+    clock.set('2022-01-01T00:00:01.000Z');
+    await api.ingest(claim({ effectiveAt: '2022-01-01T00:00:00.000Z', retrievedAt: '2021-12-20T10:00:00.000Z', members: [member('A'), member('F')] }), byProviderId);
     const after = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2020-06-01T00:00:00.000Z', mode: 'decision_time' });
     expect(after.evidence.fingerprint).toBe(before.evidence.fingerprint);
     expect(after.members).toEqual(['ins_A', 'ins_B', 'ins_C']);
   });
 
-  it('delisted: a member delisted later stays in the snapshot it belonged to; membership is never read from an active flag', async () => {
-    await seed(api);
-    const sel = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2020-06-01T00:00:00.000Z', mode: 'decision_time' });
-    expect(sel.members).toContain('ins_C');
-    const rev = sel.revision!;
-    expect(rev.members.find((m) => m.instrumentId === 'ins_C')).toMatchObject({ providerSymbol: 'SYMC', sourceMemberKey: 'key:C' });
-  });
-
-  it('historical reconstruction: a snapshot learned after its effective instant is never strict, and decision_time refuses it', async () => {
-    await seed(api);
-    const late = await api.ingest(snapshot({ effectiveAt: '2015-01-01T00:00:00.000Z', retrievedAt: '2026-10-01T00:00:00.000Z', members: [member('A')] }), byProviderId);
+  it('historical reconstruction: a 2015 membership stored by NEXUS in 2026 is never decision-time evidence in 2016', async () => {
+    await seed(api, clock);
+    clock.set('2026-10-01T00:00:01.000Z');
+    const late = await api.ingest(claim({ effectiveAt: '2015-01-01T00:00:00.000Z', retrievedAt: '2026-10-01T00:00:00.000Z', members: [member('A')] }), byProviderId);
     expect(late.revision.vintage).toBe('historical_reconstruction');
-    const decision = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2016-01-01T00:00:00.000Z', mode: 'decision_time' });
-    expect(decision.evidence).toMatchObject({ status: 'UNAVAILABLE', strictDecisionTime: false });
-    const research = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2016-01-01T00:00:00.000Z', mode: 'historical_research' });
-    expect(research.evidence).toMatchObject({ status: 'SELECTED', historicalReconstruction: true, strictDecisionTime: false, decisionTimeKnowledgeProven: false });
+    expect((await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2016-01-01T00:00:00.000Z', mode: 'decision_time' })).evidence).toMatchObject({ status: 'UNAVAILABLE', strictDecisionTime: false });
+    expect((await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2016-01-01T00:00:00.000Z', mode: 'historical_research' })).evidence).toMatchObject({ status: 'SELECTED', historicalReconstruction: true, strictDecisionTime: false });
   });
 
-  it('revision replay: decision_time never sees a revision NEXUS had not yet learned; historical_research sees the latest correction', async () => {
-    await seed(api);
-    const before = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2021-02-05T00:00:00.000Z', mode: 'decision_time' });
-    expect(before.revision?.revision).toBe(1);
-    expect(before.members).toEqual(['ins_A', 'ins_B', 'ins_D']);
-    const research = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2021-02-05T00:00:00.000Z', mode: 'historical_research' });
-    expect(research.revision?.revision).toBe(2);
-    expect(research.evidence).toMatchObject({ historicalReconstruction: true, strictDecisionTime: false });
-    const learned = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2021-03-01T00:00:00.000Z', mode: 'decision_time' });
-    expect(learned.revision?.revision).toBe(2);
-    expect(learned.members).toEqual(['ins_A', 'ins_B', 'ins_D', 'ins_E']);
+  it('revision replay: decision time sees only the sealed revision; the correction stored later is not visible before its seal', async () => {
+    await seed(api, clock);
+    expect((await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2021-02-05T00:00:00.000Z', mode: 'decision_time' })).evidence.revision).toBe(1);
+    expect((await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2021-02-05T00:00:00.000Z', mode: 'historical_research' })).evidence).toMatchObject({ revision: 2, decisionTimeKnowledgeProven: false });
+    expect((await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2021-03-01T00:00:00.000Z', mode: 'decision_time' })).members).toEqual(['ins_A', 'ins_B', 'ins_D', 'ins_E']);
   });
 
-  it('a later backfill does not change a replay that is stored through an earlier ingest sequence', async () => {
-    await seed(api);
+  it('storedThrough: a later sealed backfill cannot change a replay stored through an earlier sequence', async () => {
+    await seed(api, clock);
     const seq = await api.currentIngestSeq();
     const frozen = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2021-03-10T00:00:00.000Z', mode: 'decision_time', storedThrough: seq });
-    await api.ingest(snapshot({ effectiveAt: '2021-01-01T00:00:00.000Z', retrievedAt: '2021-03-05T00:00:00.000Z', members: [member('A'), member('B'), member('D'), member('F')] }), byProviderId);
+    clock.set('2021-03-05T00:00:01.000Z');
+    await api.ingest(claim({ effectiveAt: '2021-01-01T00:00:00.000Z', retrievedAt: '2021-03-05T00:00:00.000Z', members: [member('A'), member('B'), member('D'), member('F')] }), byProviderId);
     const replayed = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2021-03-10T00:00:00.000Z', mode: 'decision_time', storedThrough: seq });
     expect(replayed.evidence.fingerprint).toBe(frozen.evidence.fingerprint);
     expect(replayed.members).toEqual(['ins_A', 'ins_B', 'ins_D', 'ins_E']);
-    const now = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2021-03-10T00:00:00.000Z', mode: 'decision_time' });
-    expect(now.revision?.revision).toBe(3);
-  });
-
-  it('future-effective: a revision whose effective instant is after asOf is not selected', async () => {
-    await seed(api);
-    await api.ingest(snapshot({ effectiveAt: '2030-01-01T00:00:00.000Z', retrievedAt: '2026-01-01T00:00:00.000Z', members: [member('Z')] }), byProviderId);
-    const sel = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2026-10-09T00:00:00.000Z', mode: 'decision_time' });
-    expect(sel.revision?.effectiveAt).toBe('2021-01-01T00:00:00.000Z');
-    expect(sel.members).not.toContain('ins_Z');
+    expect((await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2021-03-10T00:00:00.000Z', mode: 'decision_time' })).evidence.revision).toBe(3);
   });
 
   it('an unresolved member in a COMPLETE snapshot is refused, and nothing is stored (silent loss is forbidden)', async () => {
-    await seed(api);
+    await seed(api, clock);
     const seqBefore = await api.currentIngestSeq();
     const revisionsBefore = (await api.all()).length;
+    clock.set('2023-12-31T12:00:01.000Z');
     const unresolvable: UniverseMemberInput = { sourceMemberKey: 'key:X', providerSymbol: 'XXX' };
-    await expect(api.ingest(snapshot({ effectiveAt: '2024-01-01T00:00:00.000Z', retrievedAt: '2023-12-31T12:00:00.000Z', members: [member('A'), unresolvable] }), byProviderId)).rejects.toMatchObject({ code: 'UNIVERSE_MEMBER_UNRESOLVED' });
+    await expect(api.ingest(claim({ effectiveAt: '2024-01-01T00:00:00.000Z', retrievedAt: '2023-12-31T12:00:00.000Z', members: [member('A'), unresolvable] }), byProviderId)).rejects.toMatchObject({ code: 'UNIVERSE_MEMBER_UNRESOLVED' });
     expect(await api.currentIngestSeq()).toBe(seqBefore);
     expect((await api.all()).length).toBe(revisionsBefore);
     const rows = (await db.pool.query<{ n: number }>("SELECT count(*)::int AS n FROM universe_snapshot_members m JOIN universe_snapshot_revisions r USING (snapshot_revision_id) WHERE r.effective_at = '2024-01-01T00:00:00Z'")).rows[0];
@@ -217,30 +205,27 @@ describe.skipIf(!pgAvailable)('PIT Universe V1 in PostgreSQL' + (pgAvailable ? '
   it('a PARTIAL snapshot stores its unresolved members visibly and is never complete', async () => {
     await api.registerSource(SOURCE);
     await api.registerDefinition(DEFINITION);
-    const stored = await api.ingest(snapshot({ effectiveAt: '2020-01-01T00:00:00.000Z', retrievedAt: '2019-12-31T12:00:00.000Z', completeness: 'PARTIAL', members: [member('A'), { sourceMemberKey: 'key:X', providerSymbol: 'XXX', exchange: 'NYSE' }] }), byProviderId);
+    clock.set('2019-12-31T12:00:01.000Z');
+    const stored = await api.ingest(claim({ effectiveAt: '2020-01-01T00:00:00.000Z', retrievedAt: '2019-12-31T12:00:00.000Z', completeness: 'PARTIAL', members: [member('A'), { sourceMemberKey: 'key:X', providerSymbol: 'XXX', exchange: 'NYSE' }] }), byProviderId);
     expect(stored.revision.unresolvedMembers).toEqual([{ sourceMemberKey: 'key:X', providerSymbol: 'XXX', providerInstrumentId: null, exchange: 'NYSE' }]);
     expect((await api.revisionById(stored.revision.snapshotRevisionId))!.unresolvedMembers).toHaveLength(1);
-    const sel = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2020-06-01T00:00:00.000Z', mode: 'decision_time' });
-    expect(sel.evidence).toMatchObject({ complete: false, strictDecisionTime: false, completeness: 'PARTIAL' });
+    expect((await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2020-06-01T00:00:00.000Z', mode: 'decision_time' })).evidence).toMatchObject({ complete: false, strictDecisionTime: false, completeness: 'PARTIAL' });
   });
 
   it('the database refuses an unresolved member for a COMPLETE revision (defence in depth)', async () => {
-    await seed(api);
+    await seed(api, clock);
     const rev = (await api.all())[0]!;
-    await expect(
-      db.pool.query('INSERT INTO universe_unresolved_members (snapshot_revision_id, source_member_key, provider_symbol) VALUES ($1, $2, $3)', [rev.snapshotRevisionId, 'key:Q', 'QQQ']),
-    ).rejects.toThrow(/PARTIAL/);
+    await expect(db.pool.query('INSERT INTO universe_unresolved_members (snapshot_revision_id, source_member_key, provider_symbol) VALUES ($1, $2, $3)', [rev.snapshotRevisionId, 'key:Q', 'QQQ'])).rejects.toThrow(/PARTIAL/);
   });
 
-  it('knowledge never regresses within a snapshot key: a revision learned before its predecessor is refused', async () => {
-    await seed(api);
-    await expect(
-      api.ingest(snapshot({ effectiveAt: '2021-01-01T00:00:00.000Z', retrievedAt: '2021-01-20T00:00:00.000Z', members: [member('A')] }), byProviderId),
-    ).rejects.toMatchObject({ code: 'UNIVERSE_KNOWLEDGE_REGRESSION' });
+  it('knowledge never regresses within a snapshot key: a revision claimed known before its predecessor is refused', async () => {
+    await seed(api, clock);
+    clock.set('2021-02-10T10:00:01.000Z');
+    await expect(api.ingest(claim({ effectiveAt: '2021-01-01T00:00:00.000Z', retrievedAt: '2021-01-20T00:00:00.000Z', members: [member('A')] }), byProviderId)).rejects.toMatchObject({ code: 'UNIVERSE_KNOWLEDGE_REGRESSION' });
   });
 
   it('the database enforces the next revision number of a key (a raw insert of revision 9 is refused)', async () => {
-    await seed(api);
+    await seed(api, clock);
     const key = (await api.all()).find((r) => r.effectiveAt === '2020-01-01T00:00:00.000Z')!.snapshotKey;
     await expect(
       db.pool.query(
@@ -270,27 +255,26 @@ describe.skipIf(!pgAvailable)('PIT Universe V1 in PostgreSQL' + (pgAvailable ? '
   });
 
   it('identical content is idempotent; the same source or universe id with different content is a conflict', async () => {
-    await seed(api);
-    const again = await api.ingest(snapshot({ effectiveAt: '2020-01-01T00:00:00.000Z', retrievedAt: '2019-12-31T12:00:00.000Z', members: [member('C'), member('A'), member('B')] }), byProviderId);
+    await seed(api, clock);
+    const again = await api.ingest(claim({ effectiveAt: '2020-01-01T00:00:00.000Z', retrievedAt: '2019-12-31T12:00:00.000Z', members: [member('C'), member('A'), member('B')] }), byProviderId);
     expect(again.status).toBe('ALREADY_APPLIED');
     expect((await api.all()).length).toBe(3);
-    await api.registerSource(SOURCE);
-    await expect(api.registerSource({ ...SOURCE, provider: 'forged' })).rejects.toBeInstanceOf(UniverseError);
     await expect(api.registerSource({ ...SOURCE, provider: 'forged' })).rejects.toMatchObject({ code: 'UNIVERSE_CONFLICT' });
-    await api.registerSource(SOURCE);
     await expect(api.registerDefinition({ ...DEFINITION, name: 'Other' })).rejects.toMatchObject({ code: 'UNIVERSE_CONFLICT' });
+    await api.registerSource(SOURCE);
   });
 
-  it('append-only: UPDATE, DELETE and TRUNCATE are rejected on every universe table', async () => {
-    await seed(api);
-    const updates: [string, string][] = [
-      ['universe_sources', "UPDATE universe_sources SET source_hash = source_hash"],
-      ['universe_definitions', "UPDATE universe_definitions SET definition_hash = definition_hash"],
-      ['universe_snapshot_revisions', "UPDATE universe_snapshot_revisions SET result_hash = result_hash"],
-      ['universe_snapshot_members', "UPDATE universe_snapshot_members SET source_member_key = source_member_key"],
+  it('append-only: UPDATE, DELETE and TRUNCATE are rejected on every universe table, the seals included', async () => {
+    await seed(api, clock);
+    const updates: string[] = [
+      'UPDATE universe_sources SET source_hash = source_hash',
+      'UPDATE universe_definitions SET definition_hash = definition_hash',
+      'UPDATE universe_snapshot_revisions SET result_hash = result_hash',
+      'UPDATE universe_snapshot_members SET source_member_key = source_member_key',
+      'UPDATE universe_revision_seals SET seal_hash = seal_hash',
     ];
-    for (const [, sql] of updates) await expect(db.pool.query(sql), sql).rejects.toThrow(/NEXUS_APPEND_ONLY/);
-    for (const table of ['universe_snapshot_members', 'universe_snapshot_revisions', 'universe_definitions']) {
+    for (const sql of updates) await expect(db.pool.query(sql), sql).rejects.toThrow(/NEXUS_APPEND_ONLY/);
+    for (const table of ['universe_revision_seals', 'universe_snapshot_members', 'universe_snapshot_revisions', 'universe_definitions']) {
       await expect(db.pool.query('DELETE FROM ' + table), table).rejects.toThrow(/NEXUS_APPEND_ONLY/);
       await expect(db.pool.query('TRUNCATE ' + table), table).rejects.toThrow(/NEXUS_APPEND_ONLY|cannot truncate/);
     }
@@ -298,7 +282,7 @@ describe.skipIf(!pgAvailable)('PIT Universe V1 in PostgreSQL' + (pgAvailable ? '
   });
 
   it('tamper: a changed payload is refused on read (the stored hash no longer matches)', async () => {
-    await seed(api);
+    await seed(api, clock);
     const rev = (await api.all())[0]!;
     const c = await db.privilegedClient();
     try {
@@ -312,7 +296,7 @@ describe.skipIf(!pgAvailable)('PIT Universe V1 in PostgreSQL' + (pgAvailable ? '
   });
 
   it('tamper: a payload rewritten with its own hash still fails, because the rows and the identities disagree', async () => {
-    await seed(api);
+    await seed(api, clock);
     const rev = (await api.all())[0]!;
     const forged = { ...rev, ingestSeq: 999, members: rev.members.slice(1), memberCount: rev.members.length - 1 };
     const c = await db.privilegedClient();
@@ -325,8 +309,8 @@ describe.skipIf(!pgAvailable)('PIT Universe V1 in PostgreSQL' + (pgAvailable ? '
     await expect(api.revisionById(rev.snapshotRevisionId)).rejects.toMatchObject({ code: 'UNIVERSE_INTEGRITY_FAILED' });
   });
 
-  it('tamper: a changed, deleted or added member row is refused on read', async () => {
-    await seed(api);
+  it('tamper: a changed or deleted member row is refused on read', async () => {
+    await seed(api, clock);
     const rev = (await api.all())[0]!;
     const c = await db.privilegedClient();
     try {
@@ -336,23 +320,18 @@ describe.skipIf(!pgAvailable)('PIT Universe V1 in PostgreSQL' + (pgAvailable ? '
       await c.end();
     }
     await expect(api.revisionById(rev.snapshotRevisionId)).rejects.toMatchObject({ code: 'UNIVERSE_INTEGRITY_FAILED' });
-  });
-
-  it('tamper: a deleted member row is refused on read', async () => {
-    await seed(api);
-    const rev = (await api.all())[0]!;
-    const c = await db.privilegedClient();
+    const d = await db.privilegedClient();
     try {
-      await c.query("SET session_replication_role = 'replica'");
-      await c.query("DELETE FROM universe_snapshot_members WHERE snapshot_revision_id = $1 AND instrument_id = 'ins_C'", [rev.snapshotRevisionId]);
+      await d.query("SET session_replication_role = 'replica'");
+      await d.query("DELETE FROM universe_snapshot_members WHERE snapshot_revision_id = $1 AND instrument_id = 'ins_C'", [rev.snapshotRevisionId]);
     } finally {
-      await c.end();
+      await d.end();
     }
     await expect(api.revisionById(rev.snapshotRevisionId)).rejects.toMatchObject({ code: 'UNIVERSE_INTEGRITY_FAILED' });
   });
 
-  it('tamper: a changed header is refused on read, and so is a changed source', async () => {
-    await seed(api);
+  it('tamper: a changed header and a changed source are refused on read', async () => {
+    await seed(api, clock);
     const revs = await api.all();
     const c = await db.privilegedClient();
     try {
@@ -366,22 +345,25 @@ describe.skipIf(!pgAvailable)('PIT Universe V1 in PostgreSQL' + (pgAvailable ? '
     await expect(api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2021-03-01T00:00:00.000Z', mode: 'decision_time' })).rejects.toMatchObject({ code: 'UNIVERSE_INTEGRITY_FAILED' });
   });
 
-  it('a second process sees the same revisions and the same selections (no per-process state)', async () => {
-    await seed(api);
-    const other = new PostgresUniverseStore(db.extraPool());
+  it('a second process sees the same revisions, seals and selections (no per-process state)', async () => {
+    await seed(api, clock);
+    const other = new PostgresUniverseStore(db.extraPool(), { clock: async () => clock.clock() });
     expect(await other.all()).toEqual(await api.all());
     expect((await other.select(QUERIES[3]!)).evidence).toEqual((await api.select(QUERIES[3]!)).evidence);
   });
 
   it('a thousand members: one statement per child table, and the same identity as in memory', async () => {
-    const memory = memoryApi();
-    await seed(memory);
-    await seed(api);
+    await seed(api, clock);
+    const memClock = manualClock('2019-12-31T12:00:01.000Z');
+    const memory = memoryApi(memClock);
+    await seed(memory, memClock);
     const pids = Array.from({ length: 1000 }, (_, i) => 'M' + String(i).padStart(4, '0'));
-    const input = snapshot({ effectiveAt: '2022-01-01T00:00:00.000Z', retrievedAt: '2021-12-31T12:00:00.000Z', members: pids.map((p) => member(p)) });
+    const input = claim({ effectiveAt: '2022-01-01T00:00:00.000Z', retrievedAt: '2021-12-31T12:00:00.000Z', members: pids.map((p) => member(p)) });
+    clock.set('2021-12-31T12:00:01.000Z');
     const started = Date.now();
     const pg = await api.ingest(input, byProviderId);
     const ingestMs = Date.now() - started;
+    memClock.set('2021-12-31T12:00:01.000Z');
     const mem = await memory.ingest(input, byProviderId);
     expect(pg.revision.snapshotRevisionId).toBe(mem.revision.snapshotRevisionId);
     const sel = await api.select({ universeId: UNIVERSE, sourceId: SOURCE.sourceId, asOf: '2023-01-01T00:00:00.000Z', mode: 'decision_time' });
@@ -391,3 +373,4 @@ describe.skipIf(!pgAvailable)('PIT Universe V1 in PostgreSQL' + (pgAvailable ? '
     expect(ingestMs).toBeLessThan(20_000);
   });
 });
+

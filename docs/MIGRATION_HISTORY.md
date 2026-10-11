@@ -24,6 +24,7 @@ Status: in force from 2026-10-09 (branch `feature/bar-knowledge-schema-repair`).
 | 008 | `market_bar_provenance` | committed in `de4c3f4`; **restored byte-for-byte** | `c8f14c983ead6a38fa14f08f298b3d228690603475e78084c8378a607f36861e` |
 | 009 | `market_bar_knowledge_v2` | new, additive | `b2812e5e40906c397d914cac6af646d48f89154f8b3356fc2672bd8805cdf5ec` |
 | 010 | `pit_universe_v1` | new, additive (PIT Universe V1, `universe-engine:v1`) | `3791efaed495bc77516a04fd33f5c460f62b0a3a34a93e813190aa42d30fe18a` |
+| 011 | `universe_knowledge_seals` | new, additive (PIT Universe V2 timing proof, `universe-timing:v1`) | `332736f2320208509804287abff83db043b3a8b66e0e7d42c7506957f32e4b49` |
 
 Git blob of the restored 008: `9e5dbc28d4508a83e2e7534706ae6112867ec8df` (equal to the blob of `de4c3f4:db/migrations/008_market_bar_provenance.sql`).
 
@@ -43,6 +44,13 @@ the ingest sequence, the member count at commit, and that unresolved members app
 recomputed and verified by the application on every read (`docs/PIT_UNIVERSE_V1.md`).
 
 Migration 010 does not change the meaning of any earlier migration, and the migrator still refuses destructive statements in it.
+
+## Migration 011: database-sealed knowledge of universe revisions (2026-10-09)
+
+Additive only. It creates `universe_revision_seals`, a separate table: migration 006 restricts `evidence_seals.kind`, and that CHECK is not changed.
+The seal binds a stored revision by its result hash and brackets the commit with two database clock readings (`recorded_at` <= commit <= `sealed_at`).
+The trigger refuses a seal whose result hash is not the stored revision's. UPDATE, DELETE and TRUNCATE are rejected, as in 001.
+Migration 010 is unchanged: its `knownAt` and `retrievedAt` remain source/ingest claims. See `docs/PIT_UNIVERSE_KNOWLEDGE_SEAL.md`.
 
 ## Verification
 

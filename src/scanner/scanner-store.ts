@@ -1,7 +1,7 @@
 import { hashOf } from '../persistence/canonical-json.js';
 import { isoMs, sealFor, verifySeal, type EvidenceSeal, type Sealed } from '../persistence/evidence-seal.js';
 import type { ScannerRun } from './scanner-types.js';
-import { evidenceFingerprintMatches } from '../universe/universe-model.js';
+import { universeEvidenceIsConsistent } from '../universe/universe-model.js';
 
 export class ScannerRunConflictError extends Error {
   override readonly name = 'ScannerRunConflictError';
@@ -16,14 +16,16 @@ export function verifyScannerRun(run: ScannerRun): ScannerRun {
   if (run.definition.id !== run.definitionId || run.definition.version !== run.definitionVersion || run.definition.universeId !== run.universeId) {
     throw new ScannerRunIntegrityError('scanner definition metadata mismatch');
   }
-  if (run.rankingComplete !== run.coverage.complete) throw new ScannerRunIntegrityError('scanner ranking completeness does not match coverage');
+  // A ranking may be complete only over complete coverage. A complete coverage with an incomplete ranking is valid: a universe the decision
+  // cannot use (see market-scanner) makes the ranking incomplete.
+  if (run.rankingComplete && !run.coverage.complete) throw new ScannerRunIntegrityError('scanner ranking marked complete with incomplete coverage');
   if (run.coverage.universeMembers < 0 || run.coverage.snapshotsProvided < 0 || run.coverage.evaluatedInstruments < 0) {
     throw new ScannerRunIntegrityError('scanner coverage counts must not be negative');
   }
   // The universe is evidence, not a claim: its identity must match the run, and a complete ranking needs a complete universe.
   if (!run.universeEvidence || run.universeEvidence.universeId !== run.universeId) throw new ScannerRunIntegrityError('scanner universe evidence is missing or belongs to another universe');
   if (run.universeFingerprint !== run.universeEvidence.fingerprint) throw new ScannerRunIntegrityError('universe fingerprint does not match its evidence');
-  if (!evidenceFingerprintMatches(run.universeEvidence)) throw new ScannerRunIntegrityError('universe evidence does not match its own fingerprint (it was edited after derivation)');
+  if (!universeEvidenceIsConsistent(run.universeEvidence)) throw new ScannerRunIntegrityError('universe evidence is not consistent with its fingerprint and derived facts (it was edited after derivation)');
   if (run.rankingComplete && !run.universeEvidence.complete) throw new ScannerRunIntegrityError('scanner ranking marked complete without a complete universe');
   if (run.coverage.evaluatedInstruments > run.coverage.universeMembers) throw new ScannerRunIntegrityError('scanner evaluated more instruments than the universe contains');
   if (run.coverage.complete && (run.coverage.missingInstruments.length > 0 || run.coverage.duplicateInstruments.length > 0)) {

@@ -20,13 +20,15 @@ const PINNED: Readonly<Record<number, string>> = Object.freeze({
   9: 'b2812e5e40906c397d914cac6af646d48f89154f8b3356fc2672bd8805cdf5ec',
   /** 010 adds the persistent Point-in-Time Universe (additive). Pinned as released. */
   10: '3791efaed495bc77516a04fd33f5c460f62b0a3a34a93e813190aa42d30fe18a',
+  /** 011 adds NEXUS's own timing proof for universe revisions (additive). Pinned as released. */
+  11: '332736f2320208509804287abff83db043b3a8b66e0e7d42c7506957f32e4b49',
 });
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ORIGINAL_008 = join(HERE, '..', 'fixtures', 'migrations', '008_market_bar_provenance.de4c3f4.sql');
 
 describe('committed migration history is immutable', () => {
-  it('every migration has its pinned checksum (001-009 are immutable; 010 is pinned as released)', () => {
+  it('every migration has its pinned checksum (001-010 are immutable; 011 is pinned as released)', () => {
     const migrations = loadMigrations();
     expect(migrations.map((m) => m.version)).toEqual(Object.keys(PINNED).map(Number));
     for (const m of migrations) expect(m.checksum, m.version + '_' + m.name).toBe(PINNED[m.version]);

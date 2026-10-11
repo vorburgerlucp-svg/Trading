@@ -1,6 +1,6 @@
 import type { Decimal } from '../money/decimal.js';
 import type { QuantResult } from '../quant/quant-types.js';
-import type { UniverseEvidence } from '../universe/universe-model.js';
+import type { AnyUniverseEvidence } from '../universe/universe-model.js';
 
 export type ScannerFilter =
   | { type: 'minimum_price'; value: string }
@@ -82,7 +82,7 @@ export interface ScannerRun {
   definitionVersion: string;
   universeId: string;
   /** Derived universe evidence (docs/PIT_UNIVERSE_V1.md). The fingerprint of the evidence is universeFingerprint. Never caller-asserted. */
-  universeEvidence: UniverseEvidence;
+  universeEvidence: AnyUniverseEvidence;
   universeFingerprint: string;
   asOf: string;
   coverage: ScannerCoverage;

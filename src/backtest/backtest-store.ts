@@ -1,3 +1,4 @@
+import { universeEvidenceIsConsistent } from '../universe/universe-model.js';
 import { parseUtc } from '../market-data/time.js';
 import { Decimal } from '../money/decimal.js';
 import { hashOf } from '../persistence/canonical-json.js';
@@ -119,6 +120,9 @@ function verifyExecutionClock(run: BacktestRunResult): void {
 }
 
 export function verifyBacktestRun(run: BacktestRunResult): BacktestRunResult {
+  if (run.universe !== undefined && !universeEvidenceIsConsistent(run.universe)) {
+    throw new BacktestRunIntegrityError('universe evidence is not consistent with its fingerprint and derived facts (it was edited after derivation)');
+  }
   verifyExecutionClock(run);
   if (run.engineVersion === 'backtest-engine:v5') {
     if (typeof run.portfolioCurrency !== 'string' || !/^[A-Z]{3}$/.test(run.portfolioCurrency)) throw new BacktestRunIntegrityError('portfolio currency is missing or invalid');

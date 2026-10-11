@@ -16,11 +16,11 @@ import type { EvidenceSeal, EvidenceSealKind, Sealed } from '../persistence/evid
 import type { QuantRunStore } from '../quant/quant-run-store.js';
 import type { QuantBarProvenance, QuantRunRecord } from '../quant/quant-types.js';
 import type { ScannerRunStore } from '../scanner/scanner-store.js';
-import type { UniverseEvidence } from '../universe/universe-model.js';
+import { isUniverseEvidenceV2, type AnyUniverseEvidence } from '../universe/universe-model.js';
 import type { ScannerBarKnowledge, ScannerCandidate, ScannerRun } from '../scanner/scanner-types.js';
 
 /** Version of the lineage object that enters the decision input fingerprint. */
-export const EVIDENCE_LINEAGE_VERSION = 'evidence-lineage:v4';
+export const EVIDENCE_LINEAGE_VERSION = 'evidence-lineage:v5';
 
 export interface ScannerEvidenceReader {
   getSealed(scannerRunId: string): Promise<Sealed<ScannerRun> | null>;
@@ -83,6 +83,8 @@ export const EVIDENCE_REASON_CODES = [
   'UNIVERSE_COVERAGE_INCOMPLETE',
   'UNIVERSE_HISTORICAL_RECONSTRUCTION',
   'UNIVERSE_SOURCE_NOT_PRODUCTION',
+  'UNIVERSE_KNOWLEDGE_NOT_SEALED',
+  'UNIVERSE_KNOWLEDGE_AFTER_DECISION',
 ] as const;
 export type EvidenceReasonCode = (typeof EVIDENCE_REASON_CODES)[number];
 
@@ -133,11 +135,17 @@ export interface UniverseLineage {
   snapshotKey: string | null;
   snapshotRevisionId: string | null;
   revision: number | null;
+  evidenceVersion: 'universe-evidence:v2' | 'legacy:v1';
   effectiveAt: string | null;
-  knownAt: string | null;
-  vintage: string | null;
+  claimedKnownAt: string | null;
+  claimedRetrievedAt: string | null;
+  knowledgeProof: 'COMMIT_SEALED' | 'PRESENCE_ATTESTED' | 'UNSEALED' | null;
+  storeRecordedAt: string | null;
+  storeSealedAt: string | null;
+  timingProofHash: string | null;
   complete: boolean;
   decisionTimeKnowledgeProven: boolean;
+  contemporaneousVintageProven: boolean;
   strictDecisionTime: boolean;
   sourceProduction: boolean;
   historicalReconstruction: boolean;
@@ -209,8 +217,12 @@ export class EvidenceReferenceError extends Error {
   }
 }
 
-function universeLineageOf(u: UniverseEvidence): UniverseLineage {
-  return { status: u.status, snapshotKey: u.snapshotKey, snapshotRevisionId: u.snapshotRevisionId, revision: u.revision, effectiveAt: u.effectiveAt, knownAt: u.knownAt, vintage: u.vintage, complete: u.complete, decisionTimeKnowledgeProven: u.decisionTimeKnowledgeProven, strictDecisionTime: u.strictDecisionTime, sourceProduction: u.sourceProduction, historicalReconstruction: u.historicalReconstruction, fingerprint: u.fingerprint };
+function universeLineageOf(u: AnyUniverseEvidence): UniverseLineage {
+  if (!isUniverseEvidenceV2(u)) {
+    // universe-engine:v1 evidence: its knowledge was a caller claim. It is shown as unsealed, whatever its stored flags say.
+    return { evidenceVersion: 'legacy:v1', status: u.status, snapshotKey: u.snapshotKey, snapshotRevisionId: u.snapshotRevisionId, revision: u.revision, effectiveAt: u.effectiveAt, claimedKnownAt: u.knownAt, claimedRetrievedAt: null, knowledgeProof: 'UNSEALED', storeRecordedAt: null, storeSealedAt: null, timingProofHash: null, complete: u.complete, decisionTimeKnowledgeProven: false, contemporaneousVintageProven: false, strictDecisionTime: false, sourceProduction: u.sourceProduction, historicalReconstruction: true, fingerprint: u.fingerprint };
+  }
+  return { evidenceVersion: u.evidenceVersion, status: u.status, snapshotKey: u.snapshotKey, snapshotRevisionId: u.snapshotRevisionId, revision: u.revision, effectiveAt: u.effectiveAt, claimedKnownAt: u.claimedKnownAt, claimedRetrievedAt: u.claimedRetrievedAt, knowledgeProof: u.knowledgeProof, storeRecordedAt: u.storeRecordedAt, storeSealedAt: u.storeSealedAt, timingProofHash: u.timingProofHash, complete: u.complete, decisionTimeKnowledgeProven: u.decisionTimeKnowledgeProven, contemporaneousVintageProven: u.contemporaneousVintageProven, strictDecisionTime: u.strictDecisionTime, sourceProduction: u.sourceProduction, historicalReconstruction: u.historicalReconstruction, fingerprint: u.fingerprint };
 }
 
 const byCodeAndRef = (a: EvidenceIssue, b: EvidenceIssue): number => (a.code < b.code ? -1 : a.code > b.code ? 1 : a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0);
@@ -336,27 +348,34 @@ export async function validateEvidenceReferences(request: EvidenceRequest, reade
       // decision that needs the complete universe. A historical reconstruction is always a visible warning, never described as strict.
       const universe = run.universeEvidence;
       if (universe === undefined || universe === null) {
-        block('UNIVERSE_EVIDENCE_UNPROVEN', run.scannerRunId, 'scanner run predates universe evidence: its universe cannot be shown');
+        block('UNIVERSE_EVIDENCE_UNPROVEN', run.scannerRunId, 'scanner run has no universe evidence: its universe cannot be shown');
+      } else if (!isUniverseEvidenceV2(universe)) {
+        // universe-engine:v1 evidence: its knowledge was a caller claim. It stays readable, and it is never strong.
+        const detail = 'the universe evidence predates database-sealed knowledge (universe-engine:v1): NEXUS holds no timing proof for it';
+        if (request.requiresCompleteUniverse) block('UNIVERSE_KNOWLEDGE_NOT_SEALED', run.scannerRunId, detail);
+        else warn('UNIVERSE_KNOWLEDGE_NOT_SEALED', run.scannerRunId, detail);
+      } else if (universe.status === 'UNAVAILABLE') {
+        // No revision was proven known at asOf: nothing can be shown, and the other facts are moot.
+        block('UNIVERSE_EVIDENCE_UNPROVEN', run.scannerRunId, 'no universe revision was proven known at asOf');
       } else {
-        // An unavailable universe is never acceptable: no revision was known, so nothing can be shown. The other facts are then moot.
-        if (universe.status === 'UNAVAILABLE') {
-          block('UNIVERSE_EVIDENCE_UNPROVEN', run.scannerRunId, 'no universe revision was known at asOf');
-        } else {
-          if (!universe.decisionTimeKnowledgeProven) {
-            const detail = 'the universe revision was not known at asOf';
-            if (request.requiresCompleteUniverse) block('UNIVERSE_EVIDENCE_UNPROVEN', run.scannerRunId, detail);
-            else warn('UNIVERSE_EVIDENCE_UNPROVEN', run.scannerRunId, detail);
-          }
-          if (!universe.complete) {
-            if (request.requiresCompleteUniverse) block('UNIVERSE_COVERAGE_INCOMPLETE', run.scannerRunId, 'the universe source snapshot is not complete');
-            else warn('UNIVERSE_COVERAGE_INCOMPLETE', run.scannerRunId, 'the universe source snapshot is not complete');
-          }
-          if (!universe.sourceProduction) {
-            if (request.requiresCompleteUniverse) block('UNIVERSE_SOURCE_NOT_PRODUCTION', run.scannerRunId, 'the universe source is not production');
-            else warn('UNIVERSE_SOURCE_NOT_PRODUCTION', run.scannerRunId, 'the universe source is not production');
-          }
-          if (universe.historicalReconstruction) warn('UNIVERSE_HISTORICAL_RECONSTRUCTION', run.scannerRunId, 'the universe membership is a historical reconstruction, not strict point-in-time evidence');
+        if (universe.knowledgeProof === 'UNSEALED') {
+          const detail = 'NEXUS holds no timing proof for this universe revision (its commit was not sealed, or it predates sealing)';
+          if (request.requiresCompleteUniverse) block('UNIVERSE_KNOWLEDGE_NOT_SEALED', run.scannerRunId, detail);
+          else warn('UNIVERSE_KNOWLEDGE_NOT_SEALED', run.scannerRunId, detail);
+        } else if (!universe.decisionTimeKnowledgeProven) {
+          const detail = 'NEXUS sealed this universe revision after asOf: it was not held at the decision time';
+          if (request.requiresCompleteUniverse) block('UNIVERSE_KNOWLEDGE_AFTER_DECISION', run.scannerRunId, detail);
+          else warn('UNIVERSE_KNOWLEDGE_AFTER_DECISION', run.scannerRunId, detail);
         }
+        if (!universe.complete) {
+          if (request.requiresCompleteUniverse) block('UNIVERSE_COVERAGE_INCOMPLETE', run.scannerRunId, 'the universe source snapshot is not complete');
+          else warn('UNIVERSE_COVERAGE_INCOMPLETE', run.scannerRunId, 'the universe source snapshot is not complete');
+        }
+        if (!universe.sourceProduction) {
+          if (request.requiresCompleteUniverse) block('UNIVERSE_SOURCE_NOT_PRODUCTION', run.scannerRunId, 'the universe source is not production');
+          else warn('UNIVERSE_SOURCE_NOT_PRODUCTION', run.scannerRunId, 'the universe source is not production');
+        }
+        if (universe.historicalReconstruction) warn('UNIVERSE_HISTORICAL_RECONSTRUCTION', run.scannerRunId, 'the universe membership is a historical reconstruction, not strict point-in-time evidence');
       }
       if (candidate !== null) {
         // The candidate's bars must be known at asOf in every case. A live candidate also needs a contemporaneous signal bar.
