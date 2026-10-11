@@ -160,7 +160,8 @@ The walk for breakout B covers the final bars after B in order. Thresholds use A
 - **Failure (close-based).** For a resistance breakout: `close(t) < L − failBuf`, with `t − B ≤ failureWindowBars`. Mirror for a support breakdown.
   `failBuf = failureBufferAtr × ATR(B)`.
 - **Touch.** `low(t) ≤ L + tol` for a resistance breakout (`tol = retestToleranceAtr × ATR(B)`). Mirror: `high(t) ≥ L − tol` for a breakdown.
-  The touch counts only if `t − B ≤ retestWindowBars`.
+  The touch counts only if `t − B ≤ retestWindowBars`, and only on a bar that does not fail. A bar whose close fails is a failure, and the failure is
+  checked first, so its touch is never counted as a retest.
 - **Hold.** `close(t) ≥ L + holdBuf` for a resistance breakout (`holdBuf = retestHoldBufferAtr × ATR(B)`, default 0). Mirror: `close(t) ≤ L − holdBuf`.
 - A touch and a hold may occur on the same bar after B. That makes the retest confirmed on its touch bar.
 
@@ -260,8 +261,14 @@ Metrics exposed as exact text: `upperSlopeAtrPerBar`, `lowerSlopeAtrPerBar`, `sl
 ### 11.3 Lifecycle and direction
 
 `breakUp = upper`, `breakDown = lower`, with failure boundaries as in a V1 triangle. A channel is descriptive. Its direction is `neutral` while it
-forms, and the actual break determines the confirmed direction. It never assumes a breakout direction. Target: the width at formation, projected
-from the break.
+forms, and the actual break determines the confirmed direction. It never assumes a breakout direction. Target: the formation width projected from
+the break (`targetMethod = formation_width_projected_from_break`, the same for wedges).
+
+**Rectangles.** Breakout buffer: `priceAction.breakoutBufferAtr`. Failure buffer: `outcome.failureBufferAtr` (the V1 outcome rule). Target method:
+`rectangle_height_projected_from_break`.
+
+**Breakout family.** Breakout buffer: `priceAction.breakoutBufferAtr`. Failure buffer: `priceAction.failureBufferAtr`. Retest tolerance:
+`priceAction.retestToleranceAtr`. The retest and failure windows are counted in bars from the breakout bar.
 
 ## 12. Wedges
 
@@ -334,14 +341,16 @@ No structure may appear before the market evidence needed to know it existed.
 
 All values are versioned in `PatternParameters` and enter the run fingerprint.
 
+Keys as implemented (`PatternParameters` in `src/patterns/pattern-parameters.ts`). The level tolerance is `tolerance.sameLevelAtrMultiple`, which V1
+reserved for this family and V1B now reads.
+
 ```
-level:
-  minTouches              2
-  lookbackBars            120
-  priceScale              6
-  toleranceAtr            tolerance.sameLevelAtrMultiple = 0.5   (reserved in V1, used in V1B)
-breakout:
-  bufferAtr               0.1
+tolerance.sameLevelAtrMultiple   0.5     level tolerance in ATR at the bar before the decision
+priceAction:
+  levelMinTouches         2
+  levelLookbackBars       120
+  levelPriceScale         6
+  breakoutBufferAtr       0.1
   retestToleranceAtr      0.3
   retestHoldBufferAtr     0
   retestWindowBars        20
@@ -385,7 +394,8 @@ Validation refuses any value outside its domain. It also refuses the relation in
 - **Retest and failure walks.** Each breakout walks at most `max(retestWindowBars, failureWindowBars)` bars after B. Breakouts per level and direction are deduplicated, so the total work is bounded by level count times window.
 - **Rectangles.** One level computation per F, and pairs are formed only from that bar's levels (a small number). Only the birth bar of a pair is accepted.
 - **Channels and wedges.** Consecutive alternating windows only, bounded by `maxSwings`. The longest valid window per end swing is kept. The windowing loop is bounded by `maxSwings`.
-- **Diagnostics** expose `levelEvaluations`, `levelCount`, `breakoutCount`, `rectangleBirthChecks`, `channelWedgeWindows`, `barsWalked`.
+- **Diagnostics** expose `levelEvaluations`, `breakoutCount`, `priceActionBarsWalked`, `rectangleBirthChecks`, `channelWedgeWindows`, plus the V1
+  `barsWalked` and `candidateCount`. The `candidateCount` and `barsWalked` counters include the V1B candidates.
 
 ## 19. Fingerprint
 
@@ -425,6 +435,28 @@ fingerprint if present. There is no unversioned semantic dependency.
 - Thresholds are policy defaults. They are not market truths, and their predictive value is not claimed.
 - `supportResistance` ranks levels by a quant score. V1B does not use that score.
 - Open is not checked for double representability (V1 limitation, unchanged).
+- `sr:swing-cluster:v1` clusters highs and lows together by price. A level can therefore carry a low touch (a former resistance that acted as support),
+  and its kind is set by the reference price of the call. The breakout family does not depend on the kind: it compares the level with the previous
+  close directly.
+- Channel and wedge windows overlap by design. The same two lines can appear as several instances when the windows differ in their first or last
+  swing. Each instance has its own geometry-known bar and its own identity, and none is hidden.
+- Rectangle births are checked at every bar, but a rectangle is born only when its later level is confirmed. A range whose levels were confirmed
+  earlier and whose touches then change identity is not reborn.
+- A same-bar ambiguity between a retest and a failure is unreachable under close semantics (§8.1). Ambiguity remains only for the rectangle, channel
+  and wedge target against the failure boundary, as in V1.
+- The prefix rule ends the view at the first unusable bar. A non-final bar in the middle of the history therefore stops all later structures, which
+  fails safe and is reported as `afterGap` in the view. The data-quality gate is not asked to repair it.
+
+## 24. Implementation map
+
+| Module | Role |
+|---|---|
+| `src/patterns/levels.ts` | Level family: swing inputs, `levelsAt(lastIndex)`, `levelIdentityOf` |
+| `src/patterns/price-action.ts` | Breakout scan, retest and false-break walk, observation drafts |
+| `src/patterns/geometry-price-action.ts` | Rectangle births; channel and wedge windows |
+| `src/patterns/pattern-parameters.ts` | Versions, V1 and V1B identity tags, parameters, relations |
+| `src/patterns/pattern-engine.ts` | Integration, identities, fingerprint, diagnostics |
+| `src/patterns/geometry.ts`, `lifecycle.ts`, `line.ts`, `pit-view.ts` | V1, unchanged |
 
 ## 23. Prefix regression (dedicated)
 

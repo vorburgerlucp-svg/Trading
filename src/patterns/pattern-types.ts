@@ -5,6 +5,7 @@ import type { FreshnessUseCase } from '../market-data/freshness.js';
 import type { ChartContext } from '../timeframes/chart-context.js';
 import type { PatternParameters } from './pattern-parameters.js';
 
+/** The V1 structures first, then the V1B price-action structures (docs/PATTERN_ENGINE_V1B.md). */
 export const PATTERN_TYPES = Object.freeze([
   'head_and_shoulders',
   'inverse_head_and_shoulders',
@@ -13,13 +14,49 @@ export const PATTERN_TYPES = Object.freeze([
   'ascending_triangle',
   'descending_triangle',
   'symmetrical_triangle',
+  'resistance_breakout',
+  'support_breakdown',
+  'breakout_retest',
+  'breakdown_retest',
+  'false_breakout',
+  'false_breakdown',
+  'rectangle',
+  'ascending_channel',
+  'descending_channel',
+  'rising_wedge',
+  'falling_wedge',
 ] as const);
 export type PatternType = (typeof PATTERN_TYPES)[number];
+
+/** The V1B structures, which are not V1: their identity uses the V1B tags. */
+export const PRICE_ACTION_TYPES: ReadonlySet<PatternType> = new Set<PatternType>([
+  'resistance_breakout',
+  'support_breakdown',
+  'breakout_retest',
+  'breakdown_retest',
+  'false_breakout',
+  'false_breakdown',
+  'rectangle',
+  'ascending_channel',
+  'descending_channel',
+  'rising_wedge',
+  'falling_wedge',
+]);
 
 /** The direction of the pattern. `neutral` while a symmetrical triangle forms. */
 export type PatternDirection = 'bullish' | 'bearish' | 'neutral';
 
-export type PatternStatus = 'forming' | 'confirmed' | 'target_active' | 'completed' | 'invalidated' | 'failed_breakout' | 'expired' | 'outcome_ambiguous';
+export type PatternStatus =
+  | 'forming'
+  | 'confirmed'
+  | 'retest_pending'
+  | 'retest_confirmed'
+  | 'target_active'
+  | 'completed'
+  | 'invalidated'
+  | 'failed_breakout'
+  | 'expired'
+  | 'outcome_ambiguous';
 
 export type PatternRunStatus = 'READY' | 'INSUFFICIENT_DATA' | 'INVALID_DATA';
 
@@ -97,6 +134,8 @@ export interface PatternRun {
   engineVersion: string;
   geometryVersion: string;
   lifecycleVersion: string;
+  priceActionLifecycleVersion: string;
+  supportResistanceVersion: string;
   swingVersion: string;
   atrVersion: string;
   instrumentId: string;
@@ -117,7 +156,21 @@ export interface PatternRun {
   parameters: PatternParameters;
   observations: PatternObservation[];
   issues: Array<{ code: string; message: string }>;
-  diagnostics: { pitBarCount: number; swingCount: number; candidateCount: number; barsWalked: number };
+  diagnostics: {
+    pitBarCount: number;
+    swingCount: number;
+    candidateCount: number;
+    barsWalked: number;
+    /** Level computations, one per decision bar of the breakout scan. */
+    levelEvaluations: number;
+    breakoutCount: number;
+    /** Bars walked by the breakout, retest and false-break lifecycles. */
+    priceActionBarsWalked: number;
+    /** Pairs of levels tested for a rectangle birth. */
+    rectangleBirthChecks: number;
+    /** Consecutive swing windows tested for a channel or a wedge. */
+    channelWedgeWindows: number;
+  };
   createdAt: string;
 }
 

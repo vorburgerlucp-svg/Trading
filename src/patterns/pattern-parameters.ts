@@ -1,21 +1,33 @@
-// Pattern parameters (pattern-engine:v1): every subjective choice is a versioned, documented default (docs/PATTERN_ENGINE_V1.md §18).
-// The defaults are policy, not market truth. Every resolved value enters the run fingerprint. Invalid parameters fail closed.
+// Pattern parameters (pattern-engine:v1b): every subjective choice is a versioned, documented default (docs/PATTERN_ENGINE_V1.md §18 and
+// docs/PATTERN_ENGINE_V1B.md §17). The defaults are policy, not market truth. Every resolved value enters the run fingerprint. Invalid parameters
+// fail closed.
 
 import { Decimal } from '../money/decimal.js';
+import { SUPPORT_RESISTANCE_VERSION } from '../quant/structure/support-resistance.js';
 import { SWING_VERSION } from '../quant/structure/swings.js';
 import { ATR_VERSION } from '../quant/indicators/atr.js';
 
-export const PATTERN_ENGINE_VERSION = 'pattern-engine:v1';
-export const PATTERN_GEOMETRY_VERSION = 'pattern-geometry:v1';
+/** The run engine version. V1B bumped it explicitly: the run now produces price-action structures. */
+export const PATTERN_ENGINE_VERSION = 'pattern-engine:v1b';
+export const PATTERN_GEOMETRY_VERSION = 'pattern-geometry:v1b';
 export const PATTERN_LIFECYCLE_VERSION = 'pattern-lifecycle:v1';
-export { SWING_VERSION, ATR_VERSION };
+export const PRICE_ACTION_LIFECYCLE_VERSION = 'price-action-lifecycle:v1';
+export { SWING_VERSION, ATR_VERSION, SUPPORT_RESISTANCE_VERSION };
+
+/**
+ * Identity tags of the V1 structures. V1 instance ids were derived from these tags, and they stay frozen: a version bump of the run engine must not
+ * silently change the id of an existing V1 structure (docs/PATTERN_ENGINE_V1B.md §2).
+ */
+export const V1_IDENTITY = Object.freeze({ engine: 'pattern-engine:v1', geometry: 'pattern-geometry:v1' });
+/** Identity tags of the V1B price-action structures. */
+export const V1B_IDENTITY = Object.freeze({ engine: PATTERN_ENGINE_VERSION, geometry: PATTERN_GEOMETRY_VERSION, lifecycle: PRICE_ACTION_LIFECYCLE_VERSION });
 
 export interface PatternParameters {
   swing: { leftBars: number; rightBars: number };
   tolerance: {
     mode: 'atr' | 'percent';
     atrPeriod: number;
-    /** Reserved for the level families of V1B. The V1 geometry uses the family tolerances below. */
+    /** The level tolerance of the V1B level family, in ATR units at the bar before the decision. V1 never reads it. */
     sameLevelAtrMultiple: string;
     /** Used only in percent mode: the scale unit is this fraction of the close at the geometry-known bar. */
     percentOfPrice: string;
@@ -56,6 +68,50 @@ export interface PatternParameters {
     failureBufferAtr: string;
     maxOutcomeBars: number;
   };
+  /** Support/resistance levels and the breakout family: breakout, retest and false break. */
+  priceAction: {
+    levelMinTouches: number;
+    levelLookbackBars: number;
+    levelPriceScale: number;
+    breakoutBufferAtr: string;
+    retestToleranceAtr: string;
+    retestHoldBufferAtr: string;
+    retestWindowBars: number;
+    failureWindowBars: number;
+    failureBufferAtr: string;
+  };
+  rectangle: {
+    minTouchesPerSide: number;
+    minDurationBars: number;
+    maxDurationBars: number;
+    flatSlopeToleranceAtrPerBar: string;
+    minHeightAtr: string;
+    maxResidualAtr: string;
+    confirmationWindowBars: number;
+  };
+  channel: {
+    minTouchesPerSide: number;
+    minDurationBars: number;
+    maxDurationBars: number;
+    maxResidualAtr: string;
+    minSlopeAtrPerBar: string;
+    maxSlopeDifferenceAtrPerBar: string;
+    /** |width_end / width_start − 1| must not exceed this. */
+    maxWidthChangeRatio: string;
+    maxSwings: number;
+    confirmationWindowBars: number;
+  };
+  wedge: {
+    minTouchesPerSide: number;
+    minDurationBars: number;
+    maxDurationBars: number;
+    maxResidualAtr: string;
+    minSlopeAtrPerBar: string;
+    minConvergence: string;
+    maxApexBarsAhead: number;
+    maxSwings: number;
+    confirmationWindowBars: number;
+  };
 }
 
 export const DEFAULT_PATTERN_PARAMETERS = Object.freeze({
@@ -93,6 +149,48 @@ export const DEFAULT_PATTERN_PARAMETERS = Object.freeze({
     breakoutBufferAtr: '0.1',
   },
   outcome: { targetToleranceAtr: '0', failureBufferAtr: '0.1', maxOutcomeBars: 60 },
+  priceAction: {
+    levelMinTouches: 2,
+    levelLookbackBars: 120,
+    levelPriceScale: 6,
+    breakoutBufferAtr: '0.1',
+    retestToleranceAtr: '0.3',
+    retestHoldBufferAtr: '0',
+    retestWindowBars: 20,
+    failureWindowBars: 10,
+    failureBufferAtr: '0.1',
+  },
+  rectangle: {
+    minTouchesPerSide: 2,
+    minDurationBars: 15,
+    maxDurationBars: 100,
+    flatSlopeToleranceAtrPerBar: '0.02',
+    minHeightAtr: '1.5',
+    maxResidualAtr: '0.5',
+    confirmationWindowBars: 30,
+  },
+  channel: {
+    minTouchesPerSide: 2,
+    minDurationBars: 15,
+    maxDurationBars: 100,
+    maxResidualAtr: '0.5',
+    minSlopeAtrPerBar: '0.03',
+    maxSlopeDifferenceAtrPerBar: '0.02',
+    maxWidthChangeRatio: '0.15',
+    maxSwings: 6,
+    confirmationWindowBars: 30,
+  },
+  wedge: {
+    minTouchesPerSide: 2,
+    minDurationBars: 15,
+    maxDurationBars: 100,
+    maxResidualAtr: '0.5',
+    minSlopeAtrPerBar: '0.03',
+    minConvergence: '0.2',
+    maxApexBarsAhead: 60,
+    maxSwings: 6,
+    confirmationWindowBars: 30,
+  },
 } satisfies PatternParameters);
 
 /** Overrides are deep-partial: any value may be set, the rest keeps its default. */
@@ -127,6 +225,10 @@ export function resolvePatternParameters(overrides: PatternParameterOverrides = 
   const dbl = o('double');
   const tri = o('triangle');
   const out = o('outcome');
+  const pa = o('priceAction');
+  const rect = o('rectangle');
+  const chan = o('channel');
+  const wedge = o('wedge');
   if (tol.mode !== 'atr' && tol.mode !== 'percent') throw new PatternParameterError('tolerance.mode must be atr or percent');
   const resolved: PatternParameters = {
     swing: { leftBars: intParam(swing.leftBars, 'swing.leftBars', 1), rightBars: intParam(swing.rightBars, 'swing.rightBars', 1) },
@@ -172,10 +274,60 @@ export function resolvePatternParameters(overrides: PatternParameterOverrides = 
       failureBufferAtr: decimalParam(out.failureBufferAtr, 'outcome.failureBufferAtr'),
       maxOutcomeBars: intParam(out.maxOutcomeBars, 'outcome.maxOutcomeBars', 1),
     },
+    priceAction: {
+      levelMinTouches: intParam(pa.levelMinTouches, 'priceAction.levelMinTouches', 2),
+      levelLookbackBars: intParam(pa.levelLookbackBars, 'priceAction.levelLookbackBars', 1),
+      levelPriceScale: intParam(pa.levelPriceScale, 'priceAction.levelPriceScale', 0),
+      breakoutBufferAtr: decimalParam(pa.breakoutBufferAtr, 'priceAction.breakoutBufferAtr'),
+      retestToleranceAtr: decimalParam(pa.retestToleranceAtr, 'priceAction.retestToleranceAtr'),
+      retestHoldBufferAtr: decimalParam(pa.retestHoldBufferAtr, 'priceAction.retestHoldBufferAtr'),
+      retestWindowBars: intParam(pa.retestWindowBars, 'priceAction.retestWindowBars', 1),
+      failureWindowBars: intParam(pa.failureWindowBars, 'priceAction.failureWindowBars', 1),
+      failureBufferAtr: decimalParam(pa.failureBufferAtr, 'priceAction.failureBufferAtr'),
+    },
+    rectangle: {
+      minTouchesPerSide: intParam(rect.minTouchesPerSide, 'rectangle.minTouchesPerSide', 2),
+      minDurationBars: intParam(rect.minDurationBars, 'rectangle.minDurationBars', 1),
+      maxDurationBars: intParam(rect.maxDurationBars, 'rectangle.maxDurationBars', 1),
+      flatSlopeToleranceAtrPerBar: decimalParam(rect.flatSlopeToleranceAtrPerBar, 'rectangle.flatSlopeToleranceAtrPerBar'),
+      minHeightAtr: decimalParam(rect.minHeightAtr, 'rectangle.minHeightAtr'),
+      maxResidualAtr: decimalParam(rect.maxResidualAtr, 'rectangle.maxResidualAtr'),
+      confirmationWindowBars: intParam(rect.confirmationWindowBars, 'rectangle.confirmationWindowBars', 1),
+    },
+    channel: {
+      minTouchesPerSide: intParam(chan.minTouchesPerSide, 'channel.minTouchesPerSide', 2),
+      minDurationBars: intParam(chan.minDurationBars, 'channel.minDurationBars', 1),
+      maxDurationBars: intParam(chan.maxDurationBars, 'channel.maxDurationBars', 1),
+      maxResidualAtr: decimalParam(chan.maxResidualAtr, 'channel.maxResidualAtr'),
+      minSlopeAtrPerBar: decimalParam(chan.minSlopeAtrPerBar, 'channel.minSlopeAtrPerBar'),
+      maxSlopeDifferenceAtrPerBar: decimalParam(chan.maxSlopeDifferenceAtrPerBar, 'channel.maxSlopeDifferenceAtrPerBar'),
+      maxWidthChangeRatio: decimalParam(chan.maxWidthChangeRatio, 'channel.maxWidthChangeRatio'),
+      maxSwings: intParam(chan.maxSwings, 'channel.maxSwings', 4),
+      confirmationWindowBars: intParam(chan.confirmationWindowBars, 'channel.confirmationWindowBars', 1),
+    },
+    wedge: {
+      minTouchesPerSide: intParam(wedge.minTouchesPerSide, 'wedge.minTouchesPerSide', 2),
+      minDurationBars: intParam(wedge.minDurationBars, 'wedge.minDurationBars', 1),
+      maxDurationBars: intParam(wedge.maxDurationBars, 'wedge.maxDurationBars', 1),
+      maxResidualAtr: decimalParam(wedge.maxResidualAtr, 'wedge.maxResidualAtr'),
+      minSlopeAtrPerBar: decimalParam(wedge.minSlopeAtrPerBar, 'wedge.minSlopeAtrPerBar'),
+      minConvergence: decimalParam(wedge.minConvergence, 'wedge.minConvergence'),
+      maxApexBarsAhead: intParam(wedge.maxApexBarsAhead, 'wedge.maxApexBarsAhead', 1),
+      maxSwings: intParam(wedge.maxSwings, 'wedge.maxSwings', 4),
+      confirmationWindowBars: intParam(wedge.confirmationWindowBars, 'wedge.confirmationWindowBars', 1),
+    },
   };
   if (resolved.headShoulders.minPatternBars > resolved.headShoulders.maxPatternBars) throw new PatternParameterError('headShoulders min must not exceed max');
   if (resolved.double.maxPatternBars < resolved.double.minSeparationBars) throw new PatternParameterError('double.maxPatternBars must be at least minSeparationBars');
   if (resolved.triangle.minPatternBars > resolved.triangle.maxPatternBars) throw new PatternParameterError('triangle min must not exceed max');
   if (Decimal.from(resolved.triangle.minConvergence).gt(1)) throw new PatternParameterError('triangle.minConvergence must not exceed 1');
+  if (resolved.rectangle.minDurationBars > resolved.rectangle.maxDurationBars) throw new PatternParameterError('rectangle min duration must not exceed max');
+  if (resolved.channel.minDurationBars > resolved.channel.maxDurationBars) throw new PatternParameterError('channel min duration must not exceed max');
+  if (resolved.wedge.minDurationBars > resolved.wedge.maxDurationBars) throw new PatternParameterError('wedge min duration must not exceed max');
+  // The categories are disjoint by construction only if these relations hold (docs/PATTERN_ENGINE_V1B.md §13).
+  if (Decimal.from(resolved.wedge.minSlopeAtrPerBar).lte(resolved.triangle.flatSlopeToleranceAtrPerBar))
+    throw new PatternParameterError('wedge.minSlopeAtrPerBar must exceed triangle.flatSlopeToleranceAtrPerBar, so a wedge never has a flat side');
+  if (Decimal.from(resolved.channel.maxWidthChangeRatio).gte(resolved.wedge.minConvergence))
+    throw new PatternParameterError('channel.maxWidthChangeRatio must be below wedge.minConvergence, so a channel never converges enough to be a wedge');
   return resolved;
 }

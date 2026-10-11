@@ -1,17 +1,34 @@
-// Pattern Engine V1 (pattern-engine:v1): the structural core. It answers what geometry exists in the point-in-time final bars, whether it is
-// forming, confirmed, target-active, completed, invalidated, failed, expired or outcome-ambiguous, and when NEXUS could first have known each
-// state. It never produces a probability, a score, a statistic or a trade action. See docs/PATTERN_ENGINE_V1.md.
+// Pattern Engine (pattern-engine:v1b): the structural core and the price-action structures. It answers what geometry exists in the point-in-time
+// final bars, whether it is forming, confirmed, target-active, completed, invalidated, failed, expired or outcome-ambiguous, and when NEXUS could
+// first have known each state. It never produces a probability, a score, a statistic or a trade action. See docs/PATTERN_ENGINE_V1.md and
+// docs/PATTERN_ENGINE_V1B.md.
 
 import { MarketDataQualityService } from '../market-data/data-quality.js';
 import { BAR_INTERVALS } from '../market-data/market-data-types.js';
 import { parseUtc, toUtcIso } from '../market-data/time.js';
+import { Decimal } from '../money/decimal.js';
 import { hashOf } from '../persistence/canonical-json.js';
-import { ATR_VERSION, SWING_VERSION, PATTERN_ENGINE_VERSION, PATTERN_GEOMETRY_VERSION, PATTERN_LIFECYCLE_VERSION, resolvePatternParameters, type PatternParameters } from './pattern-parameters.js';
-import { detectCandidates, originalLine, spaceOf, type Candidate } from './geometry.js';
-import { walkCandidate, type WalkResult } from './lifecycle.js';
-import { buildPitView, provenanceOf, type PitView } from './pit-view.js';
-import { PatternError, type PatternDirection, type PatternObservation, type PatternRun, type PatternRunInput, type ReplayMode } from './pattern-types.js';
+import { SUPPORT_RESISTANCE_VERSION } from '../quant/structure/support-resistance.js';
 import type { ChartContext } from '../timeframes/chart-context.js';
+import { detectCandidates, originalLine, spaceOf, swingsOf, atrSeriesOf, type Candidate } from './geometry.js';
+import { linesStructuresIn, rectanglesIn } from './geometry-price-action.js';
+import { swingInputsOf } from './levels.js';
+import { walkCandidate, type WalkResult } from './lifecycle.js';
+import { detectPriceAction, type PriceActionDraft } from './price-action.js';
+import {
+  ATR_VERSION,
+  PATTERN_ENGINE_VERSION,
+  PATTERN_GEOMETRY_VERSION,
+  PATTERN_LIFECYCLE_VERSION,
+  PRICE_ACTION_LIFECYCLE_VERSION,
+  SWING_VERSION,
+  V1B_IDENTITY,
+  V1_IDENTITY,
+  resolvePatternParameters,
+  type PatternParameters,
+} from './pattern-parameters.js';
+import { PRICE_ACTION_TYPES, PatternError, type PatternDirection, type PatternObservation, type PatternRun, type PatternRunInput, type ReplayMode } from './pattern-types.js';
+import { buildPitView, provenanceOf, type PitView } from './pit-view.js';
 
 export type { PatternRunInput, PatternRun, PatternObservation } from './pattern-types.js';
 
@@ -30,7 +47,7 @@ function deepFreeze<T>(value: T): T {
 
 function validateInput(input: PatternRunInput): void {
   if (typeof input.instrument.instrumentId !== 'string' || input.instrument.instrumentId.trim() === '') throw new PatternError('PATTERN_INPUT_INVALID', 'instrumentId is required');
-  if (!BAR_INTERVALS.includes(input.series.interval)) throw new PatternError('PATTERN_INPUT_INVALID', input.series.interval + ' is not a native interval');
+  if (!(BAR_INTERVALS as readonly string[]).includes(input.series.interval)) throw new PatternError('PATTERN_INPUT_INVALID', input.series.interval + ' is not a native interval');
   if (input.replay !== 'historical_research' && input.replay !== 'decision_time') throw new PatternError('PATTERN_INPUT_INVALID', 'replay must be historical_research or decision_time');
   if (!Array.isArray(input.bars)) throw new PatternError('PATTERN_INPUT_INVALID', 'bars must be an array');
 }
@@ -52,15 +69,24 @@ function checkContext(ctx: ChartContext, input: PatternRunInput, asOf: string, u
 
 const flip = (d: 'up' | 'down' | null, mirrored: boolean): 'up' | 'down' | null => (d === null || !mirrored ? d : d === 'up' ? 'down' : 'up');
 
+interface RunCommon {
+  instrumentId: string;
+  interval: PatternRunInput['series']['interval'];
+  series: PatternRun['series'];
+  asOf: string;
+  runId: string;
+  runFingerprint: string;
+  ctx: ChartContext | null;
+}
+
+function chartContextOf(ctx: ChartContext | null): PatternObservation['chartContext'] {
+  return ctx === null ? null : { chartContextId: ctx.chartContextId, dominantTrend: ctx.dominantTrend, currentPhase: ctx.currentPhase, timeframeAlignment: ctx.timeframeAlignment.state };
+}
+
 /** The observation of one candidate at asOf. Prices and lines are mapped back to the original space. */
-function observationOf(
-  c: Candidate,
-  walk: WalkResult,
-  view: PitView,
-  common: { instrumentId: string; interval: PatternRunInput['series']['interval']; series: PatternRun['series']; asOf: string; runId: string; runFingerprint: string; ctx: ChartContext | null },
-): PatternObservation {
+function observationOf(c: Candidate, walk: WalkResult, view: PitView, common: RunCommon): PatternObservation {
   const m = c.mirrored;
-  const toOriginal = (d: import('../money/decimal.js').Decimal) => (m ? d.negated() : d);
+  const toOriginal = (d: Decimal) => (m ? d.negated() : d);
   const anchors = c.anchors.map((a) => ({
     role: a.role,
     kind: m ? (a.kind === 'high' ? ('low' as const) : ('high' as const)) : a.kind,
@@ -69,12 +95,14 @@ function observationOf(
     barIndex: a.index,
     confirmedAt: view.bars[a.confirmedIndex]!.instant,
   }));
+  // The identity tags are frozen per family: V1 ids keep the V1 tags, so a version bump never changes them (docs/PATTERN_ENGINE_V1B.md §2).
+  const tags = PRICE_ACTION_TYPES.has(c.patternType) ? V1B_IDENTITY : V1_IDENTITY;
   const patternInstanceId =
     'pi_' +
     hashOf({
       kind: 'pattern-instance',
-      engine: PATTERN_ENGINE_VERSION,
-      geometry: PATTERN_GEOMETRY_VERSION,
+      engine: tags.engine,
+      geometry: tags.geometry,
       instrumentId: common.instrumentId,
       interval: common.interval,
       patternType: c.patternType,
@@ -89,7 +117,6 @@ function observationOf(
     const o = originalLine(line, m);
     boundaries[name] = { intercept: o.a.toString(), slope: o.b.toString() };
   }
-  const ctx = common.ctx;
   return {
     patternInstanceId,
     patternObservationId,
@@ -118,14 +145,29 @@ function observationOf(
     },
     boundaries,
     geometryMetrics: c.metrics,
-    chartContext: ctx === null ? null : { chartContextId: ctx.chartContextId, dominantTrend: ctx.dominantTrend, currentPhase: ctx.currentPhase, timeframeAlignment: ctx.timeframeAlignment.state },
-    evidenceRefs: { patternRunId: common.runId, chartContextId: ctx === null ? null : ctx.chartContextId },
+    chartContext: chartContextOf(common.ctx),
+    evidenceRefs: { patternRunId: common.runId, chartContextId: common.ctx === null ? null : common.ctx.chartContextId },
+  };
+}
+
+/** A price-action draft at asOf: the same per-asOf identity and metadata as a candidate observation. */
+function finalizeDraft(d: PriceActionDraft, common: RunCommon): PatternObservation {
+  const patternObservationId = 'po_' + hashOf({ kind: 'pattern-observation', patternInstanceId: d.patternInstanceId, asOf: common.asOf, status: d.status, inputFingerprint: common.runFingerprint }).slice(0, 40);
+  return {
+    ...d,
+    patternObservationId,
+    instrumentId: common.instrumentId,
+    interval: common.interval,
+    series: common.series,
+    asOf: common.asOf,
+    chartContext: chartContextOf(common.ctx),
+    evidenceRefs: { patternRunId: common.runId, chartContextId: common.ctx === null ? null : common.ctx.chartContextId },
   };
 }
 
 /**
- * Runs the structural pattern engine on one series at one asOf. The bars are never trusted: the engine builds its own point-in-time view. An
- * unproven decision-time bar throws; an invalid series returns INVALID_DATA with its issues and no geometry.
+ * Runs the pattern engine on one series at one asOf. The bars are never trusted: the engine builds its own point-in-time view. An unproven
+ * decision-time bar throws; an invalid series returns INVALID_DATA with its issues and no geometry.
  */
 export function runPatternEngine(input: PatternRunInput, options: PatternRunOptions = {}): PatternRun {
   validateInput(input);
@@ -155,13 +197,14 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
   const invalid = !quality.valid || view.unrepresentable > 0;
   const insufficient = !invalid && params.tolerance.mode === 'atr' && view.bars.length < params.tolerance.atrPeriod + 1;
   const status: PatternRun['status'] = invalid ? 'INVALID_DATA' : insufficient ? 'INSUFFICIENT_DATA' : 'READY';
-
-  const detection = invalid || insufficient ? { candidates: [] as Candidate[], diagnostics: { swings: 0, candidates: 0, rejectedNoScale: 0 } } : detectCandidates(view, params);
+  const computable = !invalid && !insufficient;
 
   const inputFingerprint = hashOf({
     engine: PATTERN_ENGINE_VERSION,
     geometry: PATTERN_GEOMETRY_VERSION,
     lifecycle: PATTERN_LIFECYCLE_VERSION,
+    priceActionLifecycle: PRICE_ACTION_LIFECYCLE_VERSION,
+    supportResistance: SUPPORT_RESISTANCE_VERSION,
     swing: SWING_VERSION,
     atr: ATR_VERSION,
     instrument: { instrumentId: input.instrument.instrumentId, assetClass: input.instrument.assetClass, tickSize: input.instrument.tickSize ?? null, allowsNegativePrices: input.instrument.allowsNegativePrices },
@@ -174,18 +217,46 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
     chartContext: ctx === null ? null : { chartContextId: ctx.chartContextId, inputFingerprint: ctx.inputFingerprint },
   });
   const patternRunId = 'pr_' + inputFingerprint.slice(0, 40);
+  const common: RunCommon = { instrumentId: input.instrument.instrumentId, interval: input.series.interval, series: { ...input.series }, asOf, runId: patternRunId, runFingerprint: inputFingerprint, ctx };
 
-  const real = invalid || insufficient ? null : spaceOf(view, false);
-  const mirror = invalid || insufficient ? null : spaceOf(view, true);
-  const common = { instrumentId: input.instrument.instrumentId, interval: input.series.interval, series: { ...input.series }, asOf, runId: patternRunId, runFingerprint: inputFingerprint, ctx };
   const byInstance = new Map<string, PatternObservation>();
-  let barsWalked = 0;
-  if (real !== null && mirror !== null) {
+  const diagnostics = { swings: 0, candidates: 0, barsWalked: 0, levelEvaluations: 0, breakoutCount: 0, priceActionBarsWalked: 0, rectangleBirthChecks: 0, channelWedgeWindows: 0 };
+  if (computable) {
+    const atrs = atrSeriesOf(view, params.tolerance.atrPeriod);
+    const real = spaceOf(view, false);
+    const mirror = spaceOf(view, true);
+    const realSwings = swingsOf(real, params.swing.leftBars, params.swing.rightBars);
+    diagnostics.swings = realSwings.length;
     const last = view.bars.length - 1;
-    for (const c of detection.candidates) {
+
+    // V1 structures: unchanged (docs/PATTERN_ENGINE_V1B.md §1).
+    const detection = detectCandidates(view, params);
+    const candidates: Candidate[] = [...detection.candidates];
+
+    // V1B geometry: rectangles from support/resistance clusters, channels and wedges from fitted swing windows (real space only: their mirror
+    // images are the other channel or wedge type, so the real space covers both).
+    const levelInputs = swingInputsOf(view, realSwings);
+    const rect = rectanglesIn(view, params, atrs, levelInputs);
+    const lines = linesStructuresIn(view, params, atrs, realSwings);
+    diagnostics.rectangleBirthChecks = rect.births;
+    diagnostics.channelWedgeWindows = lines.channelWedgeWindows;
+    candidates.push(...rect.candidates, ...lines.candidates);
+
+    for (const c of candidates) {
       const walk = walkCandidate(c, c.mirrored ? mirror : real, last);
-      barsWalked += walk.barsWalked;
+      diagnostics.barsWalked += walk.barsWalked;
       const observation = observationOf(c, walk, view, common);
+      if (!byInstance.has(observation.patternInstanceId)) byInstance.set(observation.patternInstanceId, observation);
+    }
+    diagnostics.candidates = candidates.length;
+
+    // V1B price action: breakouts, retests and false breaks.
+    const pa = detectPriceAction(view, params, atrs, levelInputs, { instrumentId: input.instrument.instrumentId, interval: input.series.interval, series: { ...input.series } });
+    diagnostics.levelEvaluations = pa.levelEvaluations;
+    diagnostics.breakoutCount = pa.breakoutCount;
+    diagnostics.priceActionBarsWalked = pa.barsWalked;
+    for (const d of pa.drafts) {
+      const observation = finalizeDraft(d, common);
       if (!byInstance.has(observation.patternInstanceId)) byInstance.set(observation.patternInstanceId, observation);
     }
   }
@@ -196,6 +267,8 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
     engineVersion: PATTERN_ENGINE_VERSION,
     geometryVersion: PATTERN_GEOMETRY_VERSION,
     lifecycleVersion: PATTERN_LIFECYCLE_VERSION,
+    priceActionLifecycleVersion: PRICE_ACTION_LIFECYCLE_VERSION,
+    supportResistanceVersion: SUPPORT_RESISTANCE_VERSION,
     swingVersion: SWING_VERSION,
     atrVersion: ATR_VERSION,
     instrumentId: input.instrument.instrumentId,
@@ -211,7 +284,17 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
     parameters: params,
     observations,
     issues,
-    diagnostics: { pitBarCount: view.bars.length, swingCount: detection.diagnostics.swings, candidateCount: detection.candidates.length, barsWalked },
+    diagnostics: {
+      pitBarCount: view.bars.length,
+      swingCount: diagnostics.swings,
+      candidateCount: diagnostics.candidates,
+      barsWalked: diagnostics.barsWalked,
+      levelEvaluations: diagnostics.levelEvaluations,
+      breakoutCount: diagnostics.breakoutCount,
+      priceActionBarsWalked: diagnostics.priceActionBarsWalked,
+      rectangleBirthChecks: diagnostics.rectangleBirthChecks,
+      channelWedgeWindows: diagnostics.channelWedgeWindows,
+    },
     createdAt: options.createdAt ?? '1970-01-01T00:00:00.000Z',
   };
   return deepFreeze(run);
