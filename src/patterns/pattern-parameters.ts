@@ -21,8 +21,11 @@ export { SWING_VERSION, ATR_VERSION, SUPPORT_RESISTANCE_VERSION };
  * silently change the id of an existing V1 structure (docs/PATTERN_ENGINE_V1B.md §2).
  */
 export const V1_IDENTITY = Object.freeze({ engine: 'pattern-engine:v1', geometry: 'pattern-geometry:v1' });
-/** Identity tags of the V1B price-action structures. */
-export const V1B_IDENTITY = Object.freeze({ engine: PATTERN_ENGINE_VERSION, geometry: PATTERN_GEOMETRY_VERSION, lifecycle: PRICE_ACTION_LIFECYCLE_VERSION });
+/**
+ * Identity tags of the V1B price-action structures. Literals, not the run constants: a later run-version bump must never change a V1B instance id
+ * (docs/PATTERN_ENGINE_V1C.md §1.1). The golden test v1c-regression.test.ts enforces it.
+ */
+export const V1B_IDENTITY = Object.freeze({ engine: 'pattern-engine:v1b', geometry: 'pattern-geometry:v1b', lifecycle: 'price-action-lifecycle:v1' });
 
 export interface PatternParameters {
   swing: { leftBars: number; rightBars: number };
