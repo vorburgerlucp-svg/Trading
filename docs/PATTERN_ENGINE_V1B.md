@@ -72,7 +72,7 @@ unchanged. Level parameters: `minTouches = 2`, `lookbackBars = 120`, `priceScale
 
 The `strengthScore` produced by `supportResistance` is a quant ranking score. V1B never reads it in a decision and never reports it.
 
-### 4.1 Level identity
+### 4.1 Level identity (superseded by §25: the evidence hash is now `levelEvidenceId`; structural identity is `levelLineageId`)
 
 A level is identified by its evidence, not by its rounded price. Two distinct historical levels at the same price are two levels.
 
@@ -118,7 +118,7 @@ This follows from §3 and §4: the level set at B is `supportResistance(…, las
 level. Replaying at T ≥ B must return the same breakout instance, with the same level identity and the same touch list as before. Replaying at a T
 before that third touch must give the same answer as a replay at T ≫ B.
 
-## 7. Breakout instance identity
+## 7. Breakout instance identity (superseded by §25: bound to `levelLineageId`, not to the evidence hash)
 
 ```
 patternInstanceId = 'pi_' + hash({
@@ -457,6 +457,109 @@ fingerprint if present. There is no unversioned semantic dependency.
 | `src/patterns/pattern-parameters.ts` | Versions, V1 and V1B identity tags, parameters, relations |
 | `src/patterns/pattern-engine.ts` | Integration, identities, fingerprint, diagnostics |
 | `src/patterns/geometry.ts`, `lifecycle.ts`, `line.ts`, `pit-view.ts` | V1, unchanged |
+
+## 25. Hardening: stable level lineage and event relationships (`level-lineage:v1`)
+
+Status: design for the `feature/pattern-v1b-lineage-hardening` branch. It supersedes §4.1 (the level id) and §7 (the breakout id) where they conflict.
+
+### 25.1 The gap
+
+The V1B level identity hashed the price, the confirmation instant and the whole touch list. A later touch on the same physical level changed that
+identity, so the next crossing of that level looked like a new level and emitted a second `resistance_breakout`. Reproduced by a RED test
+(`test/patterns/price-action-recross.test.ts`).
+
+### 25.2 Two concepts, not one
+
+- **`levelLineageId`: structural identity.** "This is the same price-area structure over time." It does not change when touches are added, and it does
+  not change when the level's role flips between resistance and support.
+- **`levelEvidenceId`: audit identity.** "This exact set of touches existed at this instant." It changes with every touch, every price revision of the
+  cluster and every confirmation change. It is recorded, never used as the structural identity.
+
+### 25.3 Lineage policy (`level-lineage:v1`)
+
+- **Birth.** A lineage is born from a cluster that no existing lineage claims. Its birth touches are the first `levelMinTouches` touches of the cluster
+  in confirmation order (confirmedIndex, then index, then kind). The birth instant is the cluster's `confirmedAt`, and the birth price is the cluster's
+  price at that bar.
+- **Identity.** `levelLineageId = hash({policy: 'level-lineage:v1', sr, instrumentId, interval, birthConfirmedAt, birthPrice, birthTouches})`, with the
+  birth touches sorted canonically. Two distinct historical levels at the same price differ by birth instant and birth touches.
+- **Matching, bar by bar.** The levels are swept in bar order, using the support/resistance clusters as of each bar (the same clusters the breakout
+  scan uses). A cluster matches a lineage when it contains at least one of that lineage's birth touches that is still within the lookback. Matches are
+  made greedily and deterministically: larger overlap first, then the earlier birth, then the lower price. One cluster matches at most one lineage, and
+  one lineage matches at most one cluster. An unmatched cluster is born as a new lineage.
+- **Lapse.** A lineage with no matching cluster is inactive. A later cluster that contains one of its birth touches re-matches it. When every birth touch
+  leaves the lookback, the lineage is over and a later cluster at the same price is a new lineage. That is the unrelated same-price case.
+- **Role switch.** The matching ignores `kind`. A breakout that flips a resistance into a support keeps the lineage.
+
+The sweep depends only on bars up to the bar it has reached, so the lineage at a bar never changes because of later bars.
+
+### 25.4 Evidence identity
+
+`levelEvidenceId = hash({sr, interval, priceLevel, confirmedAt, touches})`, with the touches sorted canonically. Adding a touch changes it. This is the old
+`levelIdentityOf`, renamed.
+
+### 25.5 Breakouts
+
+- **Instance identity** binds to `levelLineageId` (not `levelEvidenceId`), direction, instrument, interval and series. Later touches, retests and failures
+  do not change it.
+- **The observation records the evidence used.** `levelEvidence` carries `levelLineageId`, `levelEvidenceId`, the price, the touch count, the high and
+  low touch counts, and the evidence confirmation instant. These are the values at B − 1, the ones that actually confirmed the breakout.
+- **Re-cross policy.** One breakout event per `levelLineageId` and direction. A later up-cross of the same lineage is not a second independent
+  `resistance_breakout`. A future V2 may define a re-arm lifecycle, and it is not in V1B hardening.
+
+### 25.6 Event relationships
+
+Every price-action observation carries `patternLineage`:
+
+```
+patternLineage: {
+  eventFamilyId:            'ef_…'   // hash(instrument, interval, series, levelLineageId, direction)
+  parentPatternInstanceId:  string | null
+  rootPatternInstanceId:    string   // the breakout's patternInstanceId
+  relationship:             'root' | 'retest_of' | 'false_break_of'
+}
+```
+
+- Breakout: `root`, parent `null`, root = itself.
+- Retest: `retest_of`, parent = the breakout, root = the breakout.
+- False break: `false_break_of`, parent = the breakout, root = the breakout.
+- Breakdown and its retest and false break mirror these, with the breakdown's direction in the family id.
+
+`eventFamilyId` does not depend on `asOf`, the retest bar, the failure bar or the current status. The three members of one family share it.
+
+### 25.7 Confluence safety
+
+Breakout, retest and false-break observations of one event are **related observations, not independent evidence**. A future Confluence Engine must
+group them by `eventFamilyId` and count each family once, through its `rootPatternInstanceId`. This branch does not build Confluence.
+
+### 25.8 Mixed high and low touches
+
+`sr:swing-cluster:v1` is not rewritten. A level can carry a low touch (a former resistance that acted as support). The composition is exposed, not
+hidden: `highTouchCount` and `lowTouchCount` appear in `levelEvidence`, and in the rectangle metrics per side.
+
+### 25.9 Rectangles
+
+A rectangle's identity is its birth anchors, which are frozen at birth. Later touches on either side create no second rectangle, because the birth
+rule is unchanged: the pair is born only at the bar where the later of its two levels is confirmed. The lineage ids of both sides are recorded in the
+metrics (`upperLineageId`, `lowerLineageId`) so that a consumer can see the structure's levels.
+
+### 25.10 Fingerprint and versions
+
+`level-lineage:v1` is a constant, in the run fingerprint and in `PatternRun.levelLineageVersion`. Changing the lineage rule changes every
+`levelLineageId` (the policy string is hashed into it) and every run id.
+
+### 25.11 Identity migration
+
+- Changed: the breakout, retest and false-break `patternInstanceId` values from the V1B commit. They now derive from `levelLineageId`, so they differ
+  from the previous branch's ids. Their `patternObservationId` values change with the run fingerprint.
+- Unchanged: every V1 structure (its instance ids and geometry), and the rectangle, channel and wedge instance ids. The V1 golden test stays green.
+- Verified: the instance ids of the same fixtures (head and shoulders, rectangle, ascending channel, rising wedge, double top, symmetrical triangle, and
+  the resistance series) were captured on `10efa84` and on this branch. Only the breakout, retest and false-break ids differ.
+
+### 25.12 Known limitations
+
+- A lineage whose birth touches all leave the lookback is over. A level that returns after that is a new lineage, by design.
+- A cluster that merges two lineages' touches is claimed by the one with the larger overlap, so the other lineage is inactive until its touches separate.
+- The event is one breakout per lineage and direction. A re-armed level is not modelled.
 
 ## 23. Prefix regression (dedicated)
 

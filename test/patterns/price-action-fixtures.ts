@@ -89,6 +89,48 @@ export const WEDGE_RISING_DOWN_PIVOTS: ReadonlyArray<readonly [number, number]> 
 /** Breakout: the close at bar 48 (120) is above the upper line plus the buffer (about 116.5). */
 export const WEDGE_RISING_UP_PIVOTS: ReadonlyArray<readonly [number, number]> = [...WEDGE_BASE, [48, 120]];
 
+/**
+ * RES, then a fall to 100 at 76 (a close below the level by more than the buffer at bar 66: a support breakdown of the same lineage), a third touch at
+ * 110.5 (a swing high at 82, confirmed at 85), then a same-direction re-cross: the close is 104 at 88 and 116 at 90, and 110 at 89 is below the level.
+ * The first breakout is bar 41, as in RES; the re-cross is bar 90, under the enlarged evidence.
+ */
+export const RECROSS_PIVOTS: ReadonlyArray<readonly [number, number]> = [...RES_PIVOTS.slice(0, 11), [76, 100], [82, 110], [88, 104], [90, 116], [96, 112]];
+
+/**
+ * A resistance at 110.5 whose second touch is a LOW (role reversal): a high at 10 (110.5) and a low at 28 (110.5), which is a swing low because the
+ * path rises above 111 on both sides. Then a fall to 100 and a rally that breaks it at bar 45 (close 111.8, previous close 109.67). The breakout's
+ * evidence is high 1, low 1.
+ */
+export const MIXED_PIVOTS: ReadonlyArray<readonly [number, number]> = [
+  [0, 100],
+  [10, 110],
+  [16, 100],
+  [22, 116],
+  [28, 111],
+  [31, 113],
+  [40, 100],
+  [46, 113],
+  [50, 116],
+];
+
+/**
+ * A level at 110.5 that loses its first touch to a 30-bar lookback and is later rebuilt from two new touches (56 and 70). With levelLookbackBars 30
+ * the lineage of 110.5 formed from touches 10 and 26 has lapsed by bar 73, so the later 110.5 level is a new, unrelated lineage.
+ */
+export const UNRELATED_PIVOTS: ReadonlyArray<readonly [number, number]> = [
+  [0, 100],
+  [10, 110],
+  [18, 100],
+  [26, 110],
+  [34, 100],
+  [44, 104],
+  [50, 100],
+  [56, 110],
+  [64, 100],
+  [70, 110],
+  [78, 100],
+];
+
 /** Replaces one bar's fields. The caller keeps every OHLC invariant (low ≤ open, close; high ≥ open, close). */
 export function withBar(bars: readonly MarketBar[], i: number, patch: Partial<Record<'open' | 'high' | 'low' | 'close', string>>): MarketBar[] {
   return bars.map((b, k) => {

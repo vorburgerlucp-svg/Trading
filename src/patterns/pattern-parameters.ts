@@ -12,6 +12,8 @@ export const PATTERN_ENGINE_VERSION = 'pattern-engine:v1b';
 export const PATTERN_GEOMETRY_VERSION = 'pattern-geometry:v1b';
 export const PATTERN_LIFECYCLE_VERSION = 'pattern-lifecycle:v1';
 export const PRICE_ACTION_LIFECYCLE_VERSION = 'price-action-lifecycle:v1';
+/** The policy that defines a level's structural lineage (docs/PATTERN_ENGINE_V1B.md §25.3). Hashed into every lineage id and the run fingerprint. */
+export const LEVEL_LINEAGE_VERSION = 'level-lineage:v1';
 export { SWING_VERSION, ATR_VERSION, SUPPORT_RESISTANCE_VERSION };
 
 /**

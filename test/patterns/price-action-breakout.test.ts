@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Decimal } from '../../src/money/decimal.js';
-import { levelIdentityOf } from '../../src/patterns/levels.js';
+import { levelEvidenceIdOf } from '../../src/patterns/levels.js';
 import { runPatternEngine, type PatternRunInput } from '../../src/patterns/pattern-engine.js';
 import { buildPitView } from '../../src/patterns/pit-view.js';
 import { buildChartContext } from '../../src/timeframes/chart-context.js';
@@ -152,13 +152,13 @@ describe('breakout identity, deduplication and look-ahead (§4.1, §5, §6, §7,
     expect(ofType(run(RES, asOfAfter(RES, 60)), 'breakout_retest')[0]!.patternInstanceId).toBe(retest.patternInstanceId);
   });
 
-  it('the level identity is canonical and never a rounded price: touch order does not matter, and two levels at one price differ by history', () => {
+  it('the level evidence id is canonical and never a rounded price: touch order does not matter, and two levels at one price differ by history', () => {
     const touch = (time: string, price: string) => ({ kind: 'high' as const, price: Decimal.from(price), time });
     const level = { priceLevel: Decimal.from('110.5'), confirmedAt: '2026-02-03T21:01:00.000Z', touches: [touch('2026-01-20T00:00:00.000Z', '110.5'), touch('2026-02-02T00:00:00.000Z', '110.5')] };
     const reversed = { ...level, touches: [...level.touches].reverse() };
-    expect(levelIdentityOf(level, '1d')).toBe(levelIdentityOf(reversed, '1d'));
+    expect(levelEvidenceIdOf(level, '1d')).toBe(levelEvidenceIdOf(reversed, '1d'));
     const other = { ...level, confirmedAt: '2026-03-05T21:01:00.000Z' };
-    expect(levelIdentityOf(other, '1d')).not.toBe(levelIdentityOf(level, '1d'));
+    expect(levelEvidenceIdOf(other, '1d')).not.toBe(levelEvidenceIdOf(level, '1d'));
   });
 
   it('the run identity depends on the retest and failure parameters, and carries the support/resistance version', () => {

@@ -103,6 +103,25 @@ export interface PatternAnchor {
   confirmedAt: string;
 }
 
+/** How a price-action observation relates to its event family (docs/PATTERN_ENGINE_V1B.md §25.6). Related members are not independent evidence. */
+export interface PatternLineage {
+  eventFamilyId: string;
+  parentPatternInstanceId: string | null;
+  rootPatternInstanceId: string;
+  relationship: 'root' | 'retest_of' | 'false_break_of';
+}
+
+/** The level evidence a price-action observation was confirmed with, as of the bar before its breakout (docs/PATTERN_ENGINE_V1B.md §25.5, §25.8). */
+export interface PatternLevelEvidence {
+  levelLineageId: string;
+  levelEvidenceId: string;
+  priceLevel: string;
+  touchCount: number;
+  highTouchCount: number;
+  lowTouchCount: number;
+  evidenceConfirmedAt: string;
+}
+
 export interface PatternObservation {
   patternInstanceId: string;
   patternObservationId: string;
@@ -126,6 +145,10 @@ export interface PatternObservation {
   geometryMetrics: Record<string, string>;
   chartContext: null | { chartContextId: string; dominantTrend: unknown; currentPhase: string; timeframeAlignment: string };
   evidenceRefs: { patternRunId: string; chartContextId: string | null };
+  /** Present on price-action observations only. */
+  levelEvidence?: PatternLevelEvidence | null;
+  /** Present on price-action observations only. */
+  patternLineage?: PatternLineage | null;
 }
 
 export interface PatternRun {
@@ -135,6 +158,7 @@ export interface PatternRun {
   geometryVersion: string;
   lifecycleVersion: string;
   priceActionLifecycleVersion: string;
+  levelLineageVersion: string;
   supportResistanceVersion: string;
   swingVersion: string;
   atrVersion: string;

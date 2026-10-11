@@ -5,10 +5,9 @@
 import { Decimal } from '../money/decimal.js';
 import { leastSquares, maxResidual, apexOf, horizontal, valueAt, type Touch, type Line } from './line.js';
 import { scaleAt, type Anchor, type Candidate, type SpaceSwing } from './geometry.js';
-import { levelsAt, type PatternLevel } from './levels.js';
+import type { FrameLevel, PatternLevel } from './levels.js';
 import type { PitView } from './pit-view.js';
 import type { PatternParameters } from './pattern-parameters.js';
-import type { SwingLevelInput } from '../quant/structure/support-resistance.js';
 
 const RATIO_SCALE = 12;
 
@@ -19,7 +18,7 @@ export interface PriceActionShapes {
 }
 
 /** Rectangles: a support level below and a resistance level above the close at the birth bar, both with enough touches, flat, and wide enough. */
-export function rectanglesIn(view: PitView, params: PatternParameters, atrs: ReadonlyArray<number | null>, inputs: readonly SwingLevelInput[]): { candidates: Candidate[]; births: number } {
+export function rectanglesIn(view: PitView, params: PatternParameters, atrs: ReadonlyArray<number | null>, frames: readonly (readonly FrameLevel[])[]): { candidates: Candidate[]; births: number } {
   const r = params.rectangle;
   const out: Candidate[] = [];
   let births = 0;
@@ -27,7 +26,7 @@ export function rectanglesIn(view: PitView, params: PatternParameters, atrs: Rea
   for (let F = 1; F <= last; F++) {
     const A = scaleAt(view, atrs, params, F);
     if (A === null) continue;
-    const levels = levelsAt(view, inputs, F, params, atrs);
+    const levels = frames[F] ?? [];
     const close = view.bars[F]!.close;
     for (const S of levels) {
       for (const R of levels) {
@@ -63,7 +62,7 @@ function toTouches(level: PatternLevel): Touch[] {
   return level.touches.map((t) => ({ x: t.index, y: t.price }));
 }
 
-function rectangleCandidate(params: PatternParameters, F: number, A: Decimal, R: PatternLevel, S: PatternLevel, duration: number, height: Decimal, residual: Decimal, lineR: Line, lineS: Line): Candidate {
+function rectangleCandidate(params: PatternParameters, F: number, A: Decimal, R: FrameLevel, S: FrameLevel, duration: number, height: Decimal, residual: Decimal, lineR: Line, lineS: Line): Candidate {
   const pa = params.priceAction;
   const anchors = (level: PatternLevel, role: string): Anchor[] =>
     [...level.touches].sort((a, b) => a.index - b.index).map((t, k) => ({ role: role + '_touch_' + (k + 1), kind: t.kind, price: t.price, index: t.index, confirmedIndex: t.confirmedIndex }));
@@ -94,6 +93,13 @@ function rectangleCandidate(params: PatternParameters, F: number, A: Decimal, R:
       upperSlopeAtrPerBar: lineR.b.dividedBy(A, 6, 'half_even').toFixed(6),
       lowerSlopeAtrPerBar: lineS.b.dividedBy(A, 6, 'half_even').toFixed(6),
       maxResidualAtr: residual.dividedBy(A, 6, 'half_even').toFixed(6),
+      // The lineage of each side and its touch composition, as they stood at birth (docs/PATTERN_ENGINE_V1B.md §25.9).
+      upperLineageId: R.levelLineageId,
+      lowerLineageId: S.levelLineageId,
+      upperHighTouchCount: String(R.highTouchCount),
+      upperLowTouchCount: String(R.lowTouchCount),
+      lowerHighTouchCount: String(S.highTouchCount),
+      lowerLowTouchCount: String(S.lowTouchCount),
     },
     lines: { upper: horizontal(up), lower: horizontal(down) },
   };

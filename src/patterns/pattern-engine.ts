@@ -12,7 +12,7 @@ import { SUPPORT_RESISTANCE_VERSION } from '../quant/structure/support-resistanc
 import type { ChartContext } from '../timeframes/chart-context.js';
 import { detectCandidates, originalLine, spaceOf, swingsOf, atrSeriesOf, type Candidate } from './geometry.js';
 import { linesStructuresIn, rectanglesIn } from './geometry-price-action.js';
-import { swingInputsOf } from './levels.js';
+import { buildLevelFrames, swingInputsOf } from './levels.js';
 import { walkCandidate, type WalkResult } from './lifecycle.js';
 import { detectPriceAction, type PriceActionDraft } from './price-action.js';
 import {
@@ -20,6 +20,7 @@ import {
   PATTERN_ENGINE_VERSION,
   PATTERN_GEOMETRY_VERSION,
   PATTERN_LIFECYCLE_VERSION,
+  LEVEL_LINEAGE_VERSION,
   PRICE_ACTION_LIFECYCLE_VERSION,
   SWING_VERSION,
   V1B_IDENTITY,
@@ -204,6 +205,7 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
     geometry: PATTERN_GEOMETRY_VERSION,
     lifecycle: PATTERN_LIFECYCLE_VERSION,
     priceActionLifecycle: PRICE_ACTION_LIFECYCLE_VERSION,
+    levelLineage: LEVEL_LINEAGE_VERSION,
     supportResistance: SUPPORT_RESISTANCE_VERSION,
     swing: SWING_VERSION,
     atr: ATR_VERSION,
@@ -236,7 +238,9 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
     // V1B geometry: rectangles from support/resistance clusters, channels and wedges from fitted swing windows (real space only: their mirror
     // images are the other channel or wedge type, so the real space covers both).
     const levelInputs = swingInputsOf(view, realSwings);
-    const rect = rectanglesIn(view, params, atrs, levelInputs);
+    // One level frame per bar, shared by the rectangles and the breakout family, so both read the same lineage (docs/PATTERN_ENGINE_V1B.md §25.3).
+    const frames = buildLevelFrames(view, levelInputs, params, atrs, input.instrument.instrumentId, input.series.interval);
+    const rect = rectanglesIn(view, params, atrs, frames);
     const lines = linesStructuresIn(view, params, atrs, realSwings);
     diagnostics.rectangleBirthChecks = rect.births;
     diagnostics.channelWedgeWindows = lines.channelWedgeWindows;
@@ -251,7 +255,7 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
     diagnostics.candidates = candidates.length;
 
     // V1B price action: breakouts, retests and false breaks.
-    const pa = detectPriceAction(view, params, atrs, levelInputs, { instrumentId: input.instrument.instrumentId, interval: input.series.interval, series: { ...input.series } });
+    const pa = detectPriceAction(view, params, atrs, frames, { instrumentId: input.instrument.instrumentId, interval: input.series.interval, series: { ...input.series } });
     diagnostics.levelEvaluations = pa.levelEvaluations;
     diagnostics.breakoutCount = pa.breakoutCount;
     diagnostics.priceActionBarsWalked = pa.barsWalked;
@@ -268,6 +272,7 @@ export function runPatternEngine(input: PatternRunInput, options: PatternRunOpti
     geometryVersion: PATTERN_GEOMETRY_VERSION,
     lifecycleVersion: PATTERN_LIFECYCLE_VERSION,
     priceActionLifecycleVersion: PRICE_ACTION_LIFECYCLE_VERSION,
+    levelLineageVersion: LEVEL_LINEAGE_VERSION,
     supportResistanceVersion: SUPPORT_RESISTANCE_VERSION,
     swingVersion: SWING_VERSION,
     atrVersion: ATR_VERSION,

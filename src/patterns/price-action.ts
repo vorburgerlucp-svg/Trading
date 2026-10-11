@@ -1,14 +1,14 @@
-// Breakouts, retests and false breaks (price-action-lifecycle:v1; docs/PATTERN_ENGINE_V1B.md §5–§8). Every decision is a final-close comparison
+// Breakouts, retests and false breaks (price-action-lifecycle:v1; docs/PATTERN_ENGINE_V1B.md §5–§8, §25). Every decision is a final-close comparison
 // on exact decimals against a level that existed before the decision bar. The retest and the failure are walked from the bar after the breakout.
+// The breakout binds to the structural lineage of its level, not to the evidence revision; the evidence used is recorded.
 
 import { Decimal } from '../money/decimal.js';
 import { hashOf } from '../persistence/canonical-json.js';
-import type { SwingLevelInput } from '../quant/structure/support-resistance.js';
 import { scaleAt } from './geometry.js';
-import { levelIdentityOf, levelsAt, type LevelTouch, type PatternLevel } from './levels.js';
+import type { FrameLevel, LevelTouch } from './levels.js';
 import { V1B_IDENTITY, type PatternParameters } from './pattern-parameters.js';
 import type { PitView } from './pit-view.js';
-import type { PatternAnchor, PatternObservation, PatternSeries, PatternStatus, PatternType } from './pattern-types.js';
+import type { PatternAnchor, PatternLevelEvidence, PatternLineage, PatternObservation, PatternSeries, PatternStatus, PatternType } from './pattern-types.js';
 
 export interface PriceActionContext {
   instrumentId: string;
@@ -69,23 +69,37 @@ function touchAnchors(view: PitView, touches: readonly LevelTouch[], side: 'resi
 }
 
 /** The structures of one breakout: the breakout itself, its retest if one was touched, and its false break if it failed. */
-function structuresOf(view: PitView, pa: PatternParameters['priceAction'], ctx: PriceActionContext, level: PatternLevel, levelId: string, B: number, up: boolean, A: Decimal, last: number, walk: BreakoutWalk): PriceActionDraft[] {
+function structuresOf(view: PitView, pa: PatternParameters['priceAction'], ctx: PriceActionContext, level: FrameLevel, B: number, up: boolean, A: Decimal, last: number, walk: BreakoutWalk): PriceActionDraft[] {
   const L = level.priceLevel;
   const buf = Decimal.from(pa.breakoutBufferAtr).times(A);
   const failBuf = Decimal.from(pa.failureBufferAtr).times(A);
   const at = (t: number) => view.bars[t]!.instant;
-  const instanceId = 'pi_' + hashOf({ kind: 'price-action-instance', family: V1B_IDENTITY.engine, instrumentId: ctx.instrumentId, interval: ctx.interval, series: ctx.series, levelIdentity: levelId, direction: up ? 'up' : 'down' }).slice(0, 40);
+  const direction = up ? 'up' : 'down';
+  // The structural identity: lineage, not evidence (docs/PATTERN_ENGINE_V1B.md §25.5).
+  const instanceId = 'pi_' + hashOf({ kind: 'price-action-instance', family: V1B_IDENTITY.engine, instrumentId: ctx.instrumentId, interval: ctx.interval, series: ctx.series, levelLineageId: level.levelLineageId, direction }).slice(0, 40);
+  const eventFamilyId = 'ef_' + hashOf({ kind: 'price-action-event-family', instrumentId: ctx.instrumentId, interval: ctx.interval, series: ctx.series, levelLineageId: level.levelLineageId, direction }).slice(0, 40);
+  const levelEvidence: PatternLevelEvidence = {
+    levelLineageId: level.levelLineageId,
+    levelEvidenceId: level.levelEvidenceId,
+    priceLevel: L.toString(),
+    touchCount: level.touches.length,
+    highTouchCount: level.highTouchCount,
+    lowTouchCount: level.lowTouchCount,
+    evidenceConfirmedAt: level.confirmedAt,
+  };
   const side = up ? 'resistance' : 'support';
   const common = {
     anchors: touchAnchors(view, level.touches, side),
     invalidation: { rule: 'final_close_beyond_failure_boundary', level: (up ? L.minus(failBuf) : L.plus(failBuf)).toString() },
     target: { method: 'none', price: null },
     boundaries: { level: { intercept: L.toString(), slope: '0' } },
-    geometryMetrics: { touchCount: String(level.touches.length) },
+    geometryMetrics: { touchCount: String(level.touches.length), highTouchCount: String(level.highTouchCount), lowTouchCount: String(level.lowTouchCount) },
     invalidatedAt: null,
+    levelEvidence,
   };
   const breakoutConfirmation = { direction: up ? ('up' as const) : ('down' as const), level: L.toString(), buffer: buf.toString(), confirmedByBarTime: view.bars[B]!.startTime };
   const out: PriceActionDraft[] = [];
+  const root: PatternLineage = { eventFamilyId, parentPatternInstanceId: null, rootPatternInstanceId: instanceId, relationship: 'root' };
   out.push({
     ...common,
     patternInstanceId: instanceId,
@@ -96,6 +110,7 @@ function structuresOf(view: PitView, pa: PatternParameters['priceAction'], ctx: 
     confirmedAt: at(B),
     resolvedAt: null,
     confirmation: breakoutConfirmation,
+    patternLineage: root,
   });
 
   if (walk.touchedAt !== null) {
@@ -116,6 +131,7 @@ function structuresOf(view: PitView, pa: PatternParameters['priceAction'], ctx: 
       resolvedAt: status === 'failed_breakout' ? at(walk.failedAt!) : null,
       confirmation: { ...breakoutConfirmation, confirmedByBarTime: walk.holdAt !== null ? view.bars[walk.holdAt]!.startTime : null },
       geometryMetrics: { ...common.geometryMetrics, retestBarsAfterBreakout: String(t - B) },
+      patternLineage: { eventFamilyId, parentPatternInstanceId: instanceId, rootPatternInstanceId: instanceId, relationship: 'retest_of' },
     });
   }
 
@@ -132,17 +148,18 @@ function structuresOf(view: PitView, pa: PatternParameters['priceAction'], ctx: 
       resolvedAt: at(f),
       confirmation: { direction: up ? ('down' as const) : ('up' as const), level: L.toString(), buffer: buf.toString(), confirmedByBarTime: view.bars[f]!.startTime },
       geometryMetrics: { ...common.geometryMetrics, barsAfterBreakout: String(f - B) },
+      patternLineage: { eventFamilyId, parentPatternInstanceId: instanceId, rootPatternInstanceId: instanceId, relationship: 'false_break_of' },
     });
   }
   return out;
 }
 
 /**
- * The breakouts of the view, in bar order. For every decision bar B, the levels are those that stood at B − 1 (levelsAt). A resistance breakout needs
- * the level above the previous close and a final close above level plus buffer; a support breakdown is the mirror. Only the first breakout of each
- * level and direction is kept.
+ * The breakouts of the view, in bar order. For every decision bar B, the levels are the frame of bar B − 1. A resistance breakout needs the level above
+ * the previous close and a final close above level plus buffer; a support breakdown is the mirror. One breakout event per structural lineage and
+ * direction: a later re-cross of the same lineage is not a second breakout (docs/PATTERN_ENGINE_V1B.md §25.5).
  */
-export function detectPriceAction(view: PitView, params: PatternParameters, atrs: ReadonlyArray<number | null>, inputs: readonly SwingLevelInput[], ctx: PriceActionContext): PriceActionResult {
+export function detectPriceAction(view: PitView, params: PatternParameters, atrs: ReadonlyArray<number | null>, frames: readonly (readonly FrameLevel[])[], ctx: PriceActionContext): PriceActionResult {
   const pa = params.priceAction;
   const last = view.bars.length - 1;
   const drafts: PriceActionDraft[] = [];
@@ -156,7 +173,7 @@ export function detectPriceAction(view: PitView, params: PatternParameters, atrs
     const prev = view.bars[B - 1]!.close;
     const close = view.bars[B]!.close;
     const buf = Decimal.from(pa.breakoutBufferAtr).times(A);
-    const levels = levelsAt(view, inputs, B - 1, params, atrs);
+    const levels = frames[B - 1] ?? [];
     levelEvaluations++;
     for (const level of levels) {
       const L = level.priceLevel;
@@ -164,15 +181,13 @@ export function detectPriceAction(view: PitView, params: PatternParameters, atrs
       if (L.gt(prev) && close.gt(L.plus(buf))) up = true;
       else if (L.lt(prev) && close.lt(L.minus(buf))) up = false;
       else continue;
-      const levelId = levelIdentityOf(level, ctx.interval);
-      const key = levelId + (up ? ':up' : ':down');
+      const key = level.levelLineageId + (up ? ':up' : ':down');
       if (seen.has(key)) continue;
       seen.add(key);
       const walk = walkBreakout(view, pa, B, L, up, A, last);
       barsWalked += walk.barsWalked;
-      const built = structuresOf(view, pa, ctx, level, levelId, B, up, A, last, walk);
+      drafts.push(...structuresOf(view, pa, ctx, level, B, up, A, last, walk));
       breakoutCount++;
-      drafts.push(...built);
     }
   }
   return { drafts, levelEvaluations, breakoutCount, barsWalked };

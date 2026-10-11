@@ -194,7 +194,9 @@ describe('scale invariance for the new structures (§40)', () => {
     const a = pick(base);
     const b = pick(big);
     expect(b).toMatchObject({ patternType: a.patternType, status: a.status, direction: a.direction });
-    expect(b.geometryMetrics).toEqual(a.geometryMetrics);
+    // The lineage ids hash the prices, so they change with the scale, as the instance ids do. Every other metric is scale-free.
+    const withoutLineage = (m: Record<string, string>) => Object.fromEntries(Object.entries(m).filter(([k]) => !k.endsWith('LineageId')));
+    expect(withoutLineage(b.geometryMetrics)).toEqual(withoutLineage(a.geometryMetrics));
     expect(Number(b.target.price)).toBe(Number(a.target.price) * 10);
     expect(Number(b.boundaries.upper!.intercept)).toBe(Number(a.boundaries.upper!.intercept) * 10);
   });
