@@ -35,7 +35,7 @@ trading code is added.
 
 ## 5. Response schema (strict)
 
-Root: an object whose keys are only `status`, `request_id`, `count`, `results`, `next_url`. `status` must be `OK`. `results` must be an array of at
+Root: an object whose keys are only `status`, `request_id`, `count`, `results`, `next_url`. `status` is optional. When present it must be `OK`, so an error status inside an HTTP 200 is refused. `results` is optional. When absent the page is an empty batch. When present it must be an array of at
 most `limit` items. Anything else is `SCHEMA_INVALID`.
 
 Article: an object whose keys are only the following. Any other key is `SCHEMA_INVALID`.
@@ -45,7 +45,7 @@ Article: an object whose keys are only the following. Any other key is `SCHEMA_I
 | `id` | required, printable string, 1–200 characters; unique within the page |
 | `publisher` | required object; `name` required, 1–200 characters; `homepage_url`, `logo_url`, `favicon_url` optional strings, not used |
 | `title` | required, string, 1–2000 characters |
-| `published_utc` | required, `YYYY-MM-DDTHH:mm:ss[.fraction]Z` (UTC only); normalised to canonical milliseconds |
+| `published_utc` | required, RFC 3339 UTC with `Z` and 0 to 9 fractional digits; normalised to canonical milliseconds (see the precision policy below) |
 | `article_url` | required, `https://` URL, at most 2048 characters |
 | `author`, `image_url`, `amp_url` | optional strings |
 | `description` | optional string, at most 5000 characters |
@@ -53,6 +53,22 @@ Article: an object whose keys are only the following. Any other key is `SCHEMA_I
 | `insights` | optional array; validated as an array, not used |
 
 Malformed `published_utc`, a missing `publisher.name`, a missing id, a non-HTTPS article URL, or a duplicate id each fail the whole page.
+
+### Timestamp precision (V1)
+
+- Accepted: an RFC 3339 date-time in UTC with a `Z` suffix. Seconds are required. The fraction is optional, with 1 to 9 digits (the nanosecond bound).
+- Refused: a local time without `Z`; an offset such as `+02:00`; impossible dates or times (`2026-02-30`, hour 25, minute 60, second 60); a year before 0100;
+  an empty fraction (`.Z`); a fraction longer than 9 digits; an empty string; any other format, such as RFC 822 or a date without a time.
+- Normalisation: the fraction is truncated to milliseconds, never rounded. The NEXUS instant is the canonical `YYYY-MM-DDTHH:mm:ss.sssZ`.
+- Sub-millisecond provider precision is **not retained** in V1. Two timestamps that differ only below one millisecond are the same NEXUS instant.
+  Canonical FinancialEvidence time stays millisecond UTC. No claim of exact sub-millisecond preservation is made.
+
+### Empty pages (V1)
+
+- `status` and `results` are both optional, so a page with no `results` is an empty batch: `evidence: []`.
+- `complete` depends only on `next_url`. An empty page with a valid Massive `next_url` is `complete: false`, and `next_url` is still never followed.
+- A malformed `results` (present but not a list, such as `null` or an object) is refused. It is never read as empty.
+- An empty object `{}` on HTTP 200 is accepted as an empty batch, because both `status` and `results` are optional. Any unexpected field is still refused.
 
 ## 6. Pagination: one bounded page
 
@@ -108,13 +124,13 @@ from the database clock. A historic read at an earlier `asOf` does not show an a
 | Condition | Result | Retried |
 |---|---|---|
 | 401 | `auth_failed` | no |
-| 403 | `not_entitled`: a valid key without permission for this dataset. Massive returns 403 for plan-restricted datasets; this mapping is an assumption until the live smoke test runs. | no |
+| 403 | `not_entitled`. Massive's documentation supports HTTP 403 with `NOT_AUTHORIZED` for entitlement or plan restrictions. This mapping follows that documentation as recorded for this branch. The ordinary live smoke test does not trigger a 403, so it does not verify this path. | no |
 | 404 | `not_found` | no |
 | 400 | `bad_request` | no |
 | 429 | `rate_limited`, with `Retry-After` honoured | yes, bounded |
 | 5xx | `provider_unavailable` | yes, bounded |
 | timeout, network | `timeout` / `provider_unavailable` | yes, bounded |
-| malformed JSON, unexpected schema, status not `OK` | `SCHEMA_INVALID` | no |
+| malformed JSON, unexpected schema, status present and not `OK` | `SCHEMA_INVALID` | no |
 
 Retries go through the shared `ResilientCaller`, with its bounded policy. No provider body is logged or embedded in an error.
 
@@ -138,6 +154,6 @@ content. A missing key means the test is skipped with a stated reason.
 
 - Only the first page is fetched. A complete history needs a later, separately reviewed pagination design.
 - Article tickers are not stored. Provider-derived sentiment and insights are not used anywhere.
-- The 403-to-`not_entitled` mapping is an assumption until a live key verifies it.
+- The 403-to-`not_entitled` mapping follows Massive's documentation as recorded here. No live call has verified it, and the ordinary smoke test does not trigger a 403.
 - No live call was made in this branch. The smoke test has not run.
 - The page is not stored, so the page-level payload cannot be re-verified from NEXUS storage.

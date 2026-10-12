@@ -4,7 +4,6 @@
 
 import type { ProviderInstrumentMapping } from '../market-data/market-data-types.js';
 import { MarketDataError } from '../market-data/market-data-provider.js';
-import { parseUtc, toUtcIso } from '../market-data/time.js';
 import type { ResilientCaller, FetchLike } from '../market-data/providers/resilience.js';
 import { hashOf } from '../persistence/canonical-json.js';
 import type { ConnectionState, ConnectorBatch, ConnectorPayload, FinancialConnector, FinancialConnectorHealth } from './connector.js';
@@ -25,7 +24,8 @@ const ROOT_KEYS = ['status', 'request_id', 'count', 'results', 'next_url'];
 const ARTICLE_KEYS = ['id', 'publisher', 'title', 'published_utc', 'article_url', 'author', 'image_url', 'amp_url', 'description', 'tickers', 'keywords', 'insights'];
 const PUBLISHER_KEYS = ['name', 'homepage_url', 'logo_url', 'favicon_url'];
 const CREDENTIAL_PARAMS = /^(apikey|api_key|token|key|credential|password|secret)$/i;
-const UTC_TEXT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+// RFC 3339 date-time in UTC: seconds required, and an optional fraction of 1 to 9 digits (the nanosecond bound). Offsets and local times do not match.
+const RFC3339_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
 export interface MassiveNewsOptions {
@@ -65,13 +65,26 @@ function textOf(value: unknown, what: string, max: number): string {
   return value;
 }
 
+/**
+ * RFC 3339 UTC with 0 to 9 fractional digits. The fraction is truncated to NEXUS milliseconds, never rounded, so sub-millisecond provider precision is
+ * not retained (docs/MASSIVE_NEWS_CONNECTOR_V1.md, timestamp precision). Impossible dates and times are refused, and so are years before 0100.
+ */
 function utcOf(value: unknown): string {
-  if (typeof value !== 'string' || !UTC_TEXT.test(value)) invalid('published_utc must be UTC (...Z)');
-  try {
-    return toUtcIso(parseUtc(value));
-  } catch {
-    return invalid('published_utc is not a valid instant');
-  }
+  const match = typeof value === 'string' ? RFC3339_UTC.exec(value) : null;
+  if (!match) invalid('published_utc must be RFC 3339 UTC (...Z) with at most nine fractional digits');
+  const [, year, month, day, hour, minute, second, fraction = ''] = match;
+  const y = Number(year);
+  const mo = Number(month);
+  const d = Number(day);
+  const h = Number(hour);
+  const mi = Number(minute);
+  const s = Number(second);
+  if (y < 100 || mo < 1 || mo > 12 || d < 1 || h > 23 || mi > 59 || s > 59) invalid('published_utc has an impossible date or time');
+  const millis = Number((fraction + '000').slice(0, 3));
+  const instant = new Date(Date.UTC(y, mo - 1, d, h, mi, s, millis));
+  // Date.UTC rolls an impossible day into the next month, so the calendar fields must survive the round trip.
+  if (instant.getUTCFullYear() !== y || instant.getUTCMonth() !== mo - 1 || instant.getUTCDate() !== d) invalid('published_utc has an impossible date');
+  return instant.toISOString();
 }
 
 function httpsUrlOf(value: unknown, what: string): string {
@@ -136,13 +149,16 @@ interface Page {
 
 function pageOf(value: unknown, limit: number): Page {
   const root = objectOf(value, 'page', ROOT_KEYS);
-  if (root.status !== 'OK') invalid('status is not OK');
+  // status is optional. When present it must be OK, so an error status inside an HTTP 200 is refused.
+  if (root.status !== undefined && root.status !== 'OK') invalid('status must be OK when present');
   if (root.request_id !== undefined) textOf(root.request_id, 'request_id', 200);
   if (root.count !== undefined && (typeof root.count !== 'number' || !Number.isInteger(root.count) || root.count < 0)) invalid('count must be a non-negative integer');
-  if (!Array.isArray(root.results)) invalid('results must be a list');
-  if (root.results.length > limit) invalid('more results than the requested limit');
+  // results is optional: absent is an empty batch. Present must be a list, and a malformed value is never read as empty.
+  const results: unknown = root.results === undefined ? [] : root.results;
+  if (!Array.isArray(results)) invalid('results must be a list when present');
+  if (results.length > limit) invalid('more results than the requested limit');
   const seen = new Set<string>();
-  const articles = root.results.map((entry, index) => {
+  const articles = results.map((entry: unknown, index: number) => {
     const article = articleOf(entry, index);
     if (seen.has(article.id)) invalid('two articles share the id ' + article.id);
     seen.add(article.id);
