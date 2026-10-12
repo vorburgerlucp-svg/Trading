@@ -24,6 +24,8 @@ const PINNED: Readonly<Record<number, string>> = Object.freeze({
   11: '332736f2320208509804287abff83db043b3a8b66e0e7d42c7506957f32e4b49',
   /** 012 adds financial evidence persistence and its knowledge seal (additive). Pinned when committed; not yet released. */
   12: 'a7ee5b00efcb4d205a7d2df65f454076fac4154ed69324be5bc60854677cc294',
+  /** 013 adds official-source attestations of financial evidence as an immutable sidecar (additive). Pinned when committed; not yet released. */
+  13: '08441e34d4427fe3af9d5c0a629d2e18aaa582eed945ded11ca7c2e57da1226b',
 });
 
 const HERE = dirname(fileURLToPath(import.meta.url));

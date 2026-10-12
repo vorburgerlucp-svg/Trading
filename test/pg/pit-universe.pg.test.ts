@@ -114,9 +114,9 @@ describe.skipIf(!pgAvailable)('PIT Universe in PostgreSQL' + (pgAvailable ? '' :
     await db?.drop();
   });
 
-  it('a fresh database runs 001-011, and the migrations 001-010 keep the checksums they were released with', async () => {
+  it('a fresh database runs 001-013, and the migrations 001-010 keep the checksums they were released with', async () => {
     const rows = (await db.pool.query<{ version: number; checksum: string }>('SELECT version, checksum FROM schema_migrations ORDER BY version')).rows;
-    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     for (const m of loadMigrations()) expect(rows.find((r) => r.version === m.version)?.checksum, m.version + '_' + m.name).toBe(m.checksum);
   });
 

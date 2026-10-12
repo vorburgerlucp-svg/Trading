@@ -114,7 +114,7 @@ async function bareDatabase(): Promise<{ pool: PgPool; drop: () => Promise<void>
 describe.skipIf(!pgAvailable)('schema history on PostgreSQL' + (pgAvailable ? '' : ' (NOT RUN: ' + pgSkipReason + ')'), () => {
   it('the committed 008 is the historical one, 009 the V2 bar model, 010 the persistent universe, and 011 its knowledge seals', () => {
     const migrations = loadMigrations();
-    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     expect(migrations.find((m) => m.version === 11)!.checksum).toBe(CHECKSUM_011);
     expect(migrations.find((m) => m.version === 10)!.checksum).toBe(CHECKSUM_010);
     expect(migrations.find((m) => m.version === 8)!.checksum).toBe(CHECKSUM_008);
@@ -148,10 +148,10 @@ describe.skipIf(!pgAvailable)('schema history on PostgreSQL' + (pgAvailable ? ''
       expect(before).toHaveLength(3);
 
       // The upgrade: the current migrator, on the same database (no recreation).
-      expect(await migrate(pool, loadMigrations())).toEqual({ applied: [9, 10, 11, 12], alreadyApplied: [1, 2, 3, 4, 5, 6, 7, 8] });
+      expect(await migrate(pool, loadMigrations())).toEqual({ applied: [9, 10, 11, 12, 13], alreadyApplied: [1, 2, 3, 4, 5, 6, 7, 8] });
       expect(await checksumOf(pool, 8)).toBe(CHECKSUM_008);
       expect(await checksumOf(pool, 9)).toBe(CHECKSUM_009);
-      expect(await migrate(pool, loadMigrations())).toEqual({ applied: [], alreadyApplied: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] });
+      expect(await migrate(pool, loadMigrations())).toEqual({ applied: [], alreadyApplied: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] });
       expect(await snapshot(pool)).toEqual(before);
       expect((await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM market_bars WHERE knowledge_source_v2 IS NOT NULL')).rows[0]!.n).toBe(0);
 
@@ -191,11 +191,11 @@ describe.skipIf(!pgAvailable)('schema history on PostgreSQL' + (pgAvailable ? ''
   });
 
   // ---- B) a fresh database: 001-009, and every path works ----------------------------------------------------------------
-  it('B) a fresh database runs 001-011, and the store writes and reads both models with the 008 mirror', async () => {
+  it('B) a fresh database runs 001-013, and the store writes and reads both models with the 008 mirror', async () => {
     const db: TestDatabase = await createTestDatabase();
     try {
       const versions = (await db.pool.query<{ version: number }>('SELECT version FROM schema_migrations ORDER BY version')).rows.map((r) => r.version);
-      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
       expect(await checksumOf(db.pool, 8)).toBe(CHECKSUM_008);
       expect(await checksumOf(db.pool, 9)).toBe(CHECKSUM_009);
       expect(await checksumOf(db.pool, 10)).toBe(CHECKSUM_010);

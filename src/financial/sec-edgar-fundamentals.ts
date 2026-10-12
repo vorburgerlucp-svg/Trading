@@ -3,16 +3,15 @@
 // SEC_USER_AGENT. It is sent to SEC and is never part of a hash or of any evidence. Without a valid contact the connector is not connected, and nothing is
 // fabricated.
 
-import { MarketDataError } from '../market-data/market-data-provider.js';
 import type { ProviderInstrumentMapping } from '../market-data/market-data-types.js';
-import type { FetchLike, HttpResponseLike, ResilientCaller } from '../market-data/providers/resilience.js';
+import type { FetchLike, ResilientCaller } from '../market-data/providers/resilience.js';
 import { hashOf, sha256Hex } from '../persistence/canonical-json.js';
 import type { ConnectionState, ConnectorPayload, FinancialConnector, FinancialConnectorHealth } from './connector.js';
 import type { FinancialRequest } from './financial-requests.js';
 import { FinancialGatewayError, type FinancialCapability, type FinancialTransport } from './financial-types.js';
-import { restFailureOf } from './rest-transport.js';
 import { companyFactsOf, periodOf, SEC_CONCEPT_MAP_VERSION, SEC_FACT_SELECTION_VERSION, selectFundamentals, submissionsOf } from './sec-fact-selection.js';
 import { parseSecJson, SEC_EXACT_NUMBER_VERSION } from './sec-edgar-json.js';
+import { secTextOf } from './sec-transport.js';
 
 export const SEC_CONNECTOR_ID = 'sec-edgar-fundamentals-rest';
 export const SEC_PROVIDER = 'sec-edgar';
@@ -21,7 +20,8 @@ export const SEC_USER_AGENT_ENV = 'SEC_USER_AGENT';
 export const SEC_MIN_INTERVAL_MS = 125;
 /** The documented bound for one response (§4). The body is still read whole before the post-read check. */
 export const SEC_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
-const SEC_HOST = 'data.sec.gov';
+/** The host of the JSON documents this connector and the attestor read. The archive host is separate (sec-archive-header.ts). */
+export const SEC_HOST = 'data.sec.gov';
 const TRANSPORT_VERSION = 'sec-edgar-rest:v1';
 const USER_AGENT_MAX = 200;
 const PRINTABLE_ASCII = /^[\x20-\x7e]+$/;
@@ -51,15 +51,6 @@ export function secUrlsOf(cik: string): { submissions: string; companyFacts: str
     submissions: 'https://' + SEC_HOST + '/submissions/CIK' + id + '.json',
     companyFacts: 'https://' + SEC_HOST + '/api/xbrl/companyfacts/CIK' + id + '.json',
   };
-}
-
-function fromSecHost(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === 'https:' && parsed.hostname === SEC_HOST;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -137,18 +128,19 @@ export class SecEdgarFundamentalsConnector implements FinancialConnector {
 
   /** One GET with the declared contact and no credential. Returns the exact response text, so its hash is the hash of what SEC sent. */
   private async send(url: string, signal: AbortSignal): Promise<string> {
-    const response: HttpResponseLike = await this.options.fetch(url, { method: 'GET', headers: { Accept: 'application/json', 'User-Agent': this.userAgent ?? '' }, signal });
-    if (response.url !== undefined && response.url !== '' && !fromSecHost(response.url)) {
-      throw new FinancialGatewayError('CONNECTOR_PAYLOAD_INVALID', 'the response came from a host other than ' + SEC_HOST + '; it is refused and nothing is followed');
-    }
-    const failure: MarketDataError | null = restFailureOf(response, SEC_PROVIDER, this.options.clock().getTime(), 'access_denied');
-    if (failure) throw failure;
-    const declared = response.headers.get('content-length');
-    if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > SEC_MAX_RESPONSE_BYTES)) {
-      throw new FinancialGatewayError('SCHEMA_INVALID', 'SEC response: the response is larger than the 32 MiB bound, or its Content-Length is malformed');
-    }
-    const text = await response.text();
-    if (Buffer.byteLength(text, 'utf8') > SEC_MAX_RESPONSE_BYTES) throw new FinancialGatewayError('SCHEMA_INVALID', 'SEC response: the body is larger than the 32 MiB bound');
-    return text;
+    return secTextOf({
+      fetch: this.options.fetch,
+      clock: this.options.clock,
+      provider: SEC_PROVIDER,
+      accept: 'application/json',
+      userAgent: this.userAgent ?? '',
+      url,
+      signal,
+      allowedHosts: [SEC_HOST],
+      maxBytes: SEC_MAX_RESPONSE_BYTES,
+      refuse: (kind, message) => {
+        throw kind === 'host' ? new FinancialGatewayError('CONNECTOR_PAYLOAD_INVALID', 'SEC response: ' + message) : new FinancialGatewayError('SCHEMA_INVALID', 'SEC response: ' + message);
+      },
+    });
   }
 }

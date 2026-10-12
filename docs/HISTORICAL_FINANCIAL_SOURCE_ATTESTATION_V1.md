@@ -297,3 +297,25 @@ version, DB mutation, and attestation hash verification.
 
 `test/live/sec-edgar-source-attestation.live.test.ts` runs only when `SEC_USER_AGENT` is valid. It makes no assertion about revenue or EPS. CI makes no SEC
 request.
+
+## 29. Implementation map
+
+- `src/financial/historical-policy.ts`: `newYorkDateOf`, `sourceEligibleOn`, `SOURCE_POLICY_VERSION`. The New York date uses the existing zone helper
+  `localDateOf`. Its 15-minute offset buckets fall on the US daylight-saving transitions, and the transition tests check this.
+- `src/financial/source-attestation-errors.ts`: `FinancialSourceAttestationError` and its five codes (§26).
+- `src/financial/financial-source-attestation.ts`: `buildFinancialSourceAttestation`, `verifyFinancialSourceAttestation`, `SourceBinding`,
+  `FinancialReplayUseCase`, `SOURCE_RESULTS`. Creation time is outside the record (§19).
+- `src/financial/sec-archive-header.ts`: `secArchiveHeaderUrl`, `parseSecArchiveHeader`, `checkArchiveHeader` (§12–§16).
+- `src/financial/sec-transport.ts`: `secTextOf`, the one SEC transport for the connector and the attestor. It applies the host, status, size and redirect
+  rules. The connector's behaviour is unchanged, and its existing tests cover it.
+- `src/financial/sec-source-attestation.ts`: `SecSourceAttestor.attest` and `connection` (§9–§17, §25). It takes no caller-supplied source claim.
+- `src/financial/financial-source-attestation-store.ts`: the provider-neutral store contract (§21).
+- `src/financial/financial-replay-reader.ts`: `FinancialReplayReader.readForReplay` and `sourceResultOf` (§5, §7–§9).
+- `src/persistence/postgres/postgres-financial-source-attestation-store.ts`: the PostgreSQL store, with one transaction per save (§21).
+- `db/migrations/013_financial_source_attestations.sql`: the sidecar table, its checks, the clock and binding triggers, and append-only protection (§20).
+
+Existing modules: `sec-edgar-fundamentals.ts` now sends through `secTextOf`, and exports `SEC_HOST`. Its behaviour is unchanged. Not changed:
+`FinancialEvidenceStore.readAvailable`, `financialKnowledgeAt`, `FinancialEvidence`, `strongO1Eligible`, the DB seal, the migrations 001–012.
+
+Not in V1: amendments (§38), Q4 (§39), decision-time use of a source attestation, any provider other than SEC, a streaming reader (§21, §13), and any claim about
+the exact second of first public availability (§23).
