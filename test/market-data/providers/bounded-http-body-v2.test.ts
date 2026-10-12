@@ -228,7 +228,8 @@ describe('an endless one-byte stream is refused, not read forever (brief section
 describe('the byte bound remains authoritative (brief sections 2, 8, 12)', () => {
   it('an oversize chunk is refused before it is decoded: malformed bytes in it still give BODY_TOO_LARGE', async () => {
     const probe = newProbe();
-    const parts = [Uint8Array.of(0x61, 0x61, 0x61), new Uint8Array(8).fill(0xff)];
+    // The overflow chunk fills a whole staging block, so a decode before the refusal would surface as BODY_INVALID_UTF8 instead of BODY_TOO_LARGE.
+    const parts = [Uint8Array.of(0x61, 0x61, 0x61), new Uint8Array(B + 8).fill(0xff)];
     expect(await codeOf(readBoundedUtf8(responseWith({ body: bodyOf(parts, probe) }), 10))).toBe('BODY_TOO_LARGE');
     expect(probe.reads).toBe(2);
     expect(probe.cancels).toBe(1);
