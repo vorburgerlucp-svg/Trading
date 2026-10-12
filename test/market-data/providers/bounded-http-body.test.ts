@@ -181,6 +181,16 @@ describe('overflow cancellation (§11, brief 21)', () => {
   });
 });
 
+describe('a stream read failure keeps its original error as cause (Twelve Data classifies it)', () => {
+  it('the BODY_STREAM_INVALID error carries the error the stream raised', async () => {
+    const original = new TypeError('fetch failed');
+    const error = await readBoundedUtf8(responseWith({ body: failingBody(original) }), 16).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(BodyTransportError);
+    expect(error).toMatchObject({ code: 'BODY_STREAM_INVALID' });
+    expect((error as Error).cause).toBe(original);
+  });
+});
+
 describe('a missing success body fails closed (§23, brief 22)', () => {
   it('an absent body is BODY_STREAM_UNAVAILABLE, never an empty text', async () => {
     expect(await codeOf(readBoundedUtf8(responseWith({ body: undefined }), 8))).toBe('BODY_STREAM_UNAVAILABLE');
