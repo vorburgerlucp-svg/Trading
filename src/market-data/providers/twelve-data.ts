@@ -30,11 +30,25 @@ import { MarketDataError, type HistoricalBarsRequest, type InstrumentCandidate, 
 import { calendarForInstrument, operatingMic, type TradingCalendar } from '../sessions.js';
 import { BAR_VINTAGE_POLICY_VERSION, DEFAULT_CAPTURE_WINDOW_MS, barVintageOf } from '../bar-vintage.js';
 import { addDays, localDateOf, parseUtc, toUtcIso, zonedToUtc } from '../time.js';
-import { REAL_DEPS, ResilientCaller, parseRetryAfter, type FetchLike, type ResilienceDeps, type ResiliencePolicy } from './resilience.js';
+import { REAL_DEPS, ResilientCaller, parseRetryAfter, type FetchLike, type HttpResponseLike, type ResilienceDeps, type ResiliencePolicy } from './resilience.js';
+import { assertBodyBound, BodyTransportError, readBoundedUtf8, type BodyErrorCode } from './bounded-http-body.js';
 import { errorBody, parseDividends, parseQuote, parseSplits, parseSymbolSearch, parseTimeSeries, sanitizeText, type TdTimeSeries } from './twelve-data-schema.js';
 
 const PROVIDER = 'twelvedata';
 const MAX_OUTPUT = 5000;
+/**
+ * The byte bound of one response body (docs/TWELVE_DATA_STREAMING_HARDENING_V1.md §2). It replaces the old character guard, text.length > 30,000,000:
+ * bytes are what memory holds, so this is the stronger rule. It is below the repository ceiling (BODY_BOUND_CEILING, 64 MiB) and is not increased silently.
+ */
+export const TWELVE_DATA_MAX_RESPONSE_BYTES = 30_000_000;
+/** Body-free messages for the transport failures a Twelve Data response can produce. None of them contains body or key content. */
+const BODY_FAILURE: Record<BodyErrorCode, string> = {
+  BODY_TOO_LARGE: 'response too large',
+  BODY_STREAM_UNAVAILABLE: 'response body unavailable',
+  BODY_INVALID_UTF8: 'response body is not valid UTF-8',
+  BODY_STREAM_INVALID: 'response body stream invalid',
+  BODY_BOUND_INVALID: 'response bound invalid',
+};
 const TD_INTERVAL: Readonly<Record<BarInterval, string>> = { '1m': '1min', '5m': '5min', '15m': '15min', '1h': '1h', '4h': '4h', '1d': '1day' };
 const TD_ADJUST: Readonly<Record<PriceAdjustment, string>> = { raw: 'none', split_adjusted: 'splits', total_return_adjusted: 'all' };
 const TYPE_MAP: Readonly<Record<string, AssetClass>> = {
@@ -77,13 +91,22 @@ export interface TwelveDataOptions {
    * come in exchange time and prices with the provider default adjustment (splits). Default: demo.
    */
   minimalRequests?: boolean;
+  /** Byte bound of one response body. Default TWELVE_DATA_MAX_RESPONSE_BYTES. Validated at construction; there is no unbounded setting. */
+  maxResponseBytes?: number;
 }
 
+/** The platform response is used as it is. Its body is a stream, which is read under the bound, never through text(). */
 function defaultFetch(): FetchLike {
-  return async (url, init) => {
-    const res = await fetch(url, init);
-    return { status: res.status, headers: { get: (n) => res.headers.get(n) }, text: () => res.text() };
-  };
+  return (url, init) => fetch(url, init);
+}
+
+/** A configured bound, checked before any request. An invalid bound is a configuration error, never a silent default. */
+function boundOf(value: number): number {
+  try {
+    return assertBodyBound(value, PROVIDER);
+  } catch (error) {
+    throw new MarketDataError('not_configured', PROVIDER, (error as Error).message);
+  }
 }
 
 function sessionFor(instrument: Instrument): BarSession {
@@ -99,6 +122,7 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
   readonly providerId = PROVIDER;
   readonly #apiKey: string;
   private readonly fetchFn: FetchLike;
+  private readonly maxResponseBytes: number;
   private readonly baseUrl: string;
   private readonly clock: () => Date;
   private readonly caller: ResilientCaller;
@@ -112,6 +136,7 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
     if (typeof options.apiKey !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(options.apiKey)) throw new MarketDataError('not_configured', PROVIDER, 'API key missing or malformed');
     this.#apiKey = options.apiKey;
     this.fetchFn = options.fetch ?? defaultFetch();
+    this.maxResponseBytes = boundOf(options.maxResponseBytes ?? TWELVE_DATA_MAX_RESPONSE_BYTES);
     this.baseUrl = (options.baseUrl ?? 'https://api.twelvedata.com').replace(/\/+$/, '');
     this.clock = options.clock ?? (() => new Date());
     this.caller = new ResilientCaller(PROVIDER, options.resilience, options.deps ?? REAL_DEPS);
@@ -175,17 +200,34 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
     return new MarketDataError('bad_request', PROVIDER, message, details);
   }
 
+  /**
+   * The body as bounded UTF-8 text (docs/TWELVE_DATA_STREAMING_HARDENING_V1.md §6). The mapping happens here, once. A read failure from the transport keeps
+   * its original classification. A success body that cannot be read is schema_invalid. An error response with no usable body returns null, and its status
+   * decides. An abort or timeout is rethrown for ResilientCaller to classify.
+   */
+  private async bodyOf(res: HttpResponseLike): Promise<string | null> {
+    try {
+      return await readBoundedUtf8(res, this.maxResponseBytes);
+    } catch (error) {
+      if (!(error instanceof BodyTransportError)) throw error;
+      if (error.code === 'BODY_STREAM_INVALID' && error.cause !== undefined) throw error.cause;
+      if (res.status !== 200 && error.code !== 'BODY_TOO_LARGE') return null;
+      throw new MarketDataError('schema_invalid', PROVIDER, BODY_FAILURE[error.code]);
+    }
+  }
+
   private request(path: string, params: Record<string, string>): Promise<unknown> {
     const url = this.baseUrl + path + '?' + new URLSearchParams(params).toString();
     return this.caller.call(async (signal) => {
       const res = await this.fetchFn(url, { method: 'GET', headers: { Authorization: 'apikey ' + this.#apiKey, Accept: 'application/json' }, signal });
-      const text = await res.text();
-      if (text.length > 30_000_000) throw new MarketDataError('schema_invalid', PROVIDER, 'response too large');
+      const text = await this.bodyOf(res);
       let body: unknown;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        body = undefined;
+      if (text !== null) {
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = undefined;
+        }
       }
       const err = errorBody(body);
       if (res.status !== 200 || err) throw this.mapError(res.status, err, res.headers.get('retry-after'));

@@ -206,7 +206,8 @@ describe('a missing success body fails closed (§23, brief 22)', () => {
 
   it('text() is never called to recover a missing body', async () => {
     let called = false;
-    const response: HttpResponseLike = { status: 200, headers: { get: () => null }, text: async () => ((called = true), 'fallback') };
+    // A legacy text() is present on the object but is not part of the shape. The reader must not call it.
+    const response = { status: 200, headers: { get: () => null }, text: async () => ((called = true), 'fallback') } as unknown as HttpResponseLike;
     expect(await codeOf(readBoundedUtf8(response, 8))).toBe('BODY_STREAM_UNAVAILABLE');
     expect(called).toBe(false);
   });

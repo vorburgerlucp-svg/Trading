@@ -21,7 +21,7 @@ const meta = { symbol: 'AAPL', interval: '5min', currency: 'USD', exchange_timez
 const bars = (count: number) => ({
   status: 'ok',
   meta,
-  values: Array.from({ length: count }, (_, i) => ({ datetime: '2026-10-07 13:' + String(30 + 5 * i).padStart(2, '0') + ':00', open: '250.00', high: '250.00', low: '250.00', close: '250.10', volume: '1200' })),
+  values: Array.from({ length: count }, (_, i) => ({ datetime: '2026-10-07 13:' + String(30 + 5 * i).padStart(2, '0') + ':00', open: '250.00', high: '250.20', low: '249.90', close: '250.10', volume: '1200' })),
 });
 const QUOTE = { symbol: 'AAPL', name: 'Apple Inc', mic_code: 'XNAS', currency: 'USD', timestamp: 1791358200, last_quote_at: 1791381420, open: '249.50', high: '251.00', low: '249.00', close: '250.40', volume: '1000000', previous_close: '249.80', is_market_open: true };
 const SEARCH = { status: 'ok', data: [{ symbol: 'AAPL', instrument_name: 'Zürich Apple Inc', exchange: 'NASDAQ', mic_code: 'XNAS', exchange_timezone: 'America/New_York', instrument_type: 'Common Stock', country: 'United States', currency: 'USD' }] };
@@ -57,8 +57,8 @@ function counted(response: () => HttpResponseLike): { fetch: FetchLike; calls: (
   };
 }
 
-function providerWith(fetch: FetchLike, options: { maxResponseBytes?: number; maxAttempts?: number } = {}) {
-  let now = parseUtc('2026-10-07T13:57:30Z');
+function providerWith(fetch: FetchLike, options: { maxResponseBytes?: number; maxAttempts?: number; now?: string } = {}) {
+  let now = parseUtc(options.now ?? '2026-10-07T13:57:30Z');
   const slept: number[] = [];
   const deps: ResilienceDeps = {
     now: () => now,
@@ -335,7 +335,7 @@ describe('one chunk and fragmented chunks give the same result', () => {
     const registry = await InstrumentRegistry.open();
     await registry.register(AAPL, { at: '2026-01-01T00:00:00Z', by: human, reason: 'setup' });
     await registry.addMapping(mapping, { at: '2026-01-01T00:00:00Z', by: human, reason: 'setup' });
-    const { provider } = providerWith(async () => json(bars(6), chunk === undefined ? {} : { chunk }));
+    const { provider } = providerWith(async () => json(bars(6), chunk === undefined ? {} : { chunk }), { now: '2026-10-08T00:00:00Z' });
     const service = new MarketDataService({ registry, store: new InMemoryMarketDataStore(), providers: [provider], clock: () => new Date('2026-10-08T00:00:00Z') });
     const backfill = await service.backfillBars({ instrumentId: AAPL.instrumentId, provider: 'twelvedata', interval: '5m', adjustment: 'raw', from: '2026-10-07T13:30:00Z', to: '2026-10-07T14:00:00Z' });
     const series = await service.readSeries({ instrumentId: AAPL.instrumentId, source: 'twelvedata:time_series:production', interval: '5m', session: 'regular', adjustment: 'raw', asOf: '2026-10-08T00:00:00Z', useCase: 'analysis' });
@@ -344,6 +344,8 @@ describe('one chunk and fragmented chunks give the same result', () => {
 
   it('the stored records, their content hashes and the read-back series are identical for one chunk and fragmented chunks', async () => {
     const whole = await storedRun();
+    expect(whole.summaries.reduce((total, s) => total + s.inserted, 0)).toBe(6);
+    expect(whole.summaries.flatMap((s) => s.quarantined)).toEqual([]);
     expect(await storedRun(3)).toEqual(whole);
     expect(whole.series.bars).toHaveLength(6);
     expect(whole.series.bars.every((bar) => bar.contentHash.length > 0)).toBe(true);

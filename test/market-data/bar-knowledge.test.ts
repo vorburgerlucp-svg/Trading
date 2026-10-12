@@ -15,6 +15,7 @@ import { computeQuant } from '../../src/quant/quant-engine.js';
 import { runMarketScanner } from '../../src/scanner/market-scanner.js';
 import type { ScannerDefinition, ScannerSnapshot } from '../../src/scanner/scanner-types.js';
 import { strictSelection } from '../universe/fixtures.js';
+import { bodyOf, responseWith } from '../financial/http-body-fixtures.js';
 import { AAPL, FIXTURE_SOURCE, PRODUCTION_LIKE_SOURCE, dailyBars, randomOhlcv } from './fixtures.js';
 
 // Bar knowledge and evidence (see docs/BAR_KNOWLEDGE_EVIDENCE.md). Two questions, never one flag:
@@ -307,7 +308,7 @@ describe('G — Twelve Data policy on the real adapter', () => {
     const provider = new TwelveDataMarketDataProvider({
       apiKey: 'test-key-123',
       environment: 'production',
-      fetch: async () => ({ status: 200, headers: { get: () => null }, text: async () => JSON.stringify(body) }),
+      fetch: async () => responseWith({ status: 200, body: bodyOf(JSON.stringify(body)) }),
       clock: () => new Date(ms),
       deps: { now: () => ms, sleep: async () => undefined, random: () => 0.5 },
       resilience: { timeoutMs: 50 },

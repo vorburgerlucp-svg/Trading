@@ -39,8 +39,8 @@ checks, and they are unchanged.
 
 The native `Response.body` satisfies it structurally, and a test proves this with a real `Response` built from local bytes.
 
-`text()` stays on `HttpResponseLike` only because `src/market-data/providers/twelve-data.ts` still uses it, and Twelve Data is out of scope for V1. Migrated financial
-success paths never call `text()`, `json()` or `arrayBuffer()`. Test fixtures make `text()` throw on the financial paths, so any fallback is detected.
+`text()` is no longer part of `HttpResponseLike`. Every external response body is read through the stream: the financial success paths since this V1, and Twelve Data
+since `docs/TWELVE_DATA_STREAMING_HARDENING_V1.md`. A compile-time test proves that the shape has no `text()` member, so a whole-body read cannot be written against it.
 
 ## 4. The reader
 
@@ -194,8 +194,8 @@ its secret handling are unchanged.
 ## 20. Test helper
 
 `test/financial/http-body-fixtures.ts` builds bounded streaming bodies from strings or byte arrays, with specified chunk boundaries. It can also produce a malformed
-byte sequence, a body that never completes, an oversized stream, and a body that counts its reads. Scripted fixtures give each response a body and a `text()` that
-throws, so any fallback to `text()` fails the test.
+byte sequence, a body that never completes, an oversized stream, and a body that counts its reads. Scripted fixtures give each response a streaming body and no
+`text()` member, so a fallback to `text()` cannot be written against them.
 
 ## 21. Native compatibility
 
@@ -211,7 +211,7 @@ A 2xx response whose body is absent or has no reader fails closed as `BODY_STREA
 
 ## 24. Exclusions
 
-- The Twelve Data migration is out of scope for V1.
+- The Twelve Data migration is complete (`docs/TWELVE_DATA_STREAMING_HARDENING_V1.md`). It is no longer an exclusion.
 - No market-data provider beyond the shared types is migrated.
 - No streaming JSON parser is introduced. The payload is still parsed whole after it is bounded, as before.
 - No custom gzip or other decompression.
@@ -223,3 +223,6 @@ A 2xx response whose body is absent or has no reader fails closed as `BODY_STREA
 
 The financial source tree was searched for external success-body uses of `response.text()`, `response.json()` and `response.arrayBuffer()`. The results are
 recorded in the final report. Any intentional path that remains unbounded would be reported as a blocker or a documented exclusion, not left silently.
+
+After the Twelve Data migration, production `src` has no `.text()`, `.json()`, `.arrayBuffer()`, `.blob()` or `.formData()` call on an HTTP response. The inventory
+is repeated in `docs/TWELVE_DATA_STREAMING_HARDENING_V1.md`.

@@ -12,6 +12,7 @@ import type { ProviderInstrumentMapping } from '../../src/market-data/market-dat
 import { parseRetryAfter, type FetchLike, type ResilienceDeps } from '../../src/market-data/providers/resilience.js';
 import { TwelveDataMarketDataProvider } from '../../src/market-data/providers/twelve-data.js';
 import { parseUtc, toUtcIso } from '../../src/market-data/time.js';
+import { bodyOf, responseWith } from '../financial/http-body-fixtures.js';
 import { AAPL, BTC, EURUSD } from './fixtures.js';
 
 const KEY = 'test-key-123';
@@ -29,7 +30,7 @@ function harness(replies: ((url: URL) => Reply) | Reply[], options: { now?: stri
     if (reply === 'hang') return new Promise(() => undefined);
     if (reply instanceof Error) throw reply;
     const body = typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body);
-    return { status: reply.status ?? 200, headers: { get: (n: string) => reply.headers?.[n.toLowerCase()] ?? null }, text: async () => body };
+    return responseWith({ status: reply.status ?? 200, headers: reply.headers, body: bodyOf(body) });
   };
   const deps: ResilienceDeps = {
     now: () => now,
@@ -103,7 +104,7 @@ describe('Befunde aus dem echten API-Kontakt (Regression)', () => {
       calls.push(url);
       // Shape as observed from the real API: exchange-local times, newest first, 5-decimal strings, segment MIC.
       const body = { meta: meta({ mic_code: 'XNGS' }), values: [v('2026-10-07 09:35:00', '336.69000'), v('2026-10-07 09:30:00', '336.95999')], status: 'ok' };
-      return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify(body) };
+      return responseWith({ status: 200, body: bodyOf(JSON.stringify(body)) });
     };
     const demo = TwelveDataMarketDataProvider.publicDemo({ fetch, clock: () => new Date('2026-10-07T14:00:00Z'), deps: { now: () => 0, sleep: async () => undefined, random: () => 0.5 } });
     await expect(demo.getHistoricalBars(req())).rejects.toMatchObject({ code: 'unsupported' }); // raw prices are not available this way

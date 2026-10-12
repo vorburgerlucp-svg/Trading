@@ -21,9 +21,10 @@ export interface HttpBodyLike {
 export interface HttpResponseLike {
   status: number;
   headers: { get(name: string): string | null };
-  /** Kept for the market-data providers that still read whole bodies. The financial success paths never call it. */
-  text(): Promise<string>;
-  /** The streaming body. A success path that needs a body reads it through readBoundedUtf8, and fails closed when it is absent. */
+  /**
+   * The streaming body. Every external response is read through readBoundedUtf8, which fails closed when the body is absent. The shape has no text()
+   * method, so a whole-body read cannot be written against it (docs/TWELVE_DATA_STREAMING_HARDENING_V1.md §10).
+   */
   body?: HttpBodyLike | null;
   /** The final URL, when the transport reports it. A connector that restricts its host checks this before it reads the body. */
   url?: string;

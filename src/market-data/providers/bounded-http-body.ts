@@ -2,8 +2,8 @@
 // consumes. It refuses as soon as the total exceeds the bound, and it cancels the stream when it does. It decodes incrementally with a fatal UTF-8 decoder,
 // so malformed bytes fail closed. It never returns partial text. Content-Length is only an early rejection hint. Errors carry no body text.
 //
-// The module lives beside the shared HTTP types, because the financial transports and the market-data providers use the same response shape. Only the
-// financial success paths use it in V1. The market-data providers keep their own text() path (Twelve Data is out of scope).
+// The module lives beside the shared HTTP types, because the financial transports and the market-data providers use the same response shape. Every external
+// body is read through it: the financial paths, and Twelve Data since docs/TWELVE_DATA_STREAMING_HARDENING_V1.md.
 
 import type { HttpBodyReaderLike, HttpResponseLike } from './resilience.js';
 
@@ -18,8 +18,10 @@ export class BodyTransportError extends Error {
   constructor(
     readonly code: BodyErrorCode,
     message: string,
+    /** The error the stream raised, for a read failure. A caller that classifies transport failures reads it (TWELVE_DATA_STREAMING_HARDENING_V1 §6). */
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, cause === undefined ? undefined : { cause });
   }
 }
 
@@ -92,7 +94,7 @@ export async function readBoundedUtf8(response: HttpResponseLike, maxBytes: numb
     // Overflow, malformed bytes and stream failures all cancel the stream, and none of them returns partial content.
     await cancelQuietly(reader);
     if (error instanceof BodyTransportError || isAbort(error)) throw error;
-    throw new BodyTransportError('BODY_STREAM_INVALID', 'the body stream failed before it completed');
+    throw new BodyTransportError('BODY_STREAM_INVALID', 'the body stream failed before it completed', error);
   } finally {
     if (!released) {
       released = true;

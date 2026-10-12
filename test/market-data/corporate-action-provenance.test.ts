@@ -5,6 +5,7 @@ import type { CorporateAction, CorporateActionKnowledge, ProviderInstrumentMappi
 import { TwelveDataMarketDataProvider } from '../../src/market-data/providers/twelve-data.js';
 import { getCalendar } from '../../src/market-data/sessions.js';
 import { Decimal } from '../../src/money/decimal.js';
+import { bodyOf, responseWith } from '../financial/http-body-fixtures.js';
 import { AAPL, FIXTURE_SOURCE, dailyBars } from './fixtures.js';
 
 // Review finding F1 (CRITICAL): the Twelve Data adapter used availableAt = min(retrievedAt, exDate 00:00), so a split that
@@ -75,7 +76,7 @@ function scriptedProvider(retrievedAt: string): TwelveDataMarketDataProvider {
       path === '/splits'
         ? { meta: { symbol: 'AAPL', currency: 'USD' }, splits: [{ date: EX_DATE_MONDAY, from_factor: 1, to_factor: 4 }] }
         : { meta: { symbol: 'AAPL', currency: 'USD' }, dividends: [] };
-    return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify(body) };
+    return responseWith({ status: 200, body: bodyOf(JSON.stringify(body)) });
   };
   return new TwelveDataMarketDataProvider({
     apiKey: 'test-key-123',

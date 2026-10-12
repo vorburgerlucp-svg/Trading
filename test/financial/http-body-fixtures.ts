@@ -1,6 +1,6 @@
 // Shared fixtures for streaming HTTP bodies (docs/BOUNDED_STREAMING_HTTP_TRANSPORT_V1.md §20). They emit real Uint8Array chunks through the same reader contract
-// the native Response uses. Each body counts its reads, cancels and lock releases, so tests can prove how much was consumed. A response built here has a
-// text() that throws, so any fallback to text() on a financial success path fails the test instead of passing silently.
+// the native Response uses. Each body counts its reads, cancels and lock releases, so tests can prove how much was consumed. A response built here has no
+// text() member (docs/TWELVE_DATA_STREAMING_HARDENING_V1.md §10): its body can only be read through the stream.
 
 import type { HttpBodyLike, HttpBodyReaderLike, HttpResponseLike } from '../../src/market-data/providers/resilience.js';
 
@@ -105,8 +105,6 @@ export function failingBody(error: unknown, before: readonly Uint8Array[] = [], 
   };
 }
 
-export const TEXT_CALLED = 'text() must not be called on a financial success body';
-
 export interface ResponseOptions {
   readonly status?: number;
   readonly headers?: Record<string, string>;
@@ -114,15 +112,12 @@ export interface ResponseOptions {
   readonly url?: string;
 }
 
-/** A response with a streaming body. text() throws, so a fallback to it is a test failure. */
+/** A response with a streaming body and no text() member: its body can only be read through the stream. */
 export function responseWith(options: ResponseOptions): HttpResponseLike {
   const headers = Object.fromEntries(Object.entries(options.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
   return {
     status: options.status ?? 200,
     headers: { get: (name: string) => headers[name.toLowerCase()] ?? null },
-    text: async () => {
-      throw new TypeError(TEXT_CALLED);
-    },
     body: options.body,
     url: options.url,
   };
