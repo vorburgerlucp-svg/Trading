@@ -94,8 +94,22 @@ The gate is solved by this parser. If it could not be solved safely, the branch 
 
 ## 8. Accession and filing selection
 
-Filings come from the submissions `filings.recent` columns. The columns must have equal length, and each row is validated: `accessionNumber`, `form`,
-`filingDate` (YYYY-MM-DD), `reportDate` (YYYY-MM-DD) and `acceptanceDateTime` where present.
+Filings come from the submissions `filings.recent` columns. The columns are validated structurally. Each column that is present must be a list of the
+same length, and every row must carry a string in each column, blank values included. Every row's `accessionNumber` must be a valid accession number,
+and no accession may appear twice. The `acceptanceDateTime` column is optional.
+
+Only exact `10-Q` and `10-K` rows are materialized as `SecFiling` rows, which are the fundamentals sources. Every other form is structurally present
+and ignored as a fundamentals source. That includes `10-Q/A`, `10-K/A`, `10-KT`, `10-K405`, `8-K`, prospectus forms, registration statements and proxy
+statements. Amendments are not supported in V1 (§11). An unrelated filing may lawfully have an empty `reportDate` or `acceptanceDateTime`, and its
+metadata is not validated beyond its structure, so it cannot invalidate the submissions document.
+
+For a materialized `10-Q` or `10-K` row:
+
+- `accessionNumber` must be a valid accession number.
+- `filingDate` must be a valid `YYYY-MM-DD` calendar date.
+- `reportDate` must be a valid, non-empty `YYYY-MM-DD` calendar date. An empty or malformed value fails closed. It is never inferred from `filingDate`.
+- A non-empty `acceptanceDateTime` must match the supported timestamp syntax: `YYYY-MM-DDTHH:MM:SS`, optional fractional seconds of one to nine digits,
+  and a `Z` suffix. A blank `acceptanceDateTime` is allowed, because V1 does not use it as `providerPublishedAt` (§13).
 
 Companyfacts facts are selected only when each selected fact has a coherent `accn`, `form`, `fy`, `fp`, `filed`, `end` and `unit`. Facts whose
 accession is not a filing of the mapped CIK, or whose form, fiscal year, fiscal period or report date is wrong, are not selected.
