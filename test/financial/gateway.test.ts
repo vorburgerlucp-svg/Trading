@@ -63,7 +63,7 @@ describe('evidence: typed, deterministic, frozen, and honest about knowledge (§
     const f = connector('fund-mcp', { fundamentals: 'get_company_fundamentals' }, { get_company_fundamentals: FUNDAMENTALS_RAW });
     const { gateway } = await setup([{ connectorId: 'fund-mcp', capabilities: ['fundamentals'] }], [f]);
     const e = await gateway.fetch(fundamentalsRequest());
-    expect(e).toMatchObject({ schemaVersion: 'financial-evidence:v1', connectorId: 'fund-mcp', provider: PROVIDER, transport: 'mcp', capability: 'fundamentals', instrumentId: AAPL_ID, knowledgeProof: 'PROCESS_RECEIPT_UNSEALED', o1Status: 'EXTERNAL_FINANCIAL_EVIDENCE_UNSEALED' });
+    expect(e).toMatchObject({ schemaVersion: 'financial-evidence:v2', connectorId: 'fund-mcp', provider: PROVIDER, transport: 'mcp', capability: 'fundamentals', instrumentId: AAPL_ID, knowledgeProof: 'PROCESS_RECEIPT_UNSEALED', o1Status: 'EXTERNAL_FINANCIAL_EVIDENCE_UNSEALED' });
     expect(e.license).toMatchObject({ status: 'research_only' });
     expect(e.evidenceId).toMatch(/^fe_/);
     expect(Object.isFrozen(e)).toBe(true);

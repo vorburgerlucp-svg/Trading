@@ -6,6 +6,7 @@ import type { ProviderInstrumentMapping } from '../market-data/market-data-types
 import { canonicalUtc, parseUtc, toUtcIso } from '../market-data/time.js';
 import type { ConnectorPayload, FinancialConnector } from './connector.js';
 import { buildEvidence, type FinancialEvidence } from './financial-evidence.js';
+import type { FinancialEvidenceSeal } from './financial-knowledge.js';
 import { licenseServes } from './financial-license.js';
 import type { ConnectorEntry, FinancialConnectorRegistry } from './financial-registry.js';
 import { parseFinancialRequest, type FinancialRequest } from './financial-requests.js';
@@ -21,12 +22,17 @@ export interface FinancialDataGatewayOptions {
 
 export interface StrongO1Result {
   readonly eligible: false;
-  readonly reason: 'UNSEALED_EXTERNAL_EVIDENCE';
+  readonly reason: 'UNSEALED_EXTERNAL_EVIDENCE' | 'FINANCIAL_SOURCE_NOT_PRODUCTION_VERIFIED';
 }
 
-/** Every V1 evidence is an unsealed process receipt (§17). Only a later database seal could qualify it, so V1 always answers false. */
-export function strongO1Eligible(_evidence: FinancialEvidence): StrongO1Result {
-  return { eligible: false, reason: 'UNSEALED_EXTERNAL_EVIDENCE' };
+/**
+ * Strong O1 is never eligible in V1: no real financial provider is connected, so source quality is unverified. A database seal upgrades knowledge
+ * timing only. With a seal for this evidence the reason says so, and eligibility stays false (docs/FINANCIAL_EVIDENCE_PERSISTENCE_V1.md §15). The
+ * seal must already be verified by the caller; the store returns only verified seals.
+ */
+export function strongO1Eligible(evidence: FinancialEvidence, seal?: FinancialEvidenceSeal | null): StrongO1Result {
+  const sealed = seal !== undefined && seal !== null && seal.evidenceId === evidence.evidenceId;
+  return { eligible: false, reason: sealed ? 'FINANCIAL_SOURCE_NOT_PRODUCTION_VERIFIED' : 'UNSEALED_EXTERNAL_EVIDENCE' };
 }
 
 function selectsConnector(raw: unknown): boolean {

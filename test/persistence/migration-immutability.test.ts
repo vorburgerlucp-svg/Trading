@@ -22,6 +22,8 @@ const PINNED: Readonly<Record<number, string>> = Object.freeze({
   10: '3791efaed495bc77516a04fd33f5c460f62b0a3a34a93e813190aa42d30fe18a',
   /** 011 adds NEXUS's own timing proof for universe revisions (additive). Pinned as released. */
   11: '332736f2320208509804287abff83db043b3a8b66e0e7d42c7506957f32e4b49',
+  /** 012 adds financial evidence persistence and its knowledge seal (additive). Pinned when committed; not yet released. */
+  12: 'a7ee5b00efcb4d205a7d2df65f454076fac4154ed69324be5bc60854677cc294',
 });
 
 const HERE = dirname(fileURLToPath(import.meta.url));

@@ -45,7 +45,11 @@ export type FinancialTransport = 'mcp' | 'rest' | 'internal';
 
 export const FINANCIAL_VERSIONS = {
   gateway: 'financial-gateway:v1',
-  evidence: 'financial-evidence:v1',
+  /** v2 carries the canonical request snapshot, so a stored record can recompute its own identity (docs/FINANCIAL_EVIDENCE_PERSISTENCE_V1.md §2). */
+  evidence: 'financial-evidence:v2',
+  evidenceStore: 'financial-evidence-store:v1',
+  knowledgeSeal: 'financial-knowledge-seal:v1',
+  pitRead: 'financial-pit-read:v1',
   registry: 'financial-connector-registry:v1',
   mcpTransport: 'mcp-financial-transport:v1',
   license: 'financial-license-policy:v1',

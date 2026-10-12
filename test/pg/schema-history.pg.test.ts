@@ -114,7 +114,7 @@ async function bareDatabase(): Promise<{ pool: PgPool; drop: () => Promise<void>
 describe.skipIf(!pgAvailable)('schema history on PostgreSQL' + (pgAvailable ? '' : ' (NOT RUN: ' + pgSkipReason + ')'), () => {
   it('the committed 008 is the historical one, 009 the V2 bar model, 010 the persistent universe, and 011 its knowledge seals', () => {
     const migrations = loadMigrations();
-    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(migrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     expect(migrations.find((m) => m.version === 11)!.checksum).toBe(CHECKSUM_011);
     expect(migrations.find((m) => m.version === 10)!.checksum).toBe(CHECKSUM_010);
     expect(migrations.find((m) => m.version === 8)!.checksum).toBe(CHECKSUM_008);
@@ -148,10 +148,10 @@ describe.skipIf(!pgAvailable)('schema history on PostgreSQL' + (pgAvailable ? ''
       expect(before).toHaveLength(3);
 
       // The upgrade: the current migrator, on the same database (no recreation).
-      expect(await migrate(pool, loadMigrations())).toEqual({ applied: [9, 10, 11], alreadyApplied: [1, 2, 3, 4, 5, 6, 7, 8] });
+      expect(await migrate(pool, loadMigrations())).toEqual({ applied: [9, 10, 11, 12], alreadyApplied: [1, 2, 3, 4, 5, 6, 7, 8] });
       expect(await checksumOf(pool, 8)).toBe(CHECKSUM_008);
       expect(await checksumOf(pool, 9)).toBe(CHECKSUM_009);
-      expect(await migrate(pool, loadMigrations())).toEqual({ applied: [], alreadyApplied: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] });
+      expect(await migrate(pool, loadMigrations())).toEqual({ applied: [], alreadyApplied: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] });
       expect(await snapshot(pool)).toEqual(before);
       expect((await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM market_bars WHERE knowledge_source_v2 IS NOT NULL')).rows[0]!.n).toBe(0);
 
@@ -195,7 +195,7 @@ describe.skipIf(!pgAvailable)('schema history on PostgreSQL' + (pgAvailable ? ''
     const db: TestDatabase = await createTestDatabase();
     try {
       const versions = (await db.pool.query<{ version: number }>('SELECT version FROM schema_migrations ORDER BY version')).rows.map((r) => r.version);
-      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
       expect(await checksumOf(db.pool, 8)).toBe(CHECKSUM_008);
       expect(await checksumOf(db.pool, 9)).toBe(CHECKSUM_009);
       expect(await checksumOf(db.pool, 10)).toBe(CHECKSUM_010);

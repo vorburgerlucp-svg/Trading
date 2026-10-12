@@ -76,8 +76,20 @@ describe('safety locks regression (§55)', () => {
     expect(physical.reasons).toContain('PHYSICAL_PURCHASE_LOCKED_IN_BUILD');
   });
 
-  it('the migration set is unchanged: 011 is still the last migration, so the gateway adds none', () => {
+  it('the migration set grows only by 012_financial_evidence.sql; 001-011 are still the earlier files', () => {
     const names = readdirSync(new URL('db/migrations/', ROOT)).filter((f) => /^\d{3}_/.test(f)).sort();
-    expect(names.at(-1)).toBe('011_universe_knowledge_seals.sql');
+    expect(names.at(-1)).toBe('012_financial_evidence.sql');
+    expect(names.slice(0, 11).at(-1)).toBe('011_universe_knowledge_seals.sql');
+  });
+
+  it('the financial persistence, seal and verification modules import no broker, capital, risk or safety module', () => {
+    const files = ['src/persistence/postgres/postgres-financial-evidence-store.ts', 'src/financial/financial-evidence.ts', 'src/financial/financial-evidence-store.ts', 'src/financial/financial-evidence-service.ts', 'src/financial/financial-knowledge.ts'];
+    for (const file of files) {
+      const text = readFileSync(new URL(file, ROOT), 'utf8');
+      for (const spec of importsOf(text)) {
+        const hit = FORBIDDEN_FROM_GATEWAY.find((rule) => rule.test(spec));
+        expect({ file, spec, hit: hit?.source ?? null }).toEqual({ file, spec, hit: null });
+      }
+    }
   });
 });
