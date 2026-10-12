@@ -30,6 +30,13 @@ export interface FinancialConnectorHealth {
   readonly lastErrorCode: string | null;
 }
 
+/** One provider call that answers several items, such as the articles of one news page. Each item is validated and becomes its own evidence record. */
+export interface ConnectorBatch {
+  readonly items: readonly ConnectorPayload[];
+  /** false when the provider reported more pages that this connector did not follow. */
+  readonly complete: boolean;
+}
+
 export interface FinancialConnector {
   readonly connectorId: string;
   readonly provider: string;
@@ -37,5 +44,7 @@ export interface FinancialConnector {
   connection(): ConnectionState;
   capabilities(): readonly FinancialCapability[];
   fetch(request: FinancialRequest, mapping: ProviderInstrumentMapping | null): Promise<ConnectorPayload>;
+  /** Optional. Present only on connectors whose provider answers several items per call. */
+  fetchBatch?(request: FinancialRequest, mapping: ProviderInstrumentMapping | null): Promise<ConnectorBatch>;
   health(): FinancialConnectorHealth;
 }

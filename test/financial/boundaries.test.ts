@@ -82,6 +82,15 @@ describe('safety locks regression (§55)', () => {
     expect(names.slice(0, 11).at(-1)).toBe('011_universe_knowledge_seals.sql');
   });
 
+  it('the Massive news connector imports no broker, capital, risk, execution or AI module, and exposes no order method', () => {
+    const text = readFileSync(new URL('src/financial/massive-news-connector.ts', ROOT), 'utf8');
+    for (const spec of importsOf(text)) {
+      const hit = FORBIDDEN_FROM_GATEWAY.find((rule) => rule.test(spec));
+      expect({ spec, hit: hit?.source ?? null }).toEqual({ spec, hit: null });
+    }
+    expect(text).not.toMatch(/placeOrder|cancelOrder|modifyOrder|submitOrder|transfer|withdraw/i);
+  });
+
   it('the financial persistence, seal and verification modules import no broker, capital, risk or safety module', () => {
     const files = ['src/persistence/postgres/postgres-financial-evidence-store.ts', 'src/financial/financial-evidence.ts', 'src/financial/financial-evidence-store.ts', 'src/financial/financial-evidence-service.ts', 'src/financial/financial-knowledge.ts'];
     for (const file of files) {

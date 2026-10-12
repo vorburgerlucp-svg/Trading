@@ -1,10 +1,13 @@
 // Financial data gateway (financial-gateway:v1, docs/FINANCIAL_CONNECTOR_GATEWAY_V1.md §4–§17). The only path from a request to evidence. Read-only: there is
 // no method for an order, a transfer, a withdrawal or a position change. Models never call it; the deterministic workflow does.
+//
+// Two paths share one set of governance checks. `fetch` returns the evidence for one provider payload. `fetchBatch` returns one evidence record per
+// article of one provider call (docs/MASSIVE_NEWS_CONNECTOR_V1.md §7). Articles are never merged, and they come back in a deterministic order.
 
 import type { InstrumentRegistry } from '../market-data/instrument-registry.js';
 import type { ProviderInstrumentMapping } from '../market-data/market-data-types.js';
 import { canonicalUtc, parseUtc, toUtcIso } from '../market-data/time.js';
-import type { ConnectorPayload, FinancialConnector } from './connector.js';
+import type { ConnectionState, ConnectorPayload, FinancialConnector } from './connector.js';
 import { buildEvidence, type FinancialEvidence } from './financial-evidence.js';
 import type { FinancialEvidenceSeal } from './financial-knowledge.js';
 import { licenseServes } from './financial-license.js';
@@ -18,6 +21,12 @@ export interface FinancialDataGatewayOptions {
   readonly instruments: InstrumentRegistry;
   readonly connectors: readonly FinancialConnector[];
   readonly clock: () => Date;
+}
+
+export interface FinancialBatch {
+  readonly evidence: readonly FinancialEvidence[];
+  /** false when the provider reported more pages, which V1 does not follow. */
+  readonly complete: boolean;
 }
 
 export interface StrongO1Result {
@@ -97,6 +106,23 @@ function envelopeOf(payload: ConnectorPayload): { retrievedAt: string; rawPayloa
   return { retrievedAt, rawPayloadHash };
 }
 
+/** Deterministic order for a batch: provider publication time, then evidence id. Provider order is never trusted. */
+function byPublicationThenId(a: FinancialEvidence, b: FinancialEvidence): number {
+  const pa = a.providerPublishedAt ?? '';
+  const pb = b.providerPublishedAt ?? '';
+  if (pa !== pb) return pa < pb ? -1 : 1;
+  return a.evidenceId < b.evidenceId ? -1 : a.evidenceId > b.evidenceId ? 1 : 0;
+}
+
+/** Everything that does not depend on the payload has been checked: the request, the registry, the license, the mode, the identity and the connection. */
+interface Prepared {
+  readonly request: FinancialRequest;
+  readonly entry: ConnectorEntry;
+  readonly connector: FinancialConnector;
+  readonly connection: ConnectionState;
+  readonly mapping: ProviderInstrumentMapping | null;
+}
+
 export class FinancialDataGateway {
   private readonly connectors: ReadonlyMap<string, FinancialConnector>;
 
@@ -111,7 +137,30 @@ export class FinancialDataGateway {
     this.connectors = connectors;
   }
 
+  /** The evidence for one provider payload. */
   async fetch(raw: unknown): Promise<FinancialEvidence> {
+    const prepared = this.prepare(raw);
+    const payload = await prepared.connector.fetch(prepared.request, prepared.mapping);
+    return this.evidenceFrom(prepared, payload, this.options.clock().toISOString());
+  }
+
+  /**
+   * One evidence record per article of one provider call. Each article goes through the same checks as a single payload, and no article is merged.
+   * A provider that offers only a single payload through this path is refused by the connector.
+   */
+  async fetchBatch(raw: unknown): Promise<FinancialBatch> {
+    const prepared = this.prepare(raw);
+    if (!prepared.connector.fetchBatch) {
+      throw new FinancialGatewayError('CAPABILITY_NOT_IMPLEMENTED', prepared.connector.connectorId + ' has no batch path');
+    }
+    const batch = await prepared.connector.fetchBatch(prepared.request, prepared.mapping);
+    const now = this.options.clock().toISOString();
+    const evidence = batch.items.map((payload) => this.evidenceFrom(prepared, payload, now)).sort(byPublicationThenId);
+    return { evidence: Object.freeze(evidence), complete: batch.complete };
+  }
+
+  /** The governance checks, in the documented order. Nothing here calls the provider. */
+  private prepare(raw: unknown): Prepared {
     if (!selectsConnector(raw)) throw new FinancialGatewayError('CONNECTOR_SELECTION_REQUIRED', 'a financial request must name its connectorId');
     const request = parseFinancialRequest(raw);
     const entry = this.options.registry.get(request.connectorId);
@@ -137,27 +186,31 @@ export class FinancialDataGateway {
     if (connection === 'not_connected') throw new FinancialGatewayError('DATA_NOT_CONNECTED', request.connectorId + ' is not connected; no empty evidence is returned');
     if (connection === 'degraded' && request.environment === 'production') throw new FinancialGatewayError('DATA_DEGRADED', request.connectorId + ' is degraded and cannot serve production');
     const mapping = this.mappingOf(request, entry.provider);
-    const payload = await connector.fetch(request, mapping);
+    return { request, entry, connector, connection, mapping };
+  }
+
+  /** Validates one payload and builds its evidence. Used by both paths, so the checks cannot differ between them. */
+  private evidenceFrom(p: Prepared, payload: ConnectorPayload, now: string): FinancialEvidence {
     const envelope = envelopeOf(payload);
-    const data = validatePayload(request.capability, payload.candidate);
-    checkRequestedFields(request, data);
-    if (mapping && payload.providerSymbol !== undefined && payload.providerSymbol !== mapping.providerSymbol) {
-      throw new FinancialGatewayError('INSTRUMENT_MAPPING_MISMATCH', 'the payload is for ' + payload.providerSymbol + ', but ' + mapping.instrumentId + ' maps to ' + mapping.providerSymbol + ' at ' + request.asOf);
+    const data = validatePayload(p.request.capability, payload.candidate);
+    checkRequestedFields(p.request, data);
+    if (p.mapping && payload.providerSymbol !== undefined && payload.providerSymbol !== p.mapping.providerSymbol) {
+      throw new FinancialGatewayError('INSTRUMENT_MAPPING_MISMATCH', 'the payload is for ' + payload.providerSymbol + ', but ' + p.mapping.instrumentId + ' maps to ' + p.mapping.providerSymbol + ' at ' + p.request.asOf);
     }
     return buildEvidence({
-      request,
-      connector: { connectorId: request.connectorId, provider: entry.provider, transport: entry.transport },
-      mode: entry.mode,
-      license: entry.license,
-      connectionState: connection,
-      mappingVerified: mapping !== null,
+      request: p.request,
+      connector: { connectorId: p.request.connectorId, provider: p.entry.provider, transport: p.entry.transport },
+      mode: p.entry.mode,
+      license: p.entry.license,
+      connectionState: p.connection,
+      mappingVerified: p.mapping !== null,
       data,
       providerPublishedAt: optionalInstant(payload.providerPublishedAt, 'providerPublishedAt'),
       effectiveAt: optionalInstant(payload.effectiveAt, 'effectiveAt'),
       retrievedAt: envelope.retrievedAt,
       rawPayloadHash: envelope.rawPayloadHash,
       textBlocks: textBlocksOf(payload),
-      now: this.options.clock().toISOString(),
+      now,
     });
   }
 
