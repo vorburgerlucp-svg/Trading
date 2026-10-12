@@ -27,7 +27,19 @@ export const BODY_CHUNK_COUNT_CEILING = 65_536;
 /** The most consecutive zero-length chunks before the body is refused as making no progress. A non-empty chunk resets the run (V2 §4). */
 export const BODY_EMPTY_CHUNK_STREAK_CEILING = 1_024;
 
-export type BodyErrorCode = 'BODY_TOO_LARGE' | 'BODY_STREAM_UNAVAILABLE' | 'BODY_INVALID_UTF8' | 'BODY_STREAM_INVALID' | 'BODY_BOUND_INVALID';
+/**
+ * The body failures. BODY_TOO_LARGE, BODY_TOO_FRAGMENTED and BODY_NO_PROGRESS are the resource-safety budgets: a body that exceeds one is refused whatever
+ * its status, and a repeat of the request would reproduce the cost, so no caller may retry it (docs/BOUNDED_STREAMING_TRANSPORT_V2.md §12). The others
+ * describe framing, content or an ordinary stream failure.
+ */
+export type BodyErrorCode =
+  | 'BODY_TOO_LARGE'
+  | 'BODY_TOO_FRAGMENTED'
+  | 'BODY_NO_PROGRESS'
+  | 'BODY_STREAM_UNAVAILABLE'
+  | 'BODY_INVALID_UTF8'
+  | 'BODY_STREAM_INVALID'
+  | 'BODY_BOUND_INVALID';
 
 /** A transport failure while reading a body. The message names the rule and never contains body content. */
 export class BodyTransportError extends Error {
@@ -67,8 +79,10 @@ async function cancelQuietly(reader: HttpBodyReaderLike): Promise<void> {
 
 /**
  * Decodes a body's bytes, in arrival order, into retained text parts. Bytes are staged in one fixed block. A full block is decoded with stream semantics. A
- * large remainder is decoded directly as a view, with no copy. The decoder carries at most three pending bytes between calls. Exported for the coalescing
- * tests. readBoundedUtf8 is the only body reader, and it uses this class.
+ * large remainder is decoded directly as a view, with no copy. The decoder carries at most three pending bytes between calls.
+ *
+ * @internal Exported only for the coalescing invariant tests. readBoundedUtf8 is the only body reader, and it is the only public entry point. This class is
+ * not re-exported by any barrel or provider API.
  */
 export class Utf8Coalescer {
   private readonly decoder = new TextDecoder('utf-8', { fatal: true });
@@ -76,7 +90,7 @@ export class Utf8Coalescer {
   private readonly parts: string[] = [];
   private staged = 0;
 
-  /** The number of text parts retained so far. Read-only, for the coalescing tests. */
+  /** The number of text parts retained so far. A read-only diagnostic: no decision in the reader or the coalescer reads it. */
   get partCount(): number {
     return this.parts.length;
   }
@@ -157,10 +171,10 @@ export async function readBoundedUtf8(response: HttpResponseLike, maxBytes: numb
       const chunk = result.value;
       if (!(chunk instanceof Uint8Array)) throw new BodyTransportError('BODY_STREAM_INVALID', 'the body stream produced a value that is not bytes');
       chunks++;
-      if (chunks > BODY_CHUNK_COUNT_CEILING) throw new BodyTransportError('BODY_STREAM_INVALID', 'the body has more chunks than the transport allows');
+      if (chunks > BODY_CHUNK_COUNT_CEILING) throw new BodyTransportError('BODY_TOO_FRAGMENTED', 'the body has more chunks than the transport allows');
       if (chunk.byteLength === 0) {
         emptyStreak++;
-        if (emptyStreak > BODY_EMPTY_CHUNK_STREAK_CEILING) throw new BodyTransportError('BODY_STREAM_INVALID', 'the body has too many consecutive empty chunks');
+        if (emptyStreak > BODY_EMPTY_CHUNK_STREAK_CEILING) throw new BodyTransportError('BODY_NO_PROGRESS', 'the body has too many consecutive empty chunks');
         continue;
       }
       emptyStreak = 0;

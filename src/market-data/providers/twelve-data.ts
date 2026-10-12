@@ -41,9 +41,13 @@ const MAX_OUTPUT = 5000;
  * bytes are what memory holds, so this is the stronger rule. It is below the repository ceiling (BODY_BOUND_CEILING, 64 MiB) and is not increased silently.
  */
 export const TWELVE_DATA_MAX_RESPONSE_BYTES = 30_000_000;
+/** The resource-safety budgets. They are refused whatever the status, and the refusal is never retried (docs/BOUNDED_STREAMING_TRANSPORT_V2.md §12). */
+const SAFETY_BUDGET: ReadonlySet<BodyErrorCode> = new Set<BodyErrorCode>(['BODY_TOO_LARGE', 'BODY_TOO_FRAGMENTED', 'BODY_NO_PROGRESS']);
 /** Body-free messages for the transport failures a Twelve Data response can produce. None of them contains body or key content. */
 const BODY_FAILURE: Record<BodyErrorCode, string> = {
   BODY_TOO_LARGE: 'response too large',
+  BODY_TOO_FRAGMENTED: 'response has too many chunks',
+  BODY_NO_PROGRESS: 'response made no progress',
   BODY_STREAM_UNAVAILABLE: 'response body unavailable',
   BODY_INVALID_UTF8: 'response body is not valid UTF-8',
   BODY_STREAM_INVALID: 'response body stream invalid',
@@ -201,9 +205,11 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
   }
 
   /**
-   * The body as bounded UTF-8 text (docs/TWELVE_DATA_STREAMING_HARDENING_V1.md §6). The mapping happens here, once. A read failure from the transport keeps
-   * its original classification. A success body that cannot be read is schema_invalid. An error response with no usable body returns null, and its status
-   * decides. An abort or timeout is rethrown for ResilientCaller to classify.
+   * The body as bounded UTF-8 text (docs/TWELVE_DATA_STREAMING_HARDENING_V1.md §6, docs/BOUNDED_STREAMING_TRANSPORT_V2.md §12). The mapping happens here, once.
+   * A safety budget (too large, too fragmented, no progress) is schema_invalid for every status: a repeat would reproduce the cost, so it is never deferred to
+   * the status and never retried. A read failure from the transport keeps its original classification. Any other success body that cannot be read is
+   * schema_invalid. An error response with an ordinary unusable body returns null, and its status decides. An abort or timeout is rethrown for
+   * ResilientCaller to classify.
    */
   private async bodyOf(res: HttpResponseLike): Promise<string | null> {
     try {
@@ -211,7 +217,8 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
     } catch (error) {
       if (!(error instanceof BodyTransportError)) throw error;
       if (error.code === 'BODY_STREAM_INVALID' && error.cause !== undefined) throw error.cause;
-      if (res.status !== 200 && error.code !== 'BODY_TOO_LARGE') return null;
+      if (SAFETY_BUDGET.has(error.code)) throw new MarketDataError('schema_invalid', PROVIDER, BODY_FAILURE[error.code]);
+      if (res.status !== 200) return null;
       throw new MarketDataError('schema_invalid', PROVIDER, BODY_FAILURE[error.code]);
     }
   }

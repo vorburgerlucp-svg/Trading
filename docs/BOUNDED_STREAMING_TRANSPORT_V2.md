@@ -28,7 +28,7 @@ the number of reads or the number of zero-length chunks. Three consequences foll
 - A "data chunk" is a read whose result has `done === false`. The final `{ done: true }` read is **not** counted (pinned by tests).
 - Every data chunk counts, including zero-length chunks. A zero-length chunk is a read event.
 - `BODY_CHUNK_COUNT_CEILING = 65_536`. The 65,536th data chunk is accepted; the 65,537th is refused.
-- A refusal is `BODY_STREAM_INVALID`, with no `cause`, so Twelve Data classifies it as a framing violation and the other connectors map it as they map every
+- A refusal is `BODY_TOO_FRAGMENTED`, a resource-safety budget (section 12). It carries no `cause`.
   body failure.
 
 The ceiling is a transport-safety policy, not a statement about any provider. Normal native fetch delivers a body in chunks of a few kilobytes to tens of
@@ -38,7 +38,7 @@ spending unbounded reads.
 ## 4. Zero-length chunks
 
 - A zero-length chunk counts as a chunk (section 3), increments the **empty streak** and never enters the decoder, the staging buffer or the output.
-- `BODY_EMPTY_CHUNK_STREAK_CEILING = 1024`. The 1024th consecutive zero-length chunk is accepted; the 1025th is refused as `BODY_STREAM_INVALID`.
+- `BODY_EMPTY_CHUNK_STREAK_CEILING = 1024`. The 1024th consecutive zero-length chunk is accepted; the 1025th is refused as `BODY_NO_PROGRESS`, a resource-safety budget (section 12).
 - Any non-empty chunk resets the streak to zero. So 1024 empty chunks followed by data succeed, and so do 1000 empty, data, 1000 empty, data.
 - An endless empty stream is therefore refused after 1025 reads, by the explicit guard, without a timer, an external timeout or any reliance on the event loop.
 
@@ -124,8 +124,15 @@ What is not bounded, stated exactly:
 | Massive News | `SCHEMA_INVALID` | Unchanged |
 | Generic REST | `SCHEMA_INVALID` | Unchanged |
 | Twelve Data, 200 | `schema_invalid`, non-retryable | Unchanged |
-| Twelve Data, other status | the status decides when the error body is unusable | The chunk-count and empty-streak refusals are unusable error bodies, the same as malformed UTF-8 (decision D2, Twelve Data V1) |
-| Twelve Data, any status, overflow | `schema_invalid`, non-retryable | Unchanged (`BODY_TOO_LARGE` only) |
+| Twelve Data, any status, safety budget (`BODY_TOO_LARGE`, `BODY_TOO_FRAGMENTED`, `BODY_NO_PROGRESS`) | `schema_invalid`, non-retryable, exactly one request | Never deferred to the status and never retried. A repeat of the request would reproduce the same cost. |
+| Twelve Data, other status, ordinary unusable body (missing body, malformed UTF-8, framing) | the status decides | Decision D2, Twelve Data V1, unchanged |
+| Twelve Data, 200, ordinary unusable body | `schema_invalid`, non-retryable | Unchanged |
+
+For the other connectors (SEC, SEC archive, Massive, generic REST), every `BodyTransportError` keeps its existing mapping, whatever its code. The new codes
+therefore reach the same caller mapping as before, and no connector branches on them.
+
+The safety-budget codes are distinct from `BODY_STREAM_INVALID` so that a caller can tell a resource refusal from a framing or content problem. Callers that
+classify failures must treat the three budget codes as non-retryable for every status.
 
 A missing body (`BODY_STREAM_UNAVAILABLE`) is still distinct from an empty body (`""`).
 
@@ -167,3 +174,12 @@ before the migration.
 - A body near the byte bound is still parsed as one string, so the parser's own working set is not bounded by this change.
 - A legitimate body delivered in very small chunks can exceed the chunk ceiling and be refused. That is intended: the ceiling is a policy, and no normal provider
   approaches it.
+
+## 18. Verification record
+
+- **Final corrections.** The three resource-safety budgets have distinct codes. Their status mapping is in section 12. The SEC source attestation is tested for
+  chunk identity (`test/financial/sec-attestation-chunk-identity.test.ts`). `Utf8Coalescer` is marked `@internal` and is not exported by any barrel. A grep
+  confirms that no barrel exists in `src` that re-exports the reader, and that `partCount` is read only by the tests.
+- **PostgreSQL flake, recorded and not changed.** The first full `npm run check` of this branch failed one test in `test/pg/adversarial.pg.test.ts` with a
+  60-second timeout. That run took 667 seconds, against about 420 seconds for earlier runs of the same code, so the machine was under load. The file passed
+  on its own (9 of 9, 44 seconds). A clean full rerun passed (1716 of 1716). The test's timeout is unchanged. No transport code depends on that test.

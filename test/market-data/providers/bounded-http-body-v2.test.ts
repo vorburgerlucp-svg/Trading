@@ -155,12 +155,12 @@ describe('the input chunk ceiling (brief sections 3, 6, 25)', () => {
     expect(await readBoundedUtf8(responseWith({ body: bodyOf(parts) }), CHUNK_CEILING)).toHaveLength(CHUNK_CEILING);
   });
 
-  it('65,537 data chunks are refused as BODY_STREAM_INVALID, with the reader cancelled and released', async () => {
+  it('65,537 data chunks are refused as BODY_TOO_FRAGMENTED, with the reader cancelled and released', async () => {
     const probe = newProbe();
     const parts = oneByteChunks(new Uint8Array(CHUNK_CEILING + 1).fill(0x78));
     const error = await readBoundedUtf8(responseWith({ body: bodyOf(parts, probe) }), CHUNK_CEILING + 1).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(BodyTransportError);
-    expect(error).toMatchObject({ code: 'BODY_STREAM_INVALID' });
+    expect(error).toMatchObject({ code: 'BODY_TOO_FRAGMENTED' });
     expect(probe.reads).toBe(CHUNK_CEILING + 1);
     expect(probe.cancels).toBe(1);
     expect(probe.releases).toBe(1);
@@ -168,12 +168,12 @@ describe('the input chunk ceiling (brief sections 3, 6, 25)', () => {
 
   it('100,000 one-byte chunks are refused by the production policy, not retained', async () => {
     const parts = oneByteChunks(new Uint8Array(100_000).fill(0x78));
-    expect(await codeOf(readBoundedUtf8(responseWith({ body: bodyOf(parts) }), 100_000))).toBe('BODY_STREAM_INVALID');
+    expect(await codeOf(readBoundedUtf8(responseWith({ body: bodyOf(parts) }), 100_000))).toBe('BODY_TOO_FRAGMENTED');
   });
 
   it('a cancel that throws does not replace the chunk-ceiling refusal', async () => {
     const body = endless(() => Uint8Array.of(0x78), CHUNK_CEILING + 5, newProbe(), true);
-    expect(await codeOf(readBoundedUtf8(body, CHUNK_CEILING + 5))).toBe('BODY_STREAM_INVALID');
+    expect(await codeOf(readBoundedUtf8(body, CHUNK_CEILING + 5))).toBe('BODY_TOO_FRAGMENTED');
   });
 });
 
@@ -185,10 +185,10 @@ describe('the zero-length chunk streak (brief sections 4, 7, 24)', () => {
     expect(await readBoundedUtf8(responseWith({ body: bodyOf(parts) }), 16)).toBe('ok');
   });
 
-  it('1,025 consecutive empty chunks are refused as BODY_STREAM_INVALID, after exactly 1,025 reads', async () => {
+  it('1,025 consecutive empty chunks are refused as BODY_NO_PROGRESS, after exactly 1,025 reads', async () => {
     const probe = newProbe();
     const parts = [...Array.from({ length: STREAK_CEILING + 1 }, () => new Uint8Array(0)), data('ok')];
-    expect(await codeOf(readBoundedUtf8(responseWith({ body: bodyOf(parts, probe) }), 16))).toBe('BODY_STREAM_INVALID');
+    expect(await codeOf(readBoundedUtf8(responseWith({ body: bodyOf(parts, probe) }), 16))).toBe('BODY_NO_PROGRESS');
     expect(probe.reads).toBe(STREAK_CEILING + 1);
   });
 
@@ -200,14 +200,14 @@ describe('the zero-length chunk streak (brief sections 4, 7, 24)', () => {
 
   it('an endless stream of empty chunks is refused at the 1,025th read by the guard, not by a timer', async () => {
     const probe = newProbe();
-    expect(await codeOf(readBoundedUtf8(endless(() => new Uint8Array(0), 100_000, probe), 16))).toBe('BODY_STREAM_INVALID');
+    expect(await codeOf(readBoundedUtf8(endless(() => new Uint8Array(0), 100_000, probe), 16))).toBe('BODY_NO_PROGRESS');
     expect(probe.reads).toBe(STREAK_CEILING + 1);
     expect(probe.cancels).toBe(1);
     expect(probe.releases).toBe(1);
   });
 
   it('a cancel that throws does not replace the empty-streak refusal', async () => {
-    expect(await codeOf(readBoundedUtf8(endless(() => new Uint8Array(0), 100_000, newProbe(), true), 16))).toBe('BODY_STREAM_INVALID');
+    expect(await codeOf(readBoundedUtf8(endless(() => new Uint8Array(0), 100_000, newProbe(), true), 16))).toBe('BODY_NO_PROGRESS');
   });
 
   it('a body of only empty chunks is the empty string, which is distinct from a missing body', async () => {
@@ -219,7 +219,7 @@ describe('the zero-length chunk streak (brief sections 4, 7, 24)', () => {
 describe('an endless one-byte stream is refused, not read forever (brief section 29)', () => {
   it('a stream of one-byte chunks with no end is refused at the 65,537th read', async () => {
     const probe = newProbe();
-    expect(await codeOf(readBoundedUtf8(endless(() => Uint8Array.of(0x78), 200_000, probe), 1 << 20))).toBe('BODY_STREAM_INVALID');
+    expect(await codeOf(readBoundedUtf8(endless(() => Uint8Array.of(0x78), 200_000, probe), 1 << 20))).toBe('BODY_TOO_FRAGMENTED');
     expect(probe.reads).toBe(CHUNK_CEILING + 1);
     expect(probe.cancels).toBe(1);
   });

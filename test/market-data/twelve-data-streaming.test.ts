@@ -379,13 +379,40 @@ describe('one chunk and fragmented chunks give the same result', () => {
     expect(reads).toBe(1025);
   });
 
-  it('an endless stream of empty chunks on a 503 leaves the status in charge: provider_unavailable, retried', async () => {
+  it('an endless stream of empty chunks on a 503 is a safety-budget refusal: schema_invalid, non-retryable, after 1,025 reads and one request', async () => {
     let reads = 0;
     const body = { getReader: () => ({ read: async () => (reads++ >= 100_000 ? { done: true } : { done: false, value: new Uint8Array(0) }), cancel: async () => undefined, releaseLock: () => undefined }) };
     const counter = counted(() => responseWith({ status: 503, body }));
-    const { provider } = providerWith(counter.fetch, { maxAttempts: 2 });
-    expect(await failureOf(provider.getHistoricalBars(barRequest()))).toMatchObject({ code: 'provider_unavailable', retryable: true });
-    expect(counter.calls()).toBe(2);
-    expect(reads).toBe(2 * 1025);
+    const { provider } = providerWith(counter.fetch, { maxAttempts: 4 });
+    expect(await failureOf(provider.getHistoricalBars(barRequest()))).toMatchObject({ code: 'schema_invalid', retryable: false });
+    expect(counter.calls()).toBe(1);
+    expect(reads).toBe(1025);
+  });
+});
+
+describe('the resource-safety budgets are non-retryable for every status (V2 final, section 2)', () => {
+  // A body that is over a budget is refused at the first read past it. Each case must send exactly one request, whatever the status, and must cancel and
+  // release the reader. maxAttempts is 4, so a retry would show as a second request.
+  const oneByteChunks = (count: number) => Array.from({ length: count }, () => Uint8Array.of(0x78));
+  const emptyChunks = (count: number) => Array.from({ length: count }, () => new Uint8Array(0));
+
+  it.each([200, 503])('a %i body with more chunks than the ceiling is schema_invalid, non-retryable, one request, and the reader is cancelled and released', async (status) => {
+    const probe = newProbe();
+    const counter = counted(() => responseWith({ status, body: bodyOf(oneByteChunks(65_537), probe) }));
+    const { provider } = providerWith(counter.fetch, { maxAttempts: 4 });
+    expect(await failureOf(provider.getHistoricalBars(barRequest()))).toMatchObject({ code: 'schema_invalid', retryable: false });
+    expect(counter.calls()).toBe(1);
+    expect(probe.cancels).toBe(1);
+    expect(probe.releases).toBe(1);
+  });
+
+  it.each([200, 503])('a %i body with an empty-chunk run past the ceiling is schema_invalid, non-retryable, one request, and the reader is cancelled and released', async (status) => {
+    const probe = newProbe();
+    const counter = counted(() => responseWith({ status, body: bodyOf([...emptyChunks(1025), new Uint8Array([0x6f, 0x6b])], probe) }));
+    const { provider } = providerWith(counter.fetch, { maxAttempts: 4 });
+    expect(await failureOf(provider.getHistoricalBars(barRequest()))).toMatchObject({ code: 'schema_invalid', retryable: false });
+    expect(counter.calls()).toBe(1);
+    expect(probe.cancels).toBe(1);
+    expect(probe.releases).toBe(1);
   });
 });
