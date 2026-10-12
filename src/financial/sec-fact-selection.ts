@@ -13,6 +13,8 @@ const CIK = /^\d{10}$/;
 const ACCESSION = /^\d{10}-\d{2}-\d{6}$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_ACCEPTANCE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
+/** The only forms that can source V1 fundamentals. An amendment, a registration statement or any other form is not in this set (§8, §11). */
+const SOURCE_FORMS: ReadonlySet<string> = new Set(['10-Q', '10-K']);
 const PERIOD = /^(\d{4})-(Q[1-4]|FY)$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const DAY_MS = 86_400_000;
@@ -62,6 +64,12 @@ function listOf(value: unknown, what: string): unknown[] {
   return value as unknown[];
 }
 
+/** A column value that must be a string. A blank string is lawful here: it is checked only where a row needs the value. */
+function stringOf(value: unknown, what: string): string {
+  if (typeof value !== 'string') invalid(what + ' must be a string');
+  return value;
+}
+
 function textOf(value: unknown, what: string, max: number): string {
   if (typeof value !== 'string' || value.trim() === '' || value.length > max || CONTROL.test(value)) invalid(what + ' must be printable text of at most ' + max + ' characters');
   return value;
@@ -96,8 +104,10 @@ export interface SecSubmissions {
 }
 
 /**
- * The submissions document, validated. `filings.recent` is a set of parallel columns: they must have equal length, and each row is validated. Unrelated
- * fields are ignored. A document for another company fails closed.
+ * The submissions document. `filings.recent` is a set of parallel columns: they must have equal length, every accession must be well formed and unique, and
+ * every column must have the right type on every row. Only the 10-Q and 10-K rows are materialized, and each of those is validated strictly. Unrelated
+ * forms are structurally checked and then intentionally ignored, so a blank reportDate on a form with no reporting period cannot invalidate the document.
+ * A document for another company fails closed.
  */
 export function submissionsOf(value: SecValue, cik: string): SecSubmissions {
   const root = recordOf(value, 'submissions');
@@ -114,14 +124,24 @@ export function submissionsOf(value: SecValue, cik: string): SecSubmissions {
     invalid('the filings columns have unequal lengths');
   }
   const seen = new Set<string>();
-  const filings = accessions.map((raw, i): SecFiling => {
-    const accession = accessionOf(raw, 'accessionNumber');
+  const filings: SecFiling[] = [];
+  for (let i = 0; i < n; i++) {
+    // Structure applies to every row: the accession identifies it, and each column must have the right type. A blank value is lawful in a column that a
+    // row does not need. A supported row is validated strictly below.
+    const accession = accessionOf(accessions[i], 'accessionNumber');
     if (seen.has(accession)) invalid('a filing accession appears twice');
     seen.add(accession);
-    const acceptance = accepted?.[i];
-    if (acceptance !== undefined && (typeof acceptance !== 'string' || !ISO_ACCEPTANCE.test(acceptance))) invalid('acceptanceDateTime is malformed');
-    return { accession, form: textOf(forms[i], 'form', 20), filingDate: dateOf(filed[i], 'filingDate'), reportDate: dateOf(reports[i], 'reportDate') };
-  });
+    const form = stringOf(forms[i], 'form');
+    const filingDate = stringOf(filed[i], 'filingDate');
+    const reportDate = stringOf(reports[i], 'reportDate');
+    const acceptance = accepted === undefined ? '' : stringOf(accepted[i], 'acceptanceDateTime');
+    // Only the two forms that can source V1 fundamentals are materialized (docs/SEC_EDGAR_FUNDAMENTALS_V1.md §8). Every other form is unrelated: its
+    // metadata is intentionally not used, so it is not validated beyond its structure, and it is never eligible.
+    if (!SOURCE_FORMS.has(form)) continue;
+    // The acceptance time is not used in V1, so it is checked for syntax only when present. A blank one does not block a supported filing.
+    if (acceptance.trim() !== '' && !ISO_ACCEPTANCE.test(acceptance)) invalid('acceptanceDateTime is malformed');
+    filings.push({ accession, form, filingDate: dateOf(filingDate, 'filingDate'), reportDate: dateOf(reportDate, 'reportDate') });
+  }
   return { cik, filings: Object.freeze(filings) };
 }
 

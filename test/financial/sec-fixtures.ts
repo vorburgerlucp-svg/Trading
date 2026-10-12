@@ -24,7 +24,10 @@ export interface FilingRow {
   readonly accession: string;
   readonly form: string;
   readonly filingDate: string;
+  /** Empty for a form that has no reporting period (for example an 8-K or a registration form). */
   readonly reportDate: string;
+  /** The real SEC column is present on every row, and it may be empty. Defaults to a full timestamp. */
+  readonly acceptanceDateTime?: string;
 }
 
 /** The submissions document: `filings.recent` as parallel columns. Rows may be permuted by the caller to test order independence. */
@@ -37,10 +40,25 @@ export function submissionsText(rows: readonly FilingRow[], cik = CIK): string {
     '"form":' + column((r) => r.form) + ',' +
     '"filingDate":' + column((r) => r.filingDate) + ',' +
     '"reportDate":' + column((r) => r.reportDate) + ',' +
-    '"acceptanceDateTime":' + '[' + rows.map(() => '"2024-11-01T06:01:30.000Z"').join(',') + ']' +
+    '"acceptanceDateTime":' + column((r) => r.acceptanceDateTime ?? '2024-11-01T06:01:30.000Z') +
     '}}}'
   );
 }
+
+/**
+ * A sanitised, live-shaped submissions page: supported 10-Q and 10-K rows mixed with many unrelated forms whose reportDate and acceptanceDateTime are
+ * empty. The shape is what the real SEC document showed (docs/SEC_EDGAR_FUNDAMENTALS_V1.md §8). It is not the live response, which is never committed.
+ */
+export const UNRELATED_BLANK: Omit<FilingRow, 'accession'>[] = [
+  { form: '8-K', filingDate: '2024-10-30', reportDate: '', acceptanceDateTime: '2024-10-30T17:05:12.000Z' },
+  { form: '4', filingDate: '2024-10-29', reportDate: '', acceptanceDateTime: '2024-10-29T16:01:44.000Z' },
+  { form: '424B5', filingDate: '2024-10-28', reportDate: '', acceptanceDateTime: '2024-10-28T12:30:00.000Z' },
+  { form: 'S-8', filingDate: '2024-10-25', reportDate: '', acceptanceDateTime: '2024-10-25T20:15:09.000Z' },
+  { form: 'DEF 14A', filingDate: '2024-10-20', reportDate: '', acceptanceDateTime: '' },
+  { form: '144', filingDate: '2024-10-18', reportDate: '', acceptanceDateTime: '' },
+  { form: 'SD', filingDate: '2024-10-15', reportDate: '', acceptanceDateTime: '' },
+];
+
 
 export interface FactEntry {
   readonly start?: string;
@@ -86,6 +104,17 @@ export const FILINGS = {
 } as const;
 
 export const ALL_FILINGS: readonly FilingRow[] = Object.values(FILINGS);
+
+/** Supported filings mixed with the unrelated blank rows, in an order that is not the filing order. */
+export const LIVE_SHAPED_ROWS: readonly FilingRow[] = [
+  FILINGS.future,
+  ...UNRELATED_BLANK.map((row, i) => ({ ...row, accession: '0000320193-24-000' + String(110 + i) })),
+  FILINGS.fy2024,
+  ...UNRELATED_BLANK.map((row, i) => ({ ...row, accession: '0000320193-24-000' + String(130 + i) })),
+  FILINGS.q3fy2024,
+  FILINGS.amendment,
+  FILINGS.q1fy2025,
+];
 
 // Fact builders. Each one is a fact as the companyfacts endpoint reports it for the named filing.
 const FY = FILINGS.fy2024;

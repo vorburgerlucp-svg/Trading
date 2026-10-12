@@ -5,7 +5,7 @@ import { verifyFinancialEvidence } from '../../src/financial/financial-evidence.
 import { SEC_CONNECTOR_ID, SEC_MIN_INTERVAL_MS, SEC_PROVIDER, SecEdgarFundamentalsConnector, secUrlsOf, secUserAgentOf } from '../../src/financial/sec-edgar-fundamentals.js';
 import { ResilientCaller, type FetchLike } from '../../src/market-data/providers/resilience.js';
 import { AAPL_ID } from './fixtures.js';
-import { ALL_FILINGS, baseConcepts, CIK, clock, CLOCK_ISO, COMPANYFACTS_URL, companyFactsText, FILINGS, FUNDAMENTALS_REQUEST, json200, reversedConcepts, SUBMISSIONS_URL, secCaller, secGateway, secHttp, secInstruments, standardAnswers, submissionsText, TEST_USER_AGENT } from './sec-fixtures.js';
+import { ALL_FILINGS, baseConcepts, CIK, clock, CLOCK_ISO, COMPANYFACTS_URL, companyFactsText, FILINGS, FUNDAMENTALS_REQUEST, json200, LIVE_SHAPED_ROWS, reversedConcepts, SUBMISSIONS_URL, secCaller, secGateway, secHttp, secInstruments, standardAnswers, submissionsText, TEST_USER_AGENT } from './sec-fixtures.js';
 
 // docs/SEC_EDGAR_FUNDAMENTALS_V1.md §1–§5, §9, §21–§25. The connector through the real gateway, with scripted HTTP answers. No network call is made.
 
@@ -235,6 +235,16 @@ describe('evidence through the gateway (§21–§25)', () => {
     expect(evidence.rawPayloadHash).toMatch(/^[0-9a-f]{64}$/);
     expect(() => verifyFinancialEvidence(evidence)).not.toThrow();
     expect(strongO1Eligible(evidence).eligible).toBe(false);
+  });
+
+  it('a live-shaped submissions page gives the same evidence identity and data as the clean page; only the raw bytes differ', async () => {
+    const clean = await (await secGateway(standardAnswers(ALL_FILINGS))).gateway.fetch(FUNDAMENTALS_REQUEST());
+    const live = await (await secGateway(standardAnswers(LIVE_SHAPED_ROWS))).gateway.fetch(FUNDAMENTALS_REQUEST());
+    expect(live.evidenceId).toBe(clean.evidenceId);
+    expect(live.data).toEqual(clean.data);
+    expect(live.request).toEqual(clean.request);
+    // The raw provenance hash covers the exact submissions text, which carries the unrelated rows, so it differs by design.
+    expect(live.rawPayloadHash).not.toBe(clean.rawPayloadHash);
   });
 
   it('the User-Agent never appears in the evidence', async () => {
