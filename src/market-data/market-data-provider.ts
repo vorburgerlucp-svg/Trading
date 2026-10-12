@@ -20,6 +20,7 @@ export type MarketDataErrorCode =
   | 'not_configured'
   | 'auth_failed'
   | 'not_entitled'
+  | 'access_denied'
   | 'invalid_symbol'
   | 'not_found'
   | 'bad_request'

@@ -28,12 +28,19 @@ export interface RestConnectorOptions {
   readonly clock: () => Date;
 }
 
+function forbiddenMessage(forbidden: 'auth_failed' | 'not_entitled' | 'access_denied'): string {
+  if (forbidden === 'not_entitled') return 'not entitled to this dataset (HTTP 403)';
+  if (forbidden === 'access_denied') return 'access refused by the provider (HTTP 403)';
+  return 'authentication refused (HTTP 403)';
+}
+
 /**
  * Maps one HTTP answer to a transport error, or null for a success. Shared by every REST connector, so the status meanings cannot drift. A 403 is
- * `auth_failed` for a generic API. A provider that answers 403 for a valid key without dataset permission passes `not_entitled`. Bodies are never
+ * `auth_failed` for a generic API. A provider that answers 403 for a valid key without dataset permission passes `not_entitled`. A provider whose 403 means a
+ * blocked or undeclared client, not a paid entitlement, passes `access_denied` (SEC EDGAR, docs/SEC_EDGAR_FUNDAMENTALS_V1.md §5). Bodies are never
  * included: they can echo credentials, so the message names only the status.
  */
-export function restFailureOf(response: HttpResponseLike, provider: string, nowMs: number, forbidden: 'auth_failed' | 'not_entitled'): MarketDataError | null {
+export function restFailureOf(response: HttpResponseLike, provider: string, nowMs: number, forbidden: 'auth_failed' | 'not_entitled' | 'access_denied'): MarketDataError | null {
   const status = response.status;
   if (status >= 200 && status < 300) return null;
   if (status === 429) {
@@ -41,7 +48,7 @@ export function restFailureOf(response: HttpResponseLike, provider: string, nowM
     return new MarketDataError('rate_limited', provider, 'rate limited by the provider (HTTP 429)', retryAfterMs === undefined ? { status } : { status, retryAfterMs });
   }
   if (status === 401) return new MarketDataError('auth_failed', provider, 'authentication refused (HTTP 401)', { status });
-  if (status === 403) return new MarketDataError(forbidden, provider, forbidden === 'not_entitled' ? 'not entitled to this dataset (HTTP 403)' : 'authentication refused (HTTP 403)', { status });
+  if (status === 403) return new MarketDataError(forbidden, provider, forbiddenMessage(forbidden), { status });
   if (status === 404) return new MarketDataError('not_found', provider, 'not found (HTTP 404)', { status });
   if (status >= 500) return new MarketDataError('provider_unavailable', provider, 'provider unavailable (HTTP ' + status + ')', { status });
   return new MarketDataError('bad_request', provider, 'request refused (HTTP ' + status + ')', { status });

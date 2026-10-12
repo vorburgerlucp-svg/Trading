@@ -81,7 +81,9 @@ export type FinancialErrorCode =
   | 'CONNECTOR_ID_DUPLICATE'
   | 'CONNECTOR_IDENTITY_MISMATCH'
   | 'CONNECTOR_CAPABILITY_MISMATCH'
-  | 'CONNECTOR_PAYLOAD_INVALID';
+  | 'CONNECTOR_PAYLOAD_INVALID'
+  | 'PROVIDER_DATA_ABSENT'
+  | 'PROVIDER_DATA_INCOHERENT';
 
 export class FinancialGatewayError extends Error {
   override readonly name = 'FinancialGatewayError';

@@ -10,6 +10,8 @@ export interface HttpResponseLike {
   status: number;
   headers: { get(name: string): string | null };
   text(): Promise<string>;
+  /** The final URL, when the transport reports it. A connector that restricts its host checks this before it reads the body. */
+  url?: string;
 }
 
 export type FetchLike = (url: string, init: { method: 'GET'; headers: Record<string, string>; signal: AbortSignal }) => Promise<HttpResponseLike>;
