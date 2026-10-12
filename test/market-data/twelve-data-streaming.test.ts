@@ -350,4 +350,42 @@ describe('one chunk and fragmented chunks give the same result', () => {
     expect(whole.series.bars).toHaveLength(6);
     expect(whole.series.bars.every((bar) => bar.contentHash.length > 0)).toBe(true);
   });
+
+  it('a 125 KB symbol search, which crosses the 64 KiB blocks, gives the same result in one chunk and in irregular chunks', async () => {
+    const big = { status: 'ok', data: Array.from({ length: 500 }, (_, i) => ({ ...SEARCH.data[0]!, instrument_name: 'Zürich Apple Inc ' + i + ' ' + 'ü'.repeat(120) })) };
+    const text = JSON.stringify(big);
+    expect(enc.encode(text).byteLength).toBeGreaterThan(2 * 65_536);
+    const whole = await providerWith(async () => reply(text)).provider.searchInstruments('AAPL');
+    const sizes = [1, 5, 13, 64, 1024, 3, 16_384];
+    const bytes = enc.encode(text);
+    const irregular: Uint8Array[] = [];
+    for (let at = 0, i = 0; at < bytes.byteLength; i++) {
+      const size = sizes[i % sizes.length]!;
+      irregular.push(bytes.slice(at, at + size));
+      at += size;
+    }
+    const fragmented = await providerWith(async () => responseWith({ status: 200, body: bodyOf(irregular) })).provider.searchInstruments('AAPL');
+    expect(whole).toHaveLength(500);
+    expect(fragmented).toEqual(whole);
+  });
+
+  it('an endless stream of empty chunks on a 200 is schema_invalid, non-retryable, after 1,025 reads and no retry', async () => {
+    let reads = 0;
+    const body = { getReader: () => ({ read: async () => (reads++ >= 100_000 ? { done: true } : { done: false, value: new Uint8Array(0) }), cancel: async () => undefined, releaseLock: () => undefined }) };
+    const counter = counted(() => responseWith({ status: 200, body }));
+    const { provider } = providerWith(counter.fetch, { maxAttempts: 2 });
+    expect(await failureOf(provider.getHistoricalBars(barRequest()))).toMatchObject({ code: 'schema_invalid', retryable: false });
+    expect(counter.calls()).toBe(1);
+    expect(reads).toBe(1025);
+  });
+
+  it('an endless stream of empty chunks on a 503 leaves the status in charge: provider_unavailable, retried', async () => {
+    let reads = 0;
+    const body = { getReader: () => ({ read: async () => (reads++ >= 100_000 ? { done: true } : { done: false, value: new Uint8Array(0) }), cancel: async () => undefined, releaseLock: () => undefined }) };
+    const counter = counted(() => responseWith({ status: 503, body }));
+    const { provider } = providerWith(counter.fetch, { maxAttempts: 2 });
+    expect(await failureOf(provider.getHistoricalBars(barRequest()))).toMatchObject({ code: 'provider_unavailable', retryable: true });
+    expect(counter.calls()).toBe(2);
+    expect(reads).toBe(2 * 1025);
+  });
 });

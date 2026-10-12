@@ -126,6 +126,29 @@ it('the Massive evidence is reproduced exactly when the body arrives in small ch
   expect(massiveIdentity(await massiveBatch(async () => responseWith({ status: 200, body: bodyOf(chunksOf(text, 11)) })))).toEqual(PINNED.massive);
 });
 
+/** Chunks of irregular sizes that cycle through a fixed pattern, so no two boundaries fall in the same place (docs/BOUNDED_STREAMING_TRANSPORT_V2.md §13). */
+function irregularChunks(bytes: Uint8Array): Uint8Array[] {
+  const sizes = [1, 5, 13, 64, 1024, 3, 16_384];
+  const parts: Uint8Array[] = [];
+  for (let at = 0, i = 0; at < bytes.byteLength; i++) {
+    const size = sizes[i % sizes.length]!;
+    parts.push(bytes.slice(at, at + size));
+    at += size;
+  }
+  return parts;
+}
+
+it('the SEC FY2024 evidence is reproduced exactly from irregular chunks', async () => {
+  const fetch: FetchLike = async (url) => responseWith({ status: 200, body: bodyOf(irregularChunks(enc.encode(url.includes('companyfacts') ? FACTS : SUBMISSIONS))) });
+  const { gateway } = await secGateway([], { fetch });
+  expect(secIdentity(await gateway.fetch(FUNDAMENTALS_REQUEST()))).toEqual(PINNED.sec);
+});
+
+it('the Massive evidence is reproduced exactly from irregular chunks', async () => {
+  const text = JSON.stringify(PAGE([ARTICLE_A, ARTICLE_B]));
+  expect(massiveIdentity(await massiveBatch(async () => responseWith({ status: 200, body: bodyOf(irregularChunks(enc.encode(text))) })))).toEqual(PINNED.massive);
+});
+
 it('the generic REST evidence is reproduced exactly', async () => {
   const e = await restEvidence();
   expect({ evidenceId: e.evidenceId, rawPayloadHash: e.rawPayloadHash, contentHash: e.contentHash }).toEqual(PINNED.rest);
