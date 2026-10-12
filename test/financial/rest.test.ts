@@ -6,6 +6,7 @@ import { RestFinancialConnector } from '../../src/financial/rest-transport.js';
 import { FinancialGatewayError } from '../../src/financial/financial-types.js';
 import { ResilientCaller, type FetchLike, type HttpResponseLike, type ResiliencePolicy } from '../../src/market-data/providers/resilience.js';
 import { AAPL_ID, change, FUNDAMENTALS_RAW, instrumentRegistry, PROVIDER, RESEARCH_ONLY, T0 } from './fixtures.js';
+import { bodyOf, responseWith } from './http-body-fixtures.js';
 
 // docs/FINANCIAL_CONNECTOR_GATEWAY_V1.md §10, §11, §14, §21, §22. REST shares ResilientCaller with the market-data providers: retries are bounded,
 // Retry-After is honoured, the circuit breaker stops calls, and the secret never reaches a URL, an error or evidence. No network: fetch is injected.
@@ -21,7 +22,7 @@ beforeEach(() => {
 });
 
 function response(status: number, body: string, headers: Record<string, string> = {}): HttpResponseLike {
-  return { status, headers: { get: (name: string) => headers[name.toLowerCase()] ?? null }, text: async () => body };
+  return responseWith({ status, headers, body: bodyOf(body) });
 }
 
 function thrownBy(fn: () => unknown): unknown {
@@ -46,6 +47,7 @@ async function gatewayWith(fetchFn: FetchLike, policy: Partial<ResiliencePolicy>
     endpoints: { fundamentals: () => ({ path: '/v1/fundamentals', query: { symbol: 'AAPL' } }) },
     map: (_capability: string, raw: unknown) => ({ candidate: raw, providerSymbol: 'AAPL' }),
     clock,
+    maxResponseBytes: 1024 * 1024,
   });
   const registry = await FinancialConnectorRegistry.open();
   await registry.register({ connectorId: 'rest-1', provider: PROVIDER, transport: 'rest', capabilities: ['fundamentals'], license: RESEARCH_ONLY, mode: 'RESEARCH' }, change());
@@ -159,6 +161,7 @@ describe('secrets never leave the transport (§11, §21)', () => {
       endpoints: {},
       map: () => ({ candidate: {} }),
       clock,
+      maxResponseBytes: 1024,
     }));
     expect(err).toBeInstanceOf(FinancialGatewayError);
   });

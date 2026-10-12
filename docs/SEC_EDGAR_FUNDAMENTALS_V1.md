@@ -44,9 +44,9 @@ headers.
 - SEC responses never contribute a URL to a later call.
 - Redirects: the production fetch adapter must not follow a redirect to another host. When a response carries its final URL, the connector verifies that it is
   still `data.sec.gov` and refuses otherwise.
-- Response size: a documented bound of **32 MiB** per response. The `content-length` header is checked before the body is read. The body length is checked
-  after it is read. **Limitation:** the transport abstraction reads the full body before the post-read check, so memory is consumed up to the bound. A
-  streaming reader with an early cutoff is required before large-scale production use. This is recorded, not hidden.
+- Response size: a documented bound of **32 MiB** per response. The body is read as a bounded stream (`docs/BOUNDED_STREAMING_HTTP_TRANSPORT_V1.md`). It
+  counts the bytes it consumes and cancels the stream at the bound. `Content-Length` is only an early rejection hint, and the count is authoritative. The
+  earlier whole-body limitation is retired by that branch.
 
 ## 5. HTTP semantics
 
@@ -322,7 +322,7 @@ concepts are not read.
 ## 27. Limitations
 
 - Nothing is verified against the live SEC API in this branch. Live use requires a real `SEC_USER_AGENT`, which is not configured here.
-- The response-size check reads the full body before its post-read bound (§4).
+- The response-size check is enforced on the streamed bytes (§4). The earlier whole-body limitation is retired by `docs/BOUNDED_STREAMING_HTTP_TRANSPORT_V1.md`.
 - The pacer enforces the rate only within one process.
 - `providerPublishedAt` and `effectiveAt` are null, so provider time gives no instant.
 - Amendments are not reflected.

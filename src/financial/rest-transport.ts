@@ -4,6 +4,7 @@
 import { MarketDataError } from '../market-data/market-data-provider.js';
 import type { ProviderInstrumentMapping } from '../market-data/market-data-types.js';
 import { parseRetryAfter, type FetchLike, type HttpResponseLike, type ResilientCaller } from '../market-data/providers/resilience.js';
+import { assertBodyBound, BodyTransportError, readBoundedUtf8 } from '../market-data/providers/bounded-http-body.js';
 import { hashOf } from '../persistence/canonical-json.js';
 import type { ConnectionState, ConnectorBody, ConnectorPayload, FinancialConnector, FinancialConnectorHealth } from './connector.js';
 import type { FinancialRequest } from './financial-requests.js';
@@ -26,6 +27,8 @@ export interface RestConnectorOptions {
   readonly endpoints: Partial<Record<FinancialCapability, (request: FinancialRequest, mapping: ProviderInstrumentMapping | null) => RestEndpoint>>;
   readonly map: (capability: FinancialCapability, raw: unknown, sent: { providerSymbol?: string | undefined }) => ConnectorBody;
   readonly clock: () => Date;
+  /** The byte bound for one success body. Required, so a connector cannot opt into an unbounded body (docs/BOUNDED_STREAMING_HTTP_TRANSPORT_V1.md §17). */
+  readonly maxResponseBytes: number;
 }
 
 function forbiddenMessage(forbidden: 'auth_failed' | 'not_entitled' | 'access_denied'): string {
@@ -54,16 +57,26 @@ export function restFailureOf(response: HttpResponseLike, provider: string, nowM
   return new MarketDataError('bad_request', provider, 'request refused (HTTP ' + status + ')', { status });
 }
 
+function boundOf(value: number): number {
+  try {
+    return assertBodyBound(value, "REST");
+  } catch (error) {
+    throw new FinancialGatewayError("REGISTRATION_INVALID", (error as Error).message);
+  }
+}
+
 export class RestFinancialConnector implements FinancialConnector {
   readonly connectorId: string;
   readonly provider: string;
   readonly transport: FinancialTransport = 'rest';
   private readonly credentialRef: string;
+  private readonly maxResponseBytes: number;
 
   constructor(private readonly options: RestConnectorOptions) {
     this.connectorId = options.connectorId;
     this.provider = options.provider;
     this.credentialRef = credentialRefOf(options.credentialRef);
+    this.maxResponseBytes = boundOf(options.maxResponseBytes);
   }
 
   capabilities(): readonly FinancialCapability[] {
@@ -101,12 +114,22 @@ export class RestFinancialConnector implements FinancialConnector {
     const response = await this.options.fetch(url, { method: 'GET', headers: { Accept: 'application/json', Authorization: 'Bearer ' + secret }, signal });
     const failure = this.statusFailure(response);
     if (failure) throw failure;
-    const text = await response.text();
+    const text = await this.bodyOf(response);
     try {
       return JSON.parse(text) as unknown;
     } catch {
       // Not retried: repeating a malformed answer cannot help and may burn quota.
       throw new FinancialGatewayError('SCHEMA_INVALID', 'the provider answered with a body that is not JSON');
+    }
+  }
+
+  /** The success body, read as a bounded stream. A body failure is SCHEMA_INVALID, and an abort is rethrown for the caller's timeout. */
+  private async bodyOf(response: HttpResponseLike): Promise<string> {
+    try {
+      return await readBoundedUtf8(response, this.maxResponseBytes);
+    } catch (error) {
+      if (error instanceof BodyTransportError) throw new FinancialGatewayError('SCHEMA_INVALID', 'the provider body is not acceptable: ' + error.message);
+      throw error;
     }
   }
 

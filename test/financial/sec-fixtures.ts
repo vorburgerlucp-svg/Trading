@@ -10,6 +10,7 @@ import { InMemoryAppendOnlyStore } from '../../src/persistence/append-only-log.j
 import { AAPL } from '../market-data/fixtures.js';
 import { sequentialIds } from '../helpers.js';
 import { AAPL_ID, change, RESEARCH_ONLY } from './fixtures.js';
+import { bodyOf, responseWith } from './http-body-fixtures.js';
 
 export const CIK = '0000320193';
 export const SUBMISSIONS_URL = 'https://data.sec.gov/submissions/CIK0000320193.json';
@@ -217,7 +218,6 @@ export interface SecAnswer {
   readonly body?: string;
   readonly headers?: Record<string, string>;
   readonly url?: string;
-  readonly text?: () => Promise<string>;
 }
 
 export const json200 = (body: string): SecAnswer => ({ status: 200, body });
@@ -229,12 +229,7 @@ export function secHttp(answers: readonly SecAnswer[]): { fetch: FetchLike; call
     calls.push({ url, headers: { ...init.headers } });
     const answer = answers[Math.min(next, answers.length - 1)]!;
     next++;
-    return {
-      status: answer.status,
-      url: answer.url,
-      headers: { get: (name: string) => (answer.headers ?? {})[name.toLowerCase()] ?? null },
-      text: answer.text ?? (async () => answer.body ?? ''),
-    };
+    return responseWith({ status: answer.status, url: answer.url, headers: answer.headers, body: bodyOf(answer.body ?? '') });
   };
   return { fetch, calls };
 }

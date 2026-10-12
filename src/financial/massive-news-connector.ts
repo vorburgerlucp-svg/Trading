@@ -4,7 +4,8 @@
 
 import type { ProviderInstrumentMapping } from '../market-data/market-data-types.js';
 import { MarketDataError } from '../market-data/market-data-provider.js';
-import type { ResilientCaller, FetchLike } from '../market-data/providers/resilience.js';
+import type { FetchLike, HttpResponseLike, ResilientCaller } from '../market-data/providers/resilience.js';
+import { assertBodyBound, BodyTransportError, readBoundedUtf8 } from '../market-data/providers/bounded-http-body.js';
 import { hashOf } from '../persistence/canonical-json.js';
 import type { ConnectionState, ConnectorBatch, ConnectorPayload, FinancialConnector, FinancialConnectorHealth } from './connector.js';
 import type { FinancialRequest } from './financial-requests.js';
@@ -15,6 +16,8 @@ import type { SecretProvider } from './secrets.js';
 export const MASSIVE_CONNECTOR_ID = 'massive-news-rest';
 export const MASSIVE_PROVIDER = 'massive';
 export const MASSIVE_CREDENTIAL_REF = 'massive-api-key';
+/** The byte bound for one Massive response (docs/BOUNDED_STREAMING_HTTP_TRANSPORT_V1.md §15). A V1 choice: the provider documents no size. */
+export const MASSIVE_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 const ENDPOINT = 'https://api.massive.com/v2/reference/news';
 const HOST = 'api.massive.com';
@@ -35,6 +38,8 @@ export interface MassiveNewsOptions {
   readonly clock: () => Date;
   /** Results per call, 1 to 50. The default is 10. */
   readonly limit?: number;
+  /** The byte bound for one response. Defaults to MASSIVE_MAX_RESPONSE_BYTES. */
+  readonly maxResponseBytes?: number;
 }
 
 /** The fields NEXUS keeps from one article. Everything else the provider sent is validated and then not used. */
@@ -183,11 +188,20 @@ function payloadOf(raw: Record<string, unknown>, article: Article, providerSymbo
   };
 }
 
+function boundOf(value: number): number {
+  try {
+    return assertBodyBound(value, "Massive");
+  } catch (error) {
+    throw new FinancialGatewayError("REGISTRATION_INVALID", (error as Error).message);
+  }
+}
+
 export class MassiveNewsRestConnector implements FinancialConnector {
   readonly connectorId = MASSIVE_CONNECTOR_ID;
   readonly provider = MASSIVE_PROVIDER;
   readonly transport: FinancialTransport = 'rest';
   private readonly limit: number;
+  private readonly maxResponseBytes: number;
 
   constructor(private readonly options: MassiveNewsOptions) {
     const limit = options.limit ?? LIMIT_DEFAULT;
@@ -195,6 +209,7 @@ export class MassiveNewsRestConnector implements FinancialConnector {
       throw new FinancialGatewayError('REQUEST_INVALID', 'the Massive result limit must be an integer from 1 to ' + LIMIT_MAX);
     }
     this.limit = limit;
+    this.maxResponseBytes = boundOf(options.maxResponseBytes ?? MASSIVE_MAX_RESPONSE_BYTES);
   }
 
   connection(): ConnectionState {
@@ -243,12 +258,22 @@ export class MassiveNewsRestConnector implements FinancialConnector {
     const response = await this.options.fetch(url, { method: 'GET', headers: { Accept: 'application/json', Authorization: 'Bearer ' + secret }, signal });
     const failure: MarketDataError | null = restFailureOf(response, MASSIVE_PROVIDER, this.options.clock().getTime(), 'not_entitled');
     if (failure) throw failure;
-    const text = await response.text();
+    const text = await this.bodyOf(response);
     try {
       return JSON.parse(text) as unknown;
     } catch {
       // Not retried: repeating a malformed answer cannot help and may burn quota.
       throw new FinancialGatewayError('SCHEMA_INVALID', 'Massive response: the body is not JSON');
+    }
+  }
+
+  /** The success body, read as a bounded stream. A body failure is SCHEMA_INVALID, and an abort is rethrown for the caller's timeout. */
+  private async bodyOf(response: HttpResponseLike): Promise<string> {
+    try {
+      return await readBoundedUtf8(response, this.maxResponseBytes);
+    } catch (error) {
+      if (error instanceof BodyTransportError) throw new FinancialGatewayError('SCHEMA_INVALID', 'Massive response: ' + error.message);
+      throw error;
     }
   }
 }

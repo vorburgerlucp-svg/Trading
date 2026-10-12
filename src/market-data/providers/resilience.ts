@@ -6,10 +6,25 @@
 
 import { MarketDataError, type MarketDataErrorCode, type ProviderHealthSnapshot } from '../market-data-provider.js';
 
+/** The reader of a streaming body. The shape is the platform's ReadableStreamDefaultReader, so a native Response satisfies it structurally. */
+export interface HttpBodyReaderLike {
+  read(): Promise<{ done: boolean; value?: unknown }>;
+  cancel(reason?: unknown): Promise<void>;
+  releaseLock(): void;
+}
+
+/** A streaming response body (docs/BOUNDED_STREAMING_HTTP_TRANSPORT_V1.md §3). The secure financial paths read this, never text(). */
+export interface HttpBodyLike {
+  getReader(): HttpBodyReaderLike;
+}
+
 export interface HttpResponseLike {
   status: number;
   headers: { get(name: string): string | null };
+  /** Kept for the market-data providers that still read whole bodies. The financial success paths never call it. */
   text(): Promise<string>;
+  /** The streaming body. A success path that needs a body reads it through readBoundedUtf8, and fails closed when it is absent. */
+  body?: HttpBodyLike | null;
   /** The final URL, when the transport reports it. A connector that restricts its host checks this before it reads the body. */
   url?: string;
 }

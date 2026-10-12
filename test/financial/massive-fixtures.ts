@@ -6,6 +6,7 @@ import { InstrumentRegistry, type InstrumentEvent } from '../../src/market-data/
 import { InMemoryAppendOnlyStore } from '../../src/persistence/append-only-log.js';
 import type { FetchLike, HttpResponseLike } from '../../src/market-data/providers/resilience.js';
 import { AAPL } from '../market-data/fixtures.js';
+import { bodyOf, responseWith } from './http-body-fixtures.js';
 import { sequentialIds } from '../helpers.js';
 import { AAPL_ID, change } from './fixtures.js';
 
@@ -64,7 +65,7 @@ export function scriptedFetch(answers: Answer[]): { fetch: FetchLike; calls: Arr
     calls.push({ url, headers: { ...init.headers } });
     const answer = answers[Math.min(next, answers.length - 1)]!;
     next++;
-    const response: HttpResponseLike = { status: answer.status, headers: { get: (name: string) => (answer.headers ?? {})[name.toLowerCase()] ?? null }, text: async () => answer.body };
+    const response: HttpResponseLike = responseWith({ status: answer.status, headers: answer.headers, body: bodyOf(answer.body) });
     return response;
   };
   return { fetch, calls };

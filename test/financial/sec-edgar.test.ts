@@ -5,6 +5,7 @@ import { verifyFinancialEvidence } from '../../src/financial/financial-evidence.
 import { SEC_CONNECTOR_ID, SEC_MIN_INTERVAL_MS, SEC_PROVIDER, SecEdgarFundamentalsConnector, secUrlsOf, secUserAgentOf } from '../../src/financial/sec-edgar-fundamentals.js';
 import { ResilientCaller, type FetchLike } from '../../src/market-data/providers/resilience.js';
 import { AAPL_ID } from './fixtures.js';
+import { bodyOf, newProbe, responseWith } from './http-body-fixtures.js';
 import { ALL_FILINGS, baseConcepts, CIK, clock, CLOCK_ISO, COMPANYFACTS_URL, companyFactsText, FILINGS, FUNDAMENTALS_REQUEST, json200, LIVE_SHAPED_ROWS, reversedConcepts, SUBMISSIONS_URL, secCaller, secGateway, secHttp, secInstruments, standardAnswers, submissionsText, TEST_USER_AGENT } from './sec-fixtures.js';
 
 // docs/SEC_EDGAR_FUNDAMENTALS_V1.md §1–§5, §9, §21–§25. The connector through the real gateway, with scripted HTTP answers. No network call is made.
@@ -109,7 +110,7 @@ describe('User-Agent and fair access (§2)', () => {
     const caller = new ResilientCaller(SEC_PROVIDER, { timeoutMs: 1000, maxAttempts: 1, minIntervalMs: SEC_MIN_INTERVAL_MS }, deps);
     const fetch: FetchLike = async (url) => {
       started.push(t);
-      return { status: 200, headers: { get: () => null }, text: async () => (url === SUBMISSIONS_URL ? submissionsText(ALL_FILINGS) : companyFactsText(baseConcepts())) };
+      return responseWith({ status: 200, body: bodyOf(url === SUBMISSIONS_URL ? submissionsText(ALL_FILINGS) : companyFactsText(baseConcepts())) });
     };
     const { gateway } = await secGateway([], { caller, fetch });
     await gateway.fetch(FUNDAMENTALS_REQUEST());
@@ -156,18 +157,11 @@ describe('HTTP meanings (§5)', () => {
 
 describe('bounded responses and the host (§4)', () => {
   it('a Content-Length above 32 MiB is refused before the body is read', async () => {
-    let bodyRead = false;
-    const fetch: FetchLike = async () => ({
-      status: 200,
-      headers: { get: (name: string) => (name === 'content-length' ? String(BYTES_32_MIB + 1) : null) },
-      text: async () => {
-        bodyRead = true;
-        return '';
-      },
-    });
+    const probe = newProbe();
+    const fetch: FetchLike = async () => responseWith({ headers: { 'content-length': String(BYTES_32_MIB + 1) }, body: bodyOf('', probe) });
     const { gateway } = await secGateway([], { fetch });
     expect(await codeOf(gateway.fetch(FUNDAMENTALS_REQUEST()))).toBe('SCHEMA_INVALID');
-    expect(bodyRead).toBe(false);
+    expect(probe.reads).toBe(0);
   });
 
   it('a body above 32 MiB is refused after the read', async () => {
@@ -182,7 +176,7 @@ describe('bounded responses and the host (§4)', () => {
   });
 
   it('a malformed Content-Length is refused', async () => {
-    const fetch: FetchLike = async () => ({ status: 200, headers: { get: (name: string) => (name === 'content-length' ? '12x' : null) }, text: async () => '' });
+    const fetch: FetchLike = async () => responseWith({ headers: { 'content-length': '12x' }, body: bodyOf('') });
     const { gateway } = await secGateway([], { fetch });
     expect(await codeOf(gateway.fetch(FUNDAMENTALS_REQUEST()))).toBe('SCHEMA_INVALID');
   });

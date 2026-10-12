@@ -158,7 +158,7 @@ From the artifact the attestor requires:
 - `CENTRAL INDEX KEY` includes the mapped CIK, zero-padded to ten digits. A header may name several filers. The mapped CIK must be among them.
 
 Any mismatch fails closed with `SOURCE_ARTIFACT_MISMATCH`. The header size is bounded at 2 MiB. `Content-Length` is checked before the body is read, and the body is
-checked again after it is read. Transport limitation: the body is read whole before the post-read check, as in the SEC connector (see §21).
+the body is read as a bounded stream that cancels at 2 MiB (`docs/BOUNDED_STREAMING_HTTP_TRANSPORT_V1.md`). The earlier whole-body limitation is retired.
 
 ## 14. Accepted post-acceptance corrections
 
@@ -236,8 +236,8 @@ record in `record JSONB`:
   helper again to every row.
 - Every read verifies the record, recomputes its hashes, and checks its indexed columns against the record.
 
-Transport limitation, unchanged from the connector: the response body is read whole before the post-read size check. A streaming reader remains a separate
-item, and this branch does not change it.
+Transport: the response body is read as a bounded stream under the same rules as the connector (`docs/BOUNDED_STREAMING_HTTP_TRANSPORT_V1.md`). The
+whole-body limitation this section once recorded is retired.
 
 ## 22. CompanyFacts evolution
 
@@ -317,5 +317,5 @@ request.
 Existing modules: `sec-edgar-fundamentals.ts` now sends through `secTextOf`, and exports `SEC_HOST`. Its behaviour is unchanged. Not changed:
 `FinancialEvidenceStore.readAvailable`, `financialKnowledgeAt`, `FinancialEvidence`, `strongO1Eligible`, the DB seal, the migrations 001–012.
 
-Not in V1: amendments (§38), Q4 (§39), decision-time use of a source attestation, any provider other than SEC, a streaming reader (§21, §13), and any claim about
+Not in V1: amendments (§38), Q4 (§39), decision-time use of a source attestation, any provider other than SEC, and any claim about
 the exact second of first public availability (§23).

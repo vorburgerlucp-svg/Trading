@@ -5,7 +5,7 @@
 import { FinancialSourceAttestationError } from './source-attestation-errors.js';
 
 export const SEC_ARCHIVE_HOST = 'www.sec.gov';
-/** The explicit bound for one archive header (§13). Content-Length is checked before the body is read, and the body again after it. */
+/** The explicit bound for one archive header (§13). The body is read as a bounded stream, and Content-Length only refuses early. */
 export const SEC_ARCHIVE_MAX_BYTES = 2 * 1024 * 1024;
 
 const CIK = /^\d{10}$/;

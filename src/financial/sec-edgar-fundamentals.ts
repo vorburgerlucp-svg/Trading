@@ -18,7 +18,7 @@ export const SEC_PROVIDER = 'sec-edgar';
 export const SEC_USER_AGENT_ENV = 'SEC_USER_AGENT';
 /** At most 8 requests per second, as a process-level floor (SEC allows 10). See §2. */
 export const SEC_MIN_INTERVAL_MS = 125;
-/** The documented bound for one response (§4). The body is still read whole before the post-read check. */
+/** The bound for one response (§4). The body is read as a bounded stream, so no more than this many bytes are ever held in memory. */
 export const SEC_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 /** The host of the JSON documents this connector and the attestor read. The archive host is separate (sec-archive-header.ts). */
 export const SEC_HOST = 'data.sec.gov';

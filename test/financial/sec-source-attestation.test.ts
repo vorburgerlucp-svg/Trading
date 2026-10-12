@@ -9,6 +9,7 @@ import { ResilientCaller, type FetchLike } from '../../src/market-data/providers
 import { sha256Hex } from '../../src/persistence/canonical-json.js';
 import { change, UNREVIEWED } from './fixtures.js';
 import { ARTICLE_A, MASSIVE_CONNECTOR, MASSIVE_PROVIDER, MASSIVE_SECRET, NEWS_REQUEST, PAGE, json, massiveInstruments, scriptedFetch } from './massive-fixtures.js';
+import { bodyOf, newProbe, responseWith } from './http-body-fixtures.js';
 import { archiveHeaderText, CIK_PADDED, FY_ACCEPTANCE, FY_ACCESSION, sealedWithoutDatabase, secFyEvidence } from './sec-attestation-fixtures.js';
 import { ALL_FILINGS, baseConcepts, clock, companyFactsText, type Concepts, json200, secCaller, secHttp, secInstruments, submissionsText, TEST_USER_AGENT } from './sec-fixtures.js';
 
@@ -163,17 +164,17 @@ describe('the official archive must agree with the selection (brief 15)', () => 
 
   it('an archive header above 2 MiB is refused before its body is read', async () => {
     const evidence = await secFyEvidence();
-    let bodyRead = false;
+    const probe = newProbe();
     const fetch: FetchLike = async (url) => {
       if (url.startsWith('https://www.sec.gov/')) {
-        return { status: 200, headers: { get: (name: string) => (name === 'content-length' ? String(2 * 1024 * 1024 + 1) : null) }, text: async () => ((bodyRead = true), '') };
+        return responseWith({ headers: { 'content-length': String(2 * 1024 * 1024 + 1) }, body: bodyOf('', probe) });
       }
       const text = url.includes('companyfacts') ? companyFactsText(baseConcepts()) : submissionsText(ALL_FILINGS);
-      return { status: 200, headers: { get: () => null }, text: async () => text };
+      return responseWith({ status: 200, body: bodyOf(text) });
     };
     const { attestor } = await attestorWith([], { fetch });
     expect(await codeOf(attestor.attest(sealedWithoutDatabase(evidence)))).toBe('SOURCE_ARTIFACT_MISMATCH');
-    expect(bodyRead).toBe(false);
+    expect(probe.reads).toBe(0);
   });
 });
 
