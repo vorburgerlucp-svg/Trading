@@ -95,6 +95,6 @@ After this branch no production code calls `text()` on an external HTTP response
 
 ## 12. Remaining limitations
 
-- The bound limits bytes, not decoded string overhead. A pathological number of tiny chunks still creates many string parts in `readBoundedUtf8()` (the MEDIUM recorded for Transport V2). The byte payload is bounded; the metadata is not.
+- The bound limits bytes, not decoded string overhead. This was the MEDIUM recorded for Transport V2. Transport V2 (`docs/BOUNDED_STREAMING_TRANSPORT_V2.md`) resolves it: provider chunks are coalesced into 64 KiB blocks, the chunk count and the empty-chunk run are capped, and the retained parts are bounded by the payload size.
 - A 30 MB body still becomes one JavaScript string, and the parser runs on that string. Memory is bounded, but parsing is not streamed.
 - The live public-demo smoke depends on Twelve Data's availability and rate limits at test time. A real provider failure is reported as such, not hidden.
