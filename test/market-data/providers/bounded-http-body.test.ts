@@ -154,9 +154,11 @@ describe('overflow cancellation (§11, brief 21)', () => {
   });
 
   it('a failing cancel does not replace the BODY_TOO_LARGE error', async () => {
+    // Capped at 50 reads, so a missing bound fails the assertion instead of looping forever.
+    let reads = 0;
     const body = {
       getReader: () => ({
-        read: async () => ({ done: false, value: enc.encode('abcdef') }),
+        read: async () => (reads++ < 50 ? { done: false, value: enc.encode('abcdef') } : { done: true }),
         cancel: async () => {
           throw new Error('cancel failed');
         },
