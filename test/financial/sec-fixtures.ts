@@ -66,8 +66,9 @@ export interface FactEntry {
   /** The exact JSON number text, for example "391035000000" or "6.08". */
   readonly val: string;
   readonly accn: string;
-  readonly fy: number;
-  readonly fp: string;
+  /** null is what SEC reports for an unrelated form such as an 8-K (docs/SEC_EDGAR_FUNDAMENTALS_V1.md §8). */
+  readonly fy: number | null;
+  readonly fp: string | null;
   readonly form: string;
   readonly filed: string;
 }
@@ -151,6 +152,25 @@ export function baseConcepts(): Concepts {
     CashAndCashEquivalentsAtCarryingValue: { USD: [yearEndInstant('29943000000'), quarterInstant('29000000000')] },
     StockholdersEquity: { USD: [yearEndInstant('56950000000'), quarterInstant('60000000000')] },
     AccountsPayableCurrent: { USD: [yearEndInstant('1')] },
+  };
+}
+
+/** An 8-K record of a mapped concept, as the live CompanyFacts shows it: its fiscal year and fiscal period are null. It is not a V1 source. */
+export const unrelatedEightK = (val: string, accn: string, filed = '2024-10-31', end = '2024-09-28'): FactEntry => ({ end, val, accn, fy: null, fp: null, form: '8-K', filed });
+
+/** An 8-K accession that is not in the submissions fixture. Its records must be ignored, so the accession never matters. */
+export const EIGHT_K = '0000320193-24-000095';
+
+/**
+ * The observed Apple condition, sanitised: several mapped concepts each carry an 8-K record with null fy and fp beside the valid 10-K facts. The 10-K
+ * facts and every other value are the same as baseConcepts(), so only the unrelated records differ.
+ */
+export function liveShapedConcepts(): Concepts {
+  return {
+    ...baseConcepts(),
+    SalesRevenueNet: { USD: [unrelatedEightK('391035000000', EIGHT_K), annual('391035000000')] },
+    GrossProfit: { USD: [annual('180683000000'), unrelatedEightK('180683000000', EIGHT_K)] },
+    EarningsPerShareDiluted: { 'USD/shares': [annual('6.08'), quarter('1.53'), unrelatedEightK('6.08', EIGHT_K)] },
   };
 }
 

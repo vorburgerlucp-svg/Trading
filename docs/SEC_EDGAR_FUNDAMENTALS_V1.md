@@ -111,8 +111,29 @@ For a materialized `10-Q` or `10-K` row:
 - A non-empty `acceptanceDateTime` must match the supported timestamp syntax: `YYYY-MM-DDTHH:MM:SS`, optional fractional seconds of one to nine digits,
   and a `Z` suffix. A blank `acceptanceDateTime` is allowed, because V1 does not use it as `providerPublishedAt` (§13).
 
+CompanyFacts may contain mapped US-GAAP concepts reported in unrelated filing forms. The live AAPL CompanyFacts carries 8-K records of mapped concepts,
+and those records have `fy` and `fp` set to null. Only exact `10-Q` and `10-K` entries are materialized as V1 fundamentals-source facts.
+
+Each entry of a mapped concept and unit is processed in a fixed order:
+
+1. The entry must be an object.
+2. Its `form` must be bounded printable text of at most 20 characters. A missing, non-string, empty, control-character-bearing or over-long `form`
+   fails closed with `SCHEMA_INVALID`, because the entry cannot be classified safely.
+3. If `form` is not exactly `10-Q` or `10-K`, the entry is ignored. Its other fields are not read, so its null `fy` or `fp` cannot block the document. No
+   fiscal year or period is inferred from it, and the end date is never used to derive one. This covers `8-K`, `10-Q/A`, `10-K/A`, `10-KT`, `10-K405` and
+   every other form. Amendments remain excluded (§11).
+4. Only then is the strict source-fact validator applied. A `10-Q` or `10-K` entry requires a valid `end`, an exact `val` as a JSON number, a valid
+   `accn`, an exact four-digit `fy` as a JSON integer, a non-empty `fp`, the exact form, a valid `filed` date, and a `start` where a duration requires one.
+
+Structure stays strict for every mapped concept, whatever its forms: the root, the CIK, the facts object, the `us-gaap` object, the mapped concept object,
+its units object, and each unit list. Unrelated concepts are not read at all.
+
 Companyfacts facts are selected only when each selected fact has a coherent `accn`, `form`, `fy`, `fp`, `filed`, `end` and `unit`. Facts whose
 accession is not a filing of the mapped CIK, or whose form, fiscal year, fiscal period or report date is wrong, are not selected.
+
+Materialized CompanyFacts records keep the exact source text of each value, so the raw provenance hash binds the full CompanyFacts response. Adding an
+ignored 8-K record to the response does not change the canonical fundamentals data or the evidence identity. It does change `rawPayloadHash`, because the
+exact response text changed.
 
 Every selected primary fact must share one accession. Facts from incompatible accessions fail closed with `PROVIDER_DATA_INCOHERENT`. Filings are never
 combined silently.
@@ -228,7 +249,10 @@ A record is produced only when at least one income-statement value and at least 
 
 - Root structure, CIK, the facts object, the `us-gaap` taxonomy, the requested concepts, the units object and every selected entry are validated strictly.
 - Unrelated SEC concepts and unrelated fields are ignored. One unrelated concept never breaks ingestion.
-- Required identity fields (`accn`, `form`, `fy`, `fp`, `filed`, `end`, `unit`) are mandatory on selected entries. Optional line items may be absent.
+- Within a mapped concept, an entry of an unrelated form (anything other than `10-Q` or `10-K`) is ignored once its `form` is classified (§8). Its other
+  fields are not validated, so its null `fy` or `fp` cannot block the document.
+- The identity fields (`accn`, `form`, `fy`, `fp`, `filed`, `end`, `unit`) are mandatory on every `10-Q` and `10-K` entry of a mapped concept. A null or
+  malformed value there fails closed. Optional line items may be absent.
 
 ## 21. Gateway integration
 

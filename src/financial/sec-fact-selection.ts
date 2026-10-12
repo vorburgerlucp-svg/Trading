@@ -183,8 +183,11 @@ const INCOME: readonly Field[] = ['revenue', 'grossProfit', 'operatingIncome', '
 const BALANCE: readonly Field[] = ['cash', 'equity'];
 const MAPPED: ReadonlySet<string> = new Set(FIELDS.flatMap((field) => CONCEPTS[field]));
 
-function factOf(value: unknown, concept: string): SecFact {
-  const f = recordOf(value, 'a fact of ' + concept);
+/**
+ * The strict validator for one exact V1 source fact. It runs only after the entry's form has been classified as 10-Q or 10-K (sourceFactsOf), so an
+ * unrelated record is never checked against source-fact fields it does not carry.
+ */
+function factOf(f: Record<string, unknown>, form: string): SecFact {
   const end = dateOf(f.end, 'end');
   const start = f.start === undefined ? null : dateOf(f.start, 'start');
   if (start !== null && start > end) invalid('a duration ends before it starts');
@@ -197,14 +200,28 @@ function factOf(value: unknown, concept: string): SecFact {
     accession: accessionOf(f.accn, 'accn'),
     fy: f.fy.lexeme,
     fp: textOf(f.fp, 'fp', 4),
-    form: textOf(f.form, 'form', 20),
+    form,
     filed: dateOf(f.filed, 'filed'),
   };
 }
 
 /**
+ * One CompanyFacts entry of a mapped concept. The entry must be an object, and its `form` must be bounded printable text that can be classified. Only an
+ * exact V1 source form (10-Q or 10-K) is validated strictly and materialized. Any other form is ignored before its other fields are read. CompanyFacts
+ * carries mapped concepts from unrelated filings, such as 8-K records, whose fiscal year and period are null. Those records are not fundamentals sources
+ * (docs/SEC_EDGAR_FUNDAMENTALS_V1.md §8, §20). No fiscal year or period is inferred for them.
+ */
+function sourceFactsOf(value: unknown, concept: string): SecFact[] {
+  const entry = recordOf(value, 'a fact of ' + concept);
+  const form = textOf(entry.form, 'form', 20);
+  if (!SOURCE_FORMS.has(form)) return [];
+  return [factOf(entry, form)];
+}
+
+/**
  * The companyfacts document. The CIK is a JSON number, so it is compared after zero-padding its lexeme to ten digits, never through a JavaScript number.
- * The mapped concepts are validated strictly in every unit. Other concepts are not read.
+ * The structure is strict: the root, the CIK, the facts, us-gaap, each mapped concept, its units and each unit list. Within a mapped concept, the exact
+ * 10-Q and 10-K entries are validated strictly, and every other form is ignored once its form is classified. Other concepts are not read.
  */
 export function companyFactsOf(value: SecValue, cik: string): SecFacts {
   const root = recordOf(value, 'companyfacts');
@@ -220,7 +237,7 @@ export function companyFactsOf(value: SecValue, cik: string): SecFacts {
     for (const unit of Object.keys(units)) {
       byUnit.set(
         unit,
-        listOf(units[unit], concept + ' units').map((entry) => factOf(entry, concept)),
+        listOf(units[unit], concept + ' units').flatMap((entry) => sourceFactsOf(entry, concept)),
       );
     }
     concepts.set(concept, byUnit);
