@@ -61,7 +61,7 @@ function canonicalInstantMs(value: unknown, label: string): number {
 
 /**
  * Recomputes every identity the stored result carries and checks it against the result itself. Any inconsistency throws; nothing is repaired.
- * The ordering rules are the replay's own: scanner members are sorted by code unit, and market anchors by the locale comparison the replay uses.
+ * Ordering is locale-independent: scanner members, quant references and market-anchor keys use code-unit order.
  */
 export function verifyHistoricalScannerReplayResult(result: HistoricalScannerReplayResult): HistoricalScannerReplayResult {
   if (result.engineVersion !== HISTORICAL_SCANNER_REPLAY_VERSION) fail('engine version is not ' + HISTORICAL_SCANNER_REPLAY_VERSION);
