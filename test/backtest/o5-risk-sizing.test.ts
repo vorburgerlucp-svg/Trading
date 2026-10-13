@@ -84,8 +84,8 @@ const onlyBuy = (r: BacktestRunResult): BacktestFill => {
 };
 
 describe('engine version and configuration (O5 §2, §15)', () => {
-  it('the backtest engine is backtest-engine:v10', () => {
-    expect(BACKTEST_ENGINE_VERSION).toBe('backtest-engine:v10');
+  it('O5 remains active under backtest-engine:v11', () => {
+    expect(BACKTEST_ENGINE_VERSION).toBe('backtest-engine:v11');
   });
 
   it.each([
