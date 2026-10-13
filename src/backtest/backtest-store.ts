@@ -1,4 +1,5 @@
 import { universeEvidenceIsConsistent } from '../universe/universe-model.js';
+import { getCalendar } from '../market-data/sessions.js';
 import { parseUtc } from '../market-data/time.js';
 import { Decimal } from '../money/decimal.js';
 import { hashOf } from '../persistence/canonical-json.js';
@@ -93,13 +94,13 @@ function engineMajorVersion(version: string): number {
 }
 
 /**
- * Fill timing must be what the fill claims (execution-clock:v1). An OPEN_EXACT fill executes at its session open, which is not before its bar
- * window start. An INTRABAR_UNKNOWN fill carries no execution instant: its `at` is the bar window start, and the window is non-empty.
- * The execution calendar identity must be recorded, and the open position must come from its entry fill.
- * Required from backtest-engine:v7 onward. Every later engine version keeps this check; a malformed version is refused, never skipped.
+ * Fill timing must be internally consistent and version-correct. v7-v10 keep the legacy
+ * INTRABAR_UNKNOWN representation. v11 uses INTRABAR_BOUNDED, whose lower/upper bounds
+ * are the proven tradable window rather than the raw data window (O6).
  */
 function verifyExecutionClock(run: BacktestRunResult): void {
-  if (engineMajorVersion(run.engineVersion) < 7) return;
+  const major = engineMajorVersion(run.engineVersion);
+  if (major < 7) return;
   if (!run.executionClock || run.executionClock.version !== EXECUTION_CLOCK_VERSION || run.executionClock.calendarId.trim() === '') {
     throw new BacktestRunIntegrityError('execution clock identity is missing or of another version');
   }
@@ -110,9 +111,59 @@ function verifyExecutionClock(run: BacktestRunResult): void {
     if (t.kind === 'OPEN_EXACT') {
       if (fill.at !== t.executionAt) throw new BacktestRunIntegrityError('exact fill ' + fill.fillId + ' does not execute at its recorded open');
       if (parseUtc(t.barStart) > parseUtc(t.executionAt)) throw new BacktestRunIntegrityError('fill ' + fill.fillId + ' executes before its bar window starts');
-    } else {
+      continue;
+    }
+
+    if (t.kind === 'INTRABAR_UNKNOWN') {
+      if (major >= 11) throw new BacktestRunIntegrityError('v11 fill ' + fill.fillId + ' uses legacy INTRABAR_UNKNOWN timing');
       if (fill.at !== t.barStart) throw new BacktestRunIntegrityError('intrabar fill ' + fill.fillId + ' has an inconsistent bar window');
       if (parseUtc(t.barStart) >= parseUtc(t.barEnd)) throw new BacktestRunIntegrityError('intrabar fill ' + fill.fillId + ' has an empty bar window');
+      continue;
+    }
+
+    if (major < 11) throw new BacktestRunIntegrityError('pre-v11 fill ' + fill.fillId + ' uses v11 bounded timing');
+    if (fill.reason !== 'stop' && fill.reason !== 'take_profit') {
+      throw new BacktestRunIntegrityError('bounded timing is only valid for protective exits');
+    }
+    if (t.basis !== 'OHLC_RANGE_TOUCH') throw new BacktestRunIntegrityError('bounded fill ' + fill.fillId + ' has an unknown timing basis');
+    if (fill.at !== t.earliestAt) throw new BacktestRunIntegrityError('bounded fill ' + fill.fillId + ' does not use its lower bound as the ordering key');
+
+    const barStart = parseUtc(t.barStart);
+    const barEnd = parseUtc(t.barEnd);
+    const earliest = parseUtc(t.earliestAt);
+    const latest = parseUtc(t.latestAt);
+    if (barStart >= barEnd) throw new BacktestRunIntegrityError('bounded fill ' + fill.fillId + ' has an empty data bar window');
+    if (earliest > latest) throw new BacktestRunIntegrityError('bounded fill ' + fill.fillId + ' has reversed economic bounds');
+    if (earliest < barStart || latest > barEnd) throw new BacktestRunIntegrityError('bounded fill ' + fill.fillId + ' lies outside its data bar window');
+
+    // For built-in calendars the economic bounds are independently reproducible from the stored
+    // execution-clock identity and raw bar window, so tampering with either bound fails closed.
+    const calendar = getCalendar(run.executionClock.calendarId);
+    if (calendar) {
+      if (
+        calendar.timezone !== run.executionClock.timezone ||
+        calendar.source !== run.executionClock.source ||
+        calendar.kind !== run.executionClock.kind
+      ) {
+        throw new BacktestRunIntegrityError('execution clock identity does not match the built-in calendar');
+      }
+      const date = calendar.dailyBarDate(barStart);
+      const daily = calendar.dailyBarWindow(date);
+      let expectedOpen: number;
+      let expectedClose: number;
+      if (daily.start === barStart && daily.end === barEnd) {
+        const session = calendar.session(date, 'regular');
+        if (!session || session.assumed) throw new BacktestRunIntegrityError('bounded daily fill has no proven regular-session window');
+        expectedOpen = session.open;
+        expectedClose = session.close;
+      } else {
+        expectedOpen = barStart;
+        const session = calendar.sessionAt(barStart, 'regular') ?? calendar.sessionAt(barStart, 'extended');
+        expectedClose = Math.min(barEnd, session?.close ?? barEnd);
+      }
+      if (earliest !== expectedOpen || latest !== expectedClose) {
+        throw new BacktestRunIntegrityError('bounded fill ' + fill.fillId + ' does not match the proven economic bar window');
+      }
     }
   }
   if (run.openPosition) {
