@@ -262,6 +262,17 @@ function normalizeOutput(raw: ShadowBenchmarkModelOutput, expectedModel: string,
   }
   assertHash(raw.evidenceFingerprint, 'INVALID_MODEL_OUTPUT', expectedCase + ' evidenceFingerprint');
   assertHash(raw.outputFingerprint, 'INVALID_MODEL_OUTPUT', expectedCase + ' outputFingerprint');
+  const expectedOutputFingerprint = hashOf({
+    modelKey: raw.modelKey,
+    caseId: raw.caseId,
+    recommendation: raw.recommendation,
+    confidenceScore: raw.confidenceScore,
+    modelVersion: raw.modelVersion,
+    evidenceFingerprint: raw.evidenceFingerprint,
+  });
+  if (raw.outputFingerprint !== expectedOutputFingerprint) {
+    throw new ShadowModelBenchmarkError('INVALID_MODEL_OUTPUT', expectedCase + ' outputFingerprint does not bind the returned output fields');
+  }
   return {
     modelKey: raw.modelKey,
     caseId: raw.caseId,
@@ -277,6 +288,8 @@ function normalizeScore(
   raw: Awaited<ReturnType<ShadowBenchmarkScorer['score']>>,
   expectedModel: string,
   expectedCase: string,
+  outcomeFingerprint: string,
+  outputFingerprint: string,
 ): { score: number; scoringFingerprint: string } {
   if (!raw || raw.modelKey !== expectedModel || raw.caseId !== expectedCase) {
     throw new ShadowModelBenchmarkError('INVALID_SCORE', expectedCase + ' score identity does not match request');
@@ -285,6 +298,16 @@ function normalizeScore(
     throw new ShadowModelBenchmarkError('INVALID_SCORE', expectedCase + ' score must be finite and within 0..1');
   }
   assertHash(raw.scoringFingerprint, 'INVALID_SCORE', expectedCase + ' scoringFingerprint');
+  const expectedScoringFingerprint = hashOf({
+    modelKey: raw.modelKey,
+    caseId: raw.caseId,
+    score: String(raw.score),
+    outcomeFingerprint,
+    outputFingerprint,
+  });
+  if (raw.scoringFingerprint !== expectedScoringFingerprint) {
+    throw new ShadowModelBenchmarkError('INVALID_SCORE', expectedCase + ' scoringFingerprint does not bind score, outcome and model output');
+  }
   return { score: raw.score, scoringFingerprint: raw.scoringFingerprint };
 }
 
@@ -357,6 +380,8 @@ export async function runShadowModelBenchmark(
       await scorer.score(scoreRequest),
       request.modelKey,
       one.caseId,
+      one.outcomeFingerprint,
+      frozenOutput.outputFingerprint,
     );
     if (scores.has(scoreResult.scoringFingerprint)) {
       throw new ShadowModelBenchmarkError('INVALID_SCORE', 'duplicate scoringFingerprint ' + scoreResult.scoringFingerprint);
