@@ -147,7 +147,7 @@ describe('O10 walk-forward and out-of-sample evaluation — RED', () => {
 
   it('changing only test-window replay content cannot change which variant is selected', async () => {
     const base = replay();
-    const changedSteps = base.steps.map((s, i) => (i >= 4 ? { ...s, candidateInstrumentIds: ['Z'] } : s));
+    const changedSteps = base.steps.map((s, i) => (i >= 4 ? { ...s, candidateInstrumentIds: [] } : s));
     const changed = replay({ steps: changedSteps });
 
     const a = await runWalkForwardOos(request({ sourceReplay: base }), new FakeEvaluator());
