@@ -16,7 +16,7 @@
 import { parseUtc } from '../market-data/time.js';
 import { hashOf } from './canonical-json.js';
 
-export const EVIDENCE_SEAL_KINDS = ['scanner_run', 'backtest_run', 'quant_run'] as const;
+export const EVIDENCE_SEAL_KINDS = ['scanner_run', 'backtest_run', 'quant_run', 'historical_scanner_replay'] as const;
 export type EvidenceSealKind = (typeof EVIDENCE_SEAL_KINDS)[number];
 
 export interface EvidenceSeal {
