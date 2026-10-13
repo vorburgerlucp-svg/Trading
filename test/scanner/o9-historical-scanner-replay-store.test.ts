@@ -339,6 +339,30 @@ describe('O9 historical scanner replay store — RED', () => {
   });
 });
 
+describe('ChatGPT independent review guards', () => {
+  it('uses locale-independent code-unit ordering for mixed-case market anchors and quant refs', async () => {
+    const result = await runHistoricalScannerReplay(
+      request({ marketStoredThroughByInstrument: { a: 11, B: 22 } }),
+      dependencies(['a', 'B']),
+    );
+
+    expect(Object.keys(result.marketStoredThroughByInstrument)).toEqual(['B', 'a']);
+    expect(result.steps[0]!.quantRunIds.map((ref) => ref.instrumentId)).toEqual(['B', 'a']);
+    expect(verifyHistoricalScannerReplayResult(result)).toBe(result);
+  });
+
+  it('a tampered seal is refused on idempotent re-save, not only on read', async () => {
+    const result = await validResult();
+    const rows = new Map<string, HistoricalScannerReplayRow>();
+    const store = new InMemoryHistoricalScannerReplayStore({ clock: CLOCK, rows });
+    await store.save(result);
+    const row = rows.get(result.replayRunId)!;
+    row.seal = { ...row.seal, sealedAt: '2026-10-13T10:00:01.000Z' };
+
+    await expect(store.save(clone(result))).rejects.toBeInstanceOf(HistoricalScannerReplayIntegrityError);
+  });
+});
+
 describe('verifier rules: every inconsistency fails closed (O9 persistence brief, rules 1-20)', () => {
   it('rule 1: an unknown engine version is refused', async () => {
     const forged = clone(await validResult());
