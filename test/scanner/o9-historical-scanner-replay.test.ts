@@ -171,6 +171,7 @@ function depsWithMembers(members: string[] = ['A', 'B']): {
   quant: FakeQuant;
   snapshots: FakeSnapshots;
   universe: ReturnType<typeof universeFixture>;
+  scannerRuns: InMemoryScannerRunStore;
 } {
   const universe = universeFixture();
   universe.ingest('2026-01-01T00:00:00.000Z', members);
@@ -180,15 +181,17 @@ function depsWithMembers(members: string[] = ['A', 'B']): {
     snapshots.set(id, T1, id === 'A' ? '100' : '50');
     snapshots.set(id, T2, id === 'A' ? '101' : '51');
   }
+  const scannerRuns = new InMemoryScannerRunStore();
   return {
     universe,
     quant,
     snapshots,
+    scannerRuns,
     deps: {
       universe: { select: (q: UniverseSelectionQuery) => universe.store.select(q) },
       quant,
       snapshots,
-      scannerRuns: new InMemoryScannerRunStore(),
+      scannerRuns,
     },
   };
 }
@@ -285,6 +288,90 @@ describe('O9 historical scanner replay — RED', () => {
     expect(universeQueries.every((q) => q.mode === 'decision_time')).toBe(true);
     expect(fixture.quant.calls.every((c) => c.replay === 'decision_time')).toBe(true);
     expect(fixture.snapshots.calls.every((c) => c.replay === 'decision_time')).toBe(true);
+  });
+
+  it('decision_time cannot see a universe revision whose store seal is after the replay instant', async () => {
+    let now = '2026-10-09T21:00:00.000Z';
+    const store = new InMemoryUniverseStore({ clock: () => now });
+    store.registerDefinition({ universeId: 'U', definitionVersion: '1', name: 'late universe' });
+    store.registerSource(UNIVERSE_SOURCE);
+    store.ingest(
+      {
+        universeId: 'U',
+        sourceId: UNIVERSE_SOURCE.sourceId,
+        effectiveAt: '2026-01-01T00:00:00.000Z',
+        retrievedAt: '2026-01-01T00:00:00.000Z',
+        knowledgeSource: 'captured_by_nexus',
+        knownAt: '2026-01-01T00:00:00.000Z',
+        completeness: 'COMPLETE',
+        members: [{ sourceMemberKey: 'k:A', providerSymbol: 'A' }],
+      },
+      (m) => m.providerSymbol,
+    );
+    const quant = new FakeQuant();
+    const snapshots = new FakeSnapshots();
+    snapshots.set('A', T1, '100');
+    const scannerRuns = new InMemoryScannerRunStore();
+    const result = await runHistoricalScannerReplay(
+      request({
+        asOf: [T1],
+        replay: 'decision_time',
+        marketStoredThroughByInstrument: { A: 11 },
+      }),
+      {
+        universe: { select: (q) => store.select(q) },
+        quant,
+        snapshots,
+        scannerRuns,
+      },
+    );
+
+    expect(result.steps[0]!.universeSnapshotRevisionId).toBeNull();
+    expect(result.steps[0]!.candidateInstrumentIds).toEqual([]);
+    expect(result.steps[0]!.rankingComplete).toBe(false);
+    expect(quant.calls).toHaveLength(0);
+  });
+
+  it('historical_research may use that late-sealed reconstruction but never upgrades it to strict evidence', async () => {
+    let now = '2026-10-09T21:00:00.000Z';
+    const store = new InMemoryUniverseStore({ clock: () => now });
+    store.registerDefinition({ universeId: 'U', definitionVersion: '1', name: 'late universe' });
+    store.registerSource(UNIVERSE_SOURCE);
+    store.ingest(
+      {
+        universeId: 'U',
+        sourceId: UNIVERSE_SOURCE.sourceId,
+        effectiveAt: '2026-01-01T00:00:00.000Z',
+        retrievedAt: '2026-10-09T21:00:00.000Z',
+        knowledgeSource: 'captured_by_nexus',
+        knownAt: '2026-10-09T21:00:00.000Z',
+        completeness: 'COMPLETE',
+        members: [{ sourceMemberKey: 'k:A', providerSymbol: 'A' }],
+      },
+      (m) => m.providerSymbol,
+    );
+    const quant = new FakeQuant();
+    const snapshots = new FakeSnapshots();
+    snapshots.set('A', T1, '100');
+    const scannerRuns = new InMemoryScannerRunStore();
+    const result = await runHistoricalScannerReplay(
+      request({
+        asOf: [T1],
+        replay: 'historical_research',
+        marketStoredThroughByInstrument: { A: 11 },
+      }),
+      {
+        universe: { select: (q) => store.select(q) },
+        quant,
+        snapshots,
+        scannerRuns,
+      },
+    );
+    const scanner = await scannerRuns.get(result.steps[0]!.scannerRunId);
+
+    expect(result.steps[0]!.candidateInstrumentIds).toEqual(['A']);
+    expect(scanner?.universeEvidence.historicalReconstruction).toBe(true);
+    expect(scanner?.universeEvidence.strictDecisionTime).toBe(false);
   });
 
   it('keeps a missing member visible as incomplete scanner coverage instead of shrinking the universe', async () => {
