@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Decimal } from '../../src/money/decimal.js';
+import { hashOf } from '../../src/persistence/canonical-json.js';
+import { sealFor } from '../../src/persistence/evidence-seal.js';
 import { decodeJson, encodeJson } from '../../src/persistence/json-codec.js';
 import {
   HISTORICAL_SCANNER_REPLAY_VERSION,
@@ -472,5 +474,37 @@ describe('adversarial forgeries are refused and never repaired', () => {
     forged.steps[0]!.scannerInputFingerprint = 'short';
     forged.steps[0]!.scannerRunId = 'scan_' + 'short'.slice(0, 40);
     expect(() => verifyHistoricalScannerReplayResult(forged)).toThrow(/scanner input fingerprint is invalid/);
+  });
+
+  it('an empty replay schedule is refused, even when the steps are empty too', async () => {
+    const forged = clone(await validResult());
+    forged.asOf = [];
+    forged.steps = [];
+    expect(() => verifyHistoricalScannerReplayResult(forged)).toThrow(/schedule is empty/);
+  });
+
+  it('a row copied under another id, with a seal re-issued for that id, is refused on read by the id binding', async () => {
+    const result = await validResult();
+    const rows = new Map<string, HistoricalScannerReplayRow>();
+    const store = new InMemoryHistoricalScannerReplayStore({ clock: CLOCK, rows });
+    await store.save(result);
+    const other = 'hsr_' + 'e'.repeat(40);
+    const row = rows.get(result.replayRunId)!;
+    const seal = sealFor({ kind: 'historical_scanner_replay', recordId: other, resultHash: row.resultHash, recordedAt: '2026-10-13T10:00:00.000Z', sealedAt: '2026-10-13T10:00:00.000Z' });
+    rows.set(other, { ...row, seal });
+    await expect(store.get(other)).rejects.toThrow(/own replayRunId/);
+  });
+
+  it('a record rewritten with a fresh hash and a fresh seal is still refused on read by the verifier', async () => {
+    const result = await validResult();
+    const rows = new Map<string, HistoricalScannerReplayRow>();
+    const store = new InMemoryHistoricalScannerReplayStore({ clock: CLOCK, rows });
+    await store.save(result);
+    const forged = clone(result);
+    forged.asOf = [T2, T1];
+    const resultHash = hashOf(forged);
+    const seal = sealFor({ kind: 'historical_scanner_replay', recordId: result.replayRunId, resultHash, recordedAt: '2026-10-13T10:00:00.000Z', sealedAt: '2026-10-13T10:00:00.000Z' });
+    rows.set(result.replayRunId, { payload: JSON.stringify(encodeJson(forged)), resultHash, seal });
+    await expect(store.get(result.replayRunId)).rejects.toThrow(/strictly increasing/);
   });
 });
