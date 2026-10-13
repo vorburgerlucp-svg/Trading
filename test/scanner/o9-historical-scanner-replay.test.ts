@@ -53,7 +53,7 @@ function fakeQuantResult(instrumentId: string, asOf: string, storedThrough: numb
     inputEnd: asOf,
     barCount: 100,
     inputFingerprint: fingerprint,
-    dataQuality: { valid: true, usableForTrading: false, severity: 'warning', issues: [] },
+    dataQuality: { valid: true, usableForBacktest: true, usableForTrading: false, severity: 'warning', issues: [] },
     barDataProvenance: {
       decisionTimeKnowledgeProven: false,
       allBarsContemporaneousVintage: false,
@@ -98,15 +98,25 @@ class FakeQuant implements HistoricalScannerQuantPort {
 
 class FakeSnapshots implements HistoricalScannerSnapshotPort {
   readonly calls: Array<{ instrumentId: string; asOf: string; storedThrough: number; replay: string }> = [];
-  private readonly prices = new Map<string, Decimal>();
+  private readonly prices = new Map<string, Array<{ ingestSeq: number; price: Decimal }>>();
 
-  set(instrumentId: string, asOf: string, price: string): void {
-    this.prices.set(instrumentId + '|' + asOf, Decimal.from(price));
+  set(instrumentId: string, asOf: string, price: string, ingestSeq = 1): void {
+    const key = instrumentId + '|' + asOf;
+    const rows = this.prices.get(key) ?? [];
+    rows.push({ ingestSeq, price: Decimal.from(price) });
+    rows.sort((a, b) => a.ingestSeq - b.ingestSeq);
+    this.prices.set(key, rows);
+  }
+
+  remove(instrumentId: string, asOf: string): void {
+    this.prices.delete(instrumentId + '|' + asOf);
   }
 
   async build(input: Parameters<HistoricalScannerSnapshotPort['build']>[0]): Promise<ScannerSnapshot | null> {
     this.calls.push({ instrumentId: input.instrumentId, asOf: input.asOf, storedThrough: input.storedThrough, replay: input.replay });
-    const price = this.prices.get(input.instrumentId + '|' + input.asOf);
+    const rows = this.prices.get(input.instrumentId + '|' + input.asOf) ?? [];
+    const visible = rows.filter((row) => row.ingestSeq <= input.storedThrough).at(-1);
+    const price = visible?.price;
     if (!price) return null;
     return {
       instrumentId: input.instrumentId,
@@ -238,21 +248,23 @@ describe('O9 historical scanner replay — RED', () => {
 
     expect(after.replayRunId).toBe(before.replayRunId);
     expect(after.steps).toEqual(before.steps);
-    expect(after.steps.every((s) => s.candidateInstrumentIds).every((ids) => ids.length === 1 && ids[0] === 'A')).toBe(true);
+    expect(after.steps.map((s) => s.candidateInstrumentIds).every((ids) => ids.length === 1 && ids[0] === 'A')).toBe(true);
   });
 
   it('a later market backfill above the pinned anchor cannot rewrite an old replay', async () => {
-    const first = depsWithMembers(['A']);
-    const before = await runHistoricalScannerReplay(request({ marketStoredThroughByInstrument: { A: 11 } }), first.deps);
+    const fixture = depsWithMembers(['A']);
+    const pinned = request({ marketStoredThroughByInstrument: { A: 11 } });
+    const before = await runHistoricalScannerReplay(pinned, fixture.deps);
 
-    // Simulate a newer storage head existing elsewhere. The pinned replay still has to send 11.
-    const second = depsWithMembers(['A']);
-    second.snapshots.set('A', T1, '999');
-    second.snapshots.set('A', T2, '999');
-    const after = await runHistoricalScannerReplay(request({ marketStoredThroughByInstrument: { A: 11 } }), second.deps);
+    // New revisions exist at ingest sequence 12, but the replay is pinned at 11.
+    fixture.snapshots.set('A', T1, '999', 12);
+    fixture.snapshots.set('A', T2, '999', 12);
+    const after = await runHistoricalScannerReplay(pinned, fixture.deps);
 
+    expect(after.replayRunId).toBe(before.replayRunId);
+    expect(after.steps).toEqual(before.steps);
     expect(after.steps.map((s) => s.quantRunIds.map((q) => q.storedThrough))).toEqual([[11], [11]]);
-    expect(second.quant.calls.every((c) => c.storedThrough === 11)).toBe(true);
+    expect(fixture.quant.calls.every((c) => c.storedThrough === 11)).toBe(true);
   });
 
   it('decision_time passes the same strict replay mode to universe, Quant and snapshots', async () => {
@@ -278,7 +290,7 @@ describe('O9 historical scanner replay — RED', () => {
   it('keeps a missing member visible as incomplete scanner coverage instead of shrinking the universe', async () => {
     const fixture = depsWithMembers(['A', 'B']);
     // B has no snapshot at T2.
-    (fixture.snapshots as any).prices.delete('B|' + T2);
+    fixture.snapshots.remove('B', T2);
     const result = await runHistoricalScannerReplay(request(), fixture.deps);
 
     expect(result.steps[0]!.rankingComplete).toBe(true);
