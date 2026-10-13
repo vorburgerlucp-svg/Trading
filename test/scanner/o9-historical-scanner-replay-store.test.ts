@@ -430,4 +430,47 @@ describe('adversarial forgeries are refused and never repaired', () => {
     rows.set('hsr_' + 'e'.repeat(40), rows.get(result.replayRunId)!);
     await expect(store.get('hsr_' + 'e'.repeat(40))).rejects.toBeInstanceOf(HistoricalScannerReplayIntegrityError);
   });
+
+  it('an as-of instant that is not canonical UTC milliseconds is refused, even when it parses', async () => {
+    const forged = clone(await validResult());
+    forged.asOf = ['2026-10-08T20:00:00Z', T2];
+    expect(() => verifyHistoricalScannerReplayResult(forged)).toThrow(/canonical UTC instant/);
+  });
+
+  it('an unknown replay mode is refused', async () => {
+    const forged = clone(await validResult());
+    (forged as { replay: string }).replay = 'live_trading';
+    expect(() => verifyHistoricalScannerReplayResult(forged)).toThrow(/replay mode/);
+  });
+
+  it('a blank universe identity is refused', async () => {
+    const forged = clone(await validResult());
+    forged.universeSourceId = ' ';
+    expect(() => verifyHistoricalScannerReplayResult(forged)).toThrow(/universe identity/);
+  });
+
+  it('a ranking flag that is not a boolean is refused', async () => {
+    const forged = clone(await validResult());
+    (forged.steps[0] as { rankingComplete: unknown }).rankingComplete = 'true';
+    expect(() => verifyHistoricalScannerReplayResult(forged)).toThrow(/ranking flag/);
+  });
+
+  it('an empty universe snapshot revision is refused', async () => {
+    const forged = clone(await validResult());
+    forged.steps[0]!.universeSnapshotRevisionId = '';
+    expect(() => verifyHistoricalScannerReplayResult(forged)).toThrow(/universe snapshot revision/);
+  });
+
+  it('a quant reference without a quant run id is refused', async () => {
+    const forged = clone(await validResult());
+    forged.steps[0]!.quantRunIds[0]!.quantRunId = '';
+    expect(() => verifyHistoricalScannerReplayResult(forged)).toThrow(/incomplete quant reference/);
+  });
+
+  it('a scanner input fingerprint that is not a hash is refused, even when the run id is derived from it', async () => {
+    const forged = clone(await validResult());
+    forged.steps[0]!.scannerInputFingerprint = 'short';
+    forged.steps[0]!.scannerRunId = 'scan_' + 'short'.slice(0, 40);
+    expect(() => verifyHistoricalScannerReplayResult(forged)).toThrow(/scanner input fingerprint is invalid/);
+  });
 });
