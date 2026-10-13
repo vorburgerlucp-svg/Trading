@@ -158,7 +158,13 @@ describe('O11 shadow model benchmark — RED', () => {
           modelKey: input.modelKey,
           caseId: input.caseId,
           score: 1,
-          scoringFingerprint: hashOf({ frozen: true, caseId: input.caseId }),
+          scoringFingerprint: hashOf({
+            modelKey: input.modelKey,
+            caseId: input.caseId,
+            score: '1',
+            outcomeFingerprint: input.outcomeFingerprint,
+            outputFingerprint: input.modelOutput.outputFingerprint,
+          }),
         };
       },
     };
