@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BACKTEST_ENGINE_VERSION, runBacktest } from '../../src/backtest/backtest-engine.js';
-import { verifyBacktestRun } from '../../src/backtest/backtest-store.js';
+import { BacktestRunIntegrityError, verifyBacktestRun } from '../../src/backtest/backtest-store.js';
 import type { BacktestStrategy } from '../../src/backtest/strategy.js';
 import type { MarketBar } from '../../src/market-data/market-data-types.js';
 import { getCalendar } from '../../src/market-data/sessions.js';
@@ -205,17 +205,75 @@ describe('O6 bounded intrabar stop timing — RED', () => {
     expect(result.ambiguousBars).toBe(1);
   });
 
-  it('the current legacy v10 unknown-timing run remains internally verifiable before the version change', () => {
+  it('gap-through take-profit stays exact at the actual session open', () => {
+    const bars = [
+      dailyBar('2026-10-08', '100', '101', '99', '100'),
+      dailyBar('2026-10-09', '120', '121', '119', '120'),
+    ];
+    const result = run(bars);
+    const exit = result.fills.find((f) => f.side === 'sell')!;
+    const session = calendar.session('2026-10-09', 'regular')!;
+
+    expect(exit.reason).toBe('take_profit');
+    expect(exit.rawPrice.toString()).toBe('120');
+    expect(exit.timing.kind).toBe('OPEN_EXACT');
+    if (exit.timing.kind === 'OPEN_EXACT') expect(exit.timing.executionAt).toBe(iso(session.open));
+  });
+
+  it('a tampered v11 bounded window fails verification closed', () => {
     const bars = [
       dailyBar('2026-10-08', '100', '101', '99', '100'),
       dailyBar('2026-10-09', '100', '105', '94', '101'),
     ];
     const result = run(bars);
-    // RED stage preservation guard: before v11 lands this is a genuine v10 record. The implementation
-    // must later keep historical v10 records verifiable rather than reinterpret them as v11.
-    if (result.engineVersion === 'backtest-engine:v10') {
-      expect(result.fills.find((f) => f.side === 'sell')?.timing.kind).toBe('INTRABAR_UNKNOWN');
-      expect(() => verifyBacktestRun(result)).not.toThrow();
-    }
+    const session = calendar.session('2026-10-09', 'regular')!;
+    const index = result.fills.findIndex((f) => f.side === 'sell');
+    const exit = result.fills[index]!;
+    expect(exit.timing.kind).toBe('INTRABAR_BOUNDED');
+    if (exit.timing.kind !== 'INTRABAR_BOUNDED') throw new Error('expected bounded exit');
+
+    const forgedExit = { ...exit, timing: { ...exit.timing, latestAt: iso(session.close + 60_000) } };
+    const forged = { ...result, fills: result.fills.map((fill, i) => (i === index ? forgedExit : fill)) };
+    expect(() => verifyBacktestRun(forged)).toThrow(BacktestRunIntegrityError);
+  });
+
+  it('a v11 run refuses the legacy INTRABAR_UNKNOWN representation', () => {
+    const result = run([
+      dailyBar('2026-10-08', '100', '101', '99', '100'),
+      dailyBar('2026-10-09', '100', '105', '94', '101'),
+    ]);
+    const index = result.fills.findIndex((f) => f.side === 'sell');
+    const exit = result.fills[index]!;
+    if (exit.timing.kind !== 'INTRABAR_BOUNDED') throw new Error('expected bounded exit');
+    const legacyExit = { ...exit, at: exit.timing.barStart, timing: { kind: 'INTRABAR_UNKNOWN' as const, barStart: exit.timing.barStart, barEnd: exit.timing.barEnd } };
+    const forged = { ...result, fills: result.fills.map((fill, i) => (i === index ? legacyExit : fill)) };
+    expect(() => verifyBacktestRun(forged)).toThrow(/legacy INTRABAR_UNKNOWN/);
+  });
+
+  it('a historical v10 INTRABAR_UNKNOWN record remains verifiable and is not reinterpreted', () => {
+    const result = run([
+      dailyBar('2026-10-08', '100', '101', '99', '100'),
+      dailyBar('2026-10-09', '100', '105', '94', '101'),
+    ]);
+    const index = result.fills.findIndex((f) => f.side === 'sell');
+    const exit = result.fills[index]!;
+    if (exit.timing.kind !== 'INTRABAR_BOUNDED') throw new Error('expected bounded exit');
+    const legacyExit = { ...exit, at: exit.timing.barStart, timing: { kind: 'INTRABAR_UNKNOWN' as const, barStart: exit.timing.barStart, barEnd: exit.timing.barEnd } };
+    const legacy = { ...result, engineVersion: 'backtest-engine:v10', fills: result.fills.map((fill, i) => (i === index ? legacyExit : fill)) };
+
+    expect(() => verifyBacktestRun(legacy)).not.toThrow();
+  });
+
+  it('identical v11 runs have identical bounded timing, fingerprint and run id', () => {
+    const bars = [
+      dailyBar('2026-10-08', '100', '101', '99', '100'),
+      dailyBar('2026-10-09', '100', '105', '94', '101'),
+    ];
+    const a = run(bars);
+    const b = run(bars);
+
+    expect(b.fills.map((f) => f.timing)).toEqual(a.fills.map((f) => f.timing));
+    expect(b.inputFingerprint).toBe(a.inputFingerprint);
+    expect(b.backtestRunId).toBe(a.backtestRunId);
   });
 });
