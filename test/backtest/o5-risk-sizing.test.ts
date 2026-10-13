@@ -11,9 +11,13 @@ import type { BacktestStrategy, StrategyContext, StrategyDecision } from '../../
 import { getCalendar } from '../../src/market-data/sessions.js';
 import type { MarketBar } from '../../src/market-data/market-data-types.js';
 import { Decimal } from '../../src/money/decimal.js';
+import { decodeJson, encodeJson } from '../../src/persistence/json-codec.js';
 
 const START_MS = Date.parse('2026-10-08T13:30:00.000Z');
 const iso = (ms: number) => new Date(ms).toISOString();
+
+/** A deep copy that keeps every Decimal a Decimal: the forged values must reach the recomputation, not fail on their type. */
+const losslessClone = (r: BacktestRunResult): BacktestRunResult => decodeJson(encodeJson(r)) as BacktestRunResult;
 
 /** A 5-minute final bar. Open, high, low and close are explicit; a flat bar has all four equal. */
 function bar(index: number, open: string, options: { high?: string; low?: string; close?: string } = {}): MarketBar {
@@ -243,18 +247,18 @@ describe('the audit record is complete and verified (O5 §13–§15, brief 7)', 
 
   it('a tampered audit fails verification closed, and so does a tampered quantity', () => {
     const r = run(flat(), entry('95'), risk());
-    const forged = structuredClone(r);
+    const forged = losslessClone(r);
     const fill = forged.fills.find((f) => f.side === 'buy')! as BacktestFill & { riskSizing: { modeledStressDownside: Decimal } };
     fill.riskSizing.modeledStressDownside = Decimal.from('1');
     expect(() => verifyBacktestRun(forged)).toThrow(BacktestRunIntegrityError);
-    const forgedQuantity = structuredClone(r);
+    const forgedQuantity = losslessClone(r);
     forgedQuantity.fills.find((f) => f.side === 'buy')!.quantity = Decimal.from('21');
     expect(() => verifyBacktestRun(forgedQuantity)).toThrow(BacktestRunIntegrityError);
   });
 
   it('a structurally inconsistent audit is refused in memory, before it can be stored', async () => {
     const r = run(flat(), entry('95'), risk());
-    const forged = structuredClone(r);
+    const forged = losslessClone(r);
     const fill = forged.fills.find((f) => f.side === 'buy')! as BacktestFill & { riskSizing: { riskBudget: Decimal } };
     fill.riskSizing.riskBudget = Decimal.from('1');
     await expect(new InMemoryBacktestRunStore().save(forged)).rejects.toThrow(BacktestRunIntegrityError);

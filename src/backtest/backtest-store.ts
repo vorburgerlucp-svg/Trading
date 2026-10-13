@@ -5,7 +5,9 @@ import { hashOf } from '../persistence/canonical-json.js';
 import { isoMs, sealFor, verifySeal, type EvidenceSeal, type Sealed } from '../persistence/evidence-seal.js';
 import { CORPORATE_ACTION_ENGINE_VERSION, CORPORATE_ACTION_POLICY_VERSION, CORPORATE_ACTION_REASON_TEXT } from './corporate-action-engine.js';
 import { EXECUTION_CLOCK_VERSION } from './execution-clock.js';
-import type { BacktestCorporateActionResult, BacktestRunResult } from './backtest-types.js';
+import { DeterministicCostModel } from './cost-model.js';
+import { maxRiskSizedLongQuantity, RISK_SIZING_VERSION } from './sizing.js';
+import type { BacktestCorporateActionResult, BacktestFill, BacktestRunResult, EntryRiskSizingAudit } from './backtest-types.js';
 
 export class BacktestRunConflictError extends Error {
   override readonly name = 'BacktestRunConflictError';
@@ -119,11 +121,70 @@ function verifyExecutionClock(run: BacktestRunResult): void {
   }
 }
 
+/**
+ * A risk-sized entry must reproduce from its own record (risk-sizing:v1, docs/O5_EXECUTABLE_RISK_SIZING_V1.md §14). The record is recomputed from its inputs
+ * with the calculation the engine used, and the recomputed record must equal the stored one exactly. The fill must agree with the record. Any mismatch fails
+ * closed. A record is refused on a fill that cannot carry one.
+ */
+function verifyEntryRiskSizing(run: BacktestRunResult, fill: BacktestFill, audit: EntryRiskSizingAudit): void {
+  // Every monetary value must be a Decimal. A structurally altered value fails closed here, not as a TypeError further on.
+  const monetary: Array<[string, unknown]> = [
+    ['fill.quantity', fill.quantity], ['fill.executionPrice', fill.executionPrice], ['fill.rawPrice', fill.rawPrice], ['fill.commission', fill.commission],
+    ['sizingEquity', audit.sizingEquity], ['spendableCash', audit.spendableCash], ['riskBudget', audit.riskBudget], ['cashBudget', audit.cashBudget],
+    ['rawEntryPrice', audit.rawEntryPrice], ['entryExecutionPrice', audit.entryExecutionPrice], ['stopLoss', audit.stopLoss],
+    ['stressRawExitPrice', audit.stressRawExitPrice], ['stressExecutionPrice', audit.stressExecutionPrice], ['quantity', audit.quantity],
+    ['entryCommission', audit.entryCommission], ['stressExitCommission', audit.stressExitCommission], ['modeledStressDownside', audit.modeledStressDownside],
+    ['riskLimitedQuantity', audit.riskLimitedQuantity], ['cashLimitedQuantity', audit.cashLimitedQuantity],
+  ];
+  for (const [name, value] of monetary) {
+    if (!(value instanceof Decimal)) throw new BacktestRunIntegrityError('risk sizing value ' + name + ' of fill ' + fill.fillId + ' is not a decimal');
+  }
+  if (audit.version !== RISK_SIZING_VERSION) throw new BacktestRunIntegrityError('risk sizing of fill ' + fill.fillId + ' is not ' + RISK_SIZING_VERSION);
+  if (run.sizing.type !== 'risk_per_trade') throw new BacktestRunIntegrityError('risk sizing record on a run that is not risk-sized');
+  const sizing = run.sizing;
+  if (audit.riskBasisPoints !== sizing.riskBasisPoints || audit.maxCashBasisPoints !== sizing.maxCashBasisPoints || audit.stopGapStressBasisPoints !== sizing.stopGapStressBasisPoints) {
+    throw new BacktestRunIntegrityError('risk sizing basis points of fill ' + fill.fillId + ' do not match the run sizing');
+  }
+  if (!fill.quantity.eq(audit.quantity) || !fill.executionPrice.eq(audit.entryExecutionPrice) || !fill.rawPrice.eq(audit.rawEntryPrice) || !fill.commission.eq(audit.entryCommission)) {
+    throw new BacktestRunIntegrityError('fill ' + fill.fillId + ' does not agree with its risk sizing record');
+  }
+  const recomputed = maxRiskSizedLongQuantity({
+    costModel: new DeterministicCostModel(run.costModel),
+    rawEntryPrice: audit.rawEntryPrice,
+    stopLoss: audit.stopLoss,
+    config: { riskBasisPoints: audit.riskBasisPoints, maxCashBasisPoints: audit.maxCashBasisPoints, stopGapStressBasisPoints: audit.stopGapStressBasisPoints },
+    sizingEquity: audit.sizingEquity,
+    spendableCash: audit.spendableCash,
+  });
+  if (recomputed.audit === null) throw new BacktestRunIntegrityError('risk sizing of fill ' + fill.fillId + ' is refused by its own inputs: ' + recomputed.refusal);
+  if (hashOf(recomputed.audit) !== hashOf(audit)) throw new BacktestRunIntegrityError('risk sizing of fill ' + fill.fillId + ' does not reproduce from its inputs');
+}
+
+/**
+ * Risk sizing records. A v10 risk_per_trade market-entry BUY must carry one. Every other fill must carry none. A run before v10 is not reinterpreted: it must
+ * carry no record, and its risk_per_trade fills are verified exactly as before.
+ */
+function verifyRiskSizing(run: BacktestRunResult): void {
+  const riskRun = run.sizing.type === 'risk_per_trade';
+  const v10 = engineMajorVersion(run.engineVersion) >= 10;
+  for (const fill of run.fills) {
+    const audit = fill.riskSizing;
+    const requiresRecord = v10 && riskRun && fill.side === 'buy' && fill.reason === 'market_entry';
+    if (audit === undefined) {
+      if (requiresRecord) throw new BacktestRunIntegrityError('risk-sized entry ' + fill.fillId + ' has no sizing record');
+      continue;
+    }
+    if (!requiresRecord) throw new BacktestRunIntegrityError('fill ' + fill.fillId + ' carries a risk sizing record it cannot have');
+    verifyEntryRiskSizing(run, fill, audit);
+  }
+}
+
 export function verifyBacktestRun(run: BacktestRunResult): BacktestRunResult {
   if (run.universe !== undefined && !universeEvidenceIsConsistent(run.universe)) {
     throw new BacktestRunIntegrityError('universe evidence is not consistent with its fingerprint and derived facts (it was edited after derivation)');
   }
   verifyExecutionClock(run);
+  verifyRiskSizing(run);
   if (run.engineVersion === 'backtest-engine:v5') {
     if (typeof run.portfolioCurrency !== 'string' || !/^[A-Z]{3}$/.test(run.portfolioCurrency)) throw new BacktestRunIntegrityError('portfolio currency is missing or invalid');
   }

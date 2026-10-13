@@ -220,3 +220,15 @@ record, and a v9 `risk_per_trade` run is verified exactly as before.
 - The cost model is static and deterministic. Impact does not depend on volume.
 - Single instrument and long-only. The equity basis is spendable cash (§12).
 - Quantity precision is 12 decimals, rounded down. A position is therefore slightly smaller than the exact continuous optimum.
+
+## 19. Verification record
+
+- **Oracle.** The expected quantities in the tests come from an independent exact-fraction oracle that uses no repository code. It rounds down to 12 decimals.
+  Examples: zero costs give 20; a 1% commission gives 14.388489208633; a 200 bp gap stress gives 14.492753623188; a minimum commission of 2 gives 19.2; a
+  cash cap with a minimum commission of 2 gives 4.98.
+- **RED.** 33 tests failed on the v9 engine before the change (see the RED commit). The preservation tests passed on v9 and still pass.
+- **Mutation campaign.** The 15 mutations of the brief each fail at least one test. Mutation 13 (the verifier does not detect audit tampering) was first missed,
+  because the tamper tests cloned their runs with `structuredClone`, which turns `Decimal` values into plain objects, so the tests failed on the type guard
+  and never reached the recomputation. The tests now clone losslessly through the JSON codec, and mutation 13 is caught.
+- **Persistence.** A v10 risk-sized run round-trips losslessly through PostgreSQL with its audit, and a privileged change to a stored audit field is caught by
+  the stored hash.

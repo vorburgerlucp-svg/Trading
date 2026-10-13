@@ -23,7 +23,7 @@ describe.skipIf(!pgAvailable)('execution clock on PostgreSQL' + (pgAvailable ? '
     const back = await new PostgresBacktestRunStore(db.pool).get(r.backtestRunId);
     expect(back!.fills.map((f) => f.timing)).toEqual(r.fills.map((f) => f.timing));
     expect(back!.executionClock).toEqual(r.executionClock);
-    expect(back!.engineVersion).toBe('backtest-engine:v9');
+    expect(back!.engineVersion).toBe('backtest-engine:v10');
   });
 
   it('a tampered execution instant of a fill is rejected on read', async () => {
@@ -43,7 +43,7 @@ describe.skipIf(!pgAvailable)('execution clock on PostgreSQL' + (pgAvailable ? '
   it('a v8 run whose fill disagrees with its recorded open is refused at save: the clock check applies from v7 on, not only to v7', async () => {
     db = await createTestDatabase();
     const r = run(series(SPLIT_ROWS.slice(0, 4)), strategy({ enterAt: 1, exitAt: 100 }));
-    expect(r.engineVersion).toBe('backtest-engine:v9');
+    expect(r.engineVersion).toBe('backtest-engine:v10');
     const [first, ...rest] = r.fills;
     const broken = { ...r, fills: [{ ...first!, at: '2026-10-05T04:00:00.000Z' }, ...rest] };
     await expect(new PostgresBacktestRunStore(db.pool).save(broken)).rejects.toThrow(/does not execute at its recorded open/);
