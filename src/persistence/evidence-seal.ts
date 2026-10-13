@@ -1,4 +1,4 @@
-// Commit-time seals for stored evidence (scanner, backtest and quant runs).
+// Commit-time seals for stored evidence (scanner, backtest, quant and historical replay runs).
 //
 // A seal binds a stored run to two clock readings and proves nothing else:
 //   recordedAt  read BEFORE the run's transaction commits. It is a LOWER bound on the commit time:
@@ -16,12 +16,12 @@
 import { parseUtc } from '../market-data/time.js';
 import { hashOf } from './canonical-json.js';
 
-export const EVIDENCE_SEAL_KINDS = ['scanner_run', 'backtest_run', 'quant_run'] as const;
+export const EVIDENCE_SEAL_KINDS = ['scanner_run', 'backtest_run', 'quant_run', 'historical_scanner_replay'] as const;
 export type EvidenceSealKind = (typeof EVIDENCE_SEAL_KINDS)[number];
 
 export interface EvidenceSeal {
   kind: EvidenceSealKind;
-  /** scannerRunId, backtestRunId or quantRunId. */
+  /** scannerRunId, backtestRunId, quantRunId or historical replayRunId. */
   recordId: string;
   /** Result hash of the sealed run at the time of sealing. */
   resultHash: string;
