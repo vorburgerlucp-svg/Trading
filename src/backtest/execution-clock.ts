@@ -55,6 +55,29 @@ export function executionOpenOf(bar: Pick<MarketBar, 'interval' | 'startTime' | 
   return { openMs: start, source: 'intraday_bar_start' };
 }
 
+/**
+ * The proven tradable window of a bar. Daily bars use the calendar's regular-session open/close;
+ * intraday bars use the validated calendar bar window. O6 uses this for bounded OHLC touches.
+ */
+export function executionWindowOf(
+  bar: Pick<MarketBar, 'interval' | 'startTime' | 'session'>,
+  calendar: TradingCalendar,
+): { openMs: number; closeMs: number; source: OpenSource } {
+  const start = parseUtc(bar.startTime);
+  if (bar.interval === '1d') {
+    const date = calendar.dailyBarDate(start);
+    const session = calendar.session(date, 'regular');
+    if (!session) throw new ExecutionClockError(bar.startTime + ' trades on ' + date + ', which has no regular session in ' + calendar.calendarId);
+    if (session.assumed) throw new ExecutionClockError(date + ' is outside the verified coverage of ' + calendar.calendarId + '; its session window is not proven');
+    return { openMs: session.open, closeMs: session.close, source: 'regular_session_open' };
+  }
+  const scope = bar.session === 'extended' ? 'extended' : 'regular';
+  const window = calendar.barWindow(start, bar.interval as BarInterval, scope);
+  if (!window.ok) throw new ExecutionClockError(bar.startTime + ' is not a ' + bar.interval + ' bar start in ' + calendar.calendarId + ' (' + window.reason + ')');
+  if (window.assumed) throw new ExecutionClockError(bar.startTime + ' is outside the verified coverage of ' + calendar.calendarId + '; its bar window is not proven');
+  return { openMs: start, closeMs: window.end, source: 'intraday_bar_start' };
+}
+
 /** The executable open in ms (see executionOpenOf). */
 export function executionOpenMs(bar: Pick<MarketBar, 'interval' | 'startTime' | 'session'>, calendar: TradingCalendar): number {
   return executionOpenOf(bar, calendar).openMs;
