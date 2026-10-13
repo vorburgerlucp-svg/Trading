@@ -5,9 +5,10 @@ import {
   PortfolioAllocationAmbiguousError,
   runPortfolioBacktest,
 } from '../../src/backtest/portfolio-backtest.js';
+import type { CorporateActionInput } from '../../src/backtest/backtest-types.js';
 import type { BacktestStrategy } from '../../src/backtest/strategy.js';
 import { getCalendar } from '../../src/market-data/sessions.js';
-import type { MarketBar } from '../../src/market-data/market-data-types.js';
+import type { MarketBar, StoredCorporateAction } from '../../src/market-data/market-data-types.js';
 import { Decimal } from '../../src/money/decimal.js';
 
 const CAL = getCalendar('24x7')!;
@@ -81,7 +82,7 @@ function strategy(plan: Plan): BacktestStrategy {
 function portfolio(
   seriesByInstrument: Readonly<Record<string, readonly MarketBar[]>>,
   plan: Plan,
-  options: { capital?: string; amount?: string; replay?: 'historical_research' | 'decision_time' } = {},
+  options: { capital?: string; amount?: string; replay?: 'historical_research' | 'decision_time'; corporateActionsByInstrument?: Readonly<Record<string, CorporateActionInput>> } = {},
 ) {
   return runPortfolioBacktest({
     seriesByInstrument,
@@ -93,6 +94,7 @@ function portfolio(
     costModel: zeroCost,
     quality,
     replay: options.replay,
+    corporateActionsByInstrument: options.corporateActionsByInstrument,
   });
 }
 
@@ -121,6 +123,9 @@ describe('O7 multi-instrument portfolio event loop — RED', () => {
     const result = portfolio({ A, B }, { A: { enterAt: 1 }, B: { enterAt: 1 } });
     expect(result.instrumentIds).toEqual(['A', 'B']);
     expect(result.fills.filter((f) => f.side === 'buy').map((f) => f.instrumentId)).toEqual(['A', 'B']);
+    expect(result.fills.find((f) => f.instrumentId === 'A' && f.side === 'buy')!.at).toBe(A[1]!.startTime);
+    expect(result.fills.find((f) => f.instrumentId === 'B' && f.side === 'buy')!.at).toBe(B[1]!.startTime);
+    expect(result.fills.some((f) => f.at === A[0]!.startTime)).toBe(false);
   });
 
   it('treats bars with the same usable timestamp as one world batch, not two portfolio marks', () => {
@@ -226,6 +231,40 @@ describe('O7 multi-instrument portfolio event loop — RED', () => {
     expect(ba.equityCurve).toEqual(ab.equityCurve);
     expect(ba.inputFingerprint).toBe(ab.inputFingerprint);
     expect(ba.portfolioRunId).toBe(ab.portfolioRunId);
+  });
+
+  it('a split on A changes only A; B keeps its independent quantity', () => {
+    const A = [bar('A', 0, '100'), bar('A', 1, '100'), bar('A', 288, '25')];
+    const B = [bar('B', 0, '50'), bar('B', 1, '50'), bar('B', 288, '50')];
+    const knownAt = '2026-10-07T00:00:00.000Z';
+    const split: StoredCorporateAction = {
+      actionKey: 'A:split:2026-10-09',
+      instrumentId: 'A',
+      source: 'fixture:actions',
+      type: 'split',
+      exDate: '2026-10-09',
+      ratioFrom: Decimal.from('1'),
+      ratioTo: Decimal.from('4'),
+      retrievedAt: knownAt,
+      knowledge: { provenance: 'captured_by_nexus', knowledgeAt: knownAt },
+      revision: 1,
+      ingestSeq: 1,
+      contentHash: 'a'.repeat(64),
+      storedAvailableAt: knownAt,
+      provenanceHash: null,
+    };
+    const result = portfolio(
+      { A, B },
+      { A: { enterAt: 1 }, B: { enterAt: 1 } },
+      { corporateActionsByInstrument: { A: { actions: [split], calendar: CAL } } },
+    );
+
+    expect(result.openPositions.map((p) => [p.instrumentId, p.quantity.toString()])).toEqual([
+      ['A', '4'],
+      ['B', '2'],
+    ]);
+    expect(result.corporateActionsByInstrument?.A?.applied).toHaveLength(1);
+    expect(result.corporateActionsByInstrument?.B).toBeUndefined();
   });
 
   it('a future change in B changes portfolio identity but not A fills that occurred before B became usable', () => {
