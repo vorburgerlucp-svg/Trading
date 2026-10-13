@@ -176,9 +176,13 @@ function snapshotMatches(snapshot: ScannerSnapshot, record: QuantRunRecord, inst
   }
 }
 
+function compareCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 function canonicalMarketAnchors(values: Readonly<Record<string, number>>): Array<[string, number]> {
   return Object.entries(values)
-    .sort(([a], [b]) => a.localeCompare(b))
+    .sort(([a], [b]) => compareCodeUnit(a, b))
     .map(([instrumentId, value]) => [
       instrumentId,
       anchor(value, 'MARKET_ANCHOR_REQUIRED', 'marketStoredThroughByInstrument[' + instrumentId + ']'),
@@ -215,7 +219,7 @@ export async function runHistoricalScannerReplay(
       storedThrough: universeStoredThrough,
     });
 
-    const members = [...universe.members].sort();
+    const members = [...universe.members].sort(compareCodeUnit);
     const snapshots: ScannerSnapshot[] = [];
     const quantRunIds: HistoricalScannerReplayQuantRef[] = [];
 
