@@ -1,4 +1,4 @@
-// Commit-time seals for stored evidence (scanner, backtest and quant runs).
+// Commit-time seals for stored evidence (scanner, backtest, quant and historical replay runs).
 //
 // A seal binds a stored run to two clock readings and proves nothing else:
 //   recordedAt  read BEFORE the run's transaction commits. It is a LOWER bound on the commit time:
@@ -21,7 +21,7 @@ export type EvidenceSealKind = (typeof EVIDENCE_SEAL_KINDS)[number];
 
 export interface EvidenceSeal {
   kind: EvidenceSealKind;
-  /** scannerRunId, backtestRunId or quantRunId. */
+  /** scannerRunId, backtestRunId, quantRunId or historical replayRunId. */
   recordId: string;
   /** Result hash of the sealed run at the time of sealing. */
   resultHash: string;
