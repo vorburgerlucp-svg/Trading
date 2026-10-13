@@ -3,15 +3,17 @@ import type { Decimal } from '../money/decimal.js';
 
 export type IntrabarFillPolicy = 'conservative' | 'mark_ambiguous';
 
+export const INTRABAR_TIMING_VERSION = 'intrabar-timing:v1';
+
 export interface ProtectiveExit {
   kind: 'stop' | 'take_profit' | 'ambiguous';
   rawFillPrice: Decimal | null;
   reason: string;
   /**
-   * OPEN_EXACT for a gap through the level (the fill executes at the session open). INTRABAR_UNKNOWN for a level touched inside the
+   * OPEN_EXACT for a gap through the level (the fill executes at the session open). INTRABAR_BOUNDED for a level touched inside the
    * bar's range: the instant is not knowable from OHLC, so it must not be recorded as an exact open (see execution-clock.ts).
    */
-  timing: 'OPEN_EXACT' | 'INTRABAR_UNKNOWN';
+  timing: 'OPEN_EXACT' | 'INTRABAR_BOUNDED';
 }
 
 /**
@@ -21,7 +23,7 @@ export interface ProtectiveExit {
  * - open <= stop  -> stop fills at open (never magically at the stop); OPEN_EXACT
  * - open >= TP    -> TP fills at open; OPEN_EXACT
  *
- * A level touched inside the bar's range fills at the level, at an instant unknown from OHLC: INTRABAR_UNKNOWN.
+ * A level touched inside the bar's range fills at the level, at an instant unknown from OHLC: INTRABAR_BOUNDED.
  *
  * If both stop and TP are touched within one OHLC bar and the ordering is unknowable,
  * conservative policy chooses the adverse stop; mark_ambiguous refuses to invent an order.
@@ -35,11 +37,11 @@ export function protectiveExitForLong(bar: MarketBar, stopLoss: Decimal | null, 
 
   if (stopTouched && takeTouched) {
     if (policy === 'conservative') {
-      return { kind: 'stop', rawFillPrice: stopLoss, reason: 'stop and take profit touched in same OHLC bar; conservative policy chooses adverse fill', timing: 'INTRABAR_UNKNOWN' };
+      return { kind: 'stop', rawFillPrice: stopLoss, reason: 'stop and take profit touched in same OHLC bar; conservative policy chooses adverse fill', timing: 'INTRABAR_BOUNDED' };
     }
-    return { kind: 'ambiguous', rawFillPrice: null, reason: 'stop and take profit touched in same OHLC bar; ordering is unknown', timing: 'INTRABAR_UNKNOWN' };
+    return { kind: 'ambiguous', rawFillPrice: null, reason: 'stop and take profit touched in same OHLC bar; ordering is unknown', timing: 'INTRABAR_BOUNDED' };
   }
-  if (stopTouched && stopLoss) return { kind: 'stop', rawFillPrice: stopLoss, reason: 'stop touched', timing: 'INTRABAR_UNKNOWN' };
-  if (takeTouched && takeProfit) return { kind: 'take_profit', rawFillPrice: takeProfit, reason: 'take profit touched', timing: 'INTRABAR_UNKNOWN' };
+  if (stopTouched && stopLoss) return { kind: 'stop', rawFillPrice: stopLoss, reason: 'stop touched', timing: 'INTRABAR_BOUNDED' };
+  if (takeTouched && takeProfit) return { kind: 'take_profit', rawFillPrice: takeProfit, reason: 'take profit touched', timing: 'INTRABAR_BOUNDED' };
   return null;
 }
