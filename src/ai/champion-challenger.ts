@@ -1,0 +1,251 @@
+// Champion / Challenger per domain.
+// Initial champions are configured preferences (reviewed config, never the database): "OpenAI for
+// crypto" may be a starting point, never a rule. A challenger replaces the champion only with a large
+// enough sample AND a clear score margin, measured point-in-time.
+//
+// Promotions are persisted as events in a hash-chained log. On load (and on catch-up) every
+// promotion is RE-VERIFIED against the measured performance it was based on. A promotion written
+// directly into the database without supporting measurements fails that check
+// (GOVERNANCE_INTEGRITY_ERROR, fail closed): a DB change alone cannot make a model champion.
+//
+// Reproducibility: each promotion records `performancePosition`, the memory position its evaluation
+// saw. Verification counts exactly those observations (available at `at` AND stored by then), so
+// outcomes back-filled later cannot turn a legitimate promotion into a false integrity failure.
+// A promotion from another process that references observations this process has not loaded yet
+// is held back until performance has caught up; if they still do not exist, it is rejected.
+
+import { randomUUID } from 'node:crypto';
+import type { Actor } from '../opportunities/opportunity-types.js';
+import { AppendOnlyLog, InMemoryAppendOnlyStore, type AppendOnlyStore } from '../persistence/append-only-log.js';
+import type { ModelPerformance } from './model-performance.js';
+import { GovernanceIntegrityError, type ModelRegistry } from './model-registry.js';
+import { modelKey, type Domain, type ModelKey } from './model-types.js';
+
+export interface ChampionPolicy {
+  minSamplesForChampion: number;
+  minScoreMargin: number;
+  minSamplesToLeaveShadow: number;
+  minScoreToLeaveShadow: number;
+}
+
+export const DEFAULT_CHAMPION_POLICY: ChampionPolicy = Object.freeze({
+  minSamplesForChampion: 50,
+  minScoreMargin: 0.05,
+  minSamplesToLeaveShadow: 30,
+  minScoreToLeaveShadow: 0.5,
+});
+
+export interface PromotionDecision {
+  domain: Domain;
+  evaluatedAt: string;
+  /** Memory position the evaluation was based on (see ModelPerformance.position). */
+  performancePosition: number;
+  currentChampion: ModelKey | null;
+  candidate: ModelKey | null;
+  promote: boolean;
+  championScore: number;
+  candidateScore: number | null;
+  reasons: string[];
+}
+
+export interface ChampionChange {
+  domain: Domain;
+  from: ModelKey | null;
+  to: ModelKey;
+  at: string;
+  by: Actor;
+  reason: string;
+}
+
+export interface ChampionEvent {
+  type: 'promoted';
+  eventId: string;
+  domain: Domain;
+  from: ModelKey | null;
+  to: ModelKey;
+  /** Evaluation time; the promotion is re-verified against performance known at this instant. */
+  at: string;
+  /** Memory position the evaluation saw; verification counts only observations stored up to here. */
+  performancePosition: number;
+  by: Actor;
+  reason: string;
+}
+
+export class ChampionBoard {
+  private readonly champions = new Map<Domain, ModelKey>();
+  private readonly changeLog: ChampionChange[] = [];
+  /** Promotions loaded from the log that wait for performance data to catch up (kept in log order). */
+  private readonly pending: ChampionEvent[] = [];
+  private failure: GovernanceIntegrityError | null = null;
+  private log!: AppendOnlyLog<ChampionEvent>;
+
+  private constructor(
+    private readonly performance: ModelPerformance,
+    readonly policy: ChampionPolicy,
+    private readonly newId: () => string,
+  ) {}
+
+  static async open(options: {
+    performance: ModelPerformance;
+    initialChampions?: Partial<Record<Domain, ModelKey>>;
+    store?: AppendOnlyStore<ChampionEvent>;
+    policy?: ChampionPolicy;
+    clock?: () => Date;
+    newId?: () => string;
+  }): Promise<ChampionBoard> {
+    const board = new ChampionBoard(options.performance, options.policy ?? DEFAULT_CHAMPION_POLICY, options.newId ?? randomUUID);
+    for (const [domain, key] of Object.entries(options.initialChampions ?? {}) as [Domain, ModelKey][]) board.champions.set(domain, key);
+    board.log = await AppendOnlyLog.open<ChampionEvent>('champions', options.store ?? new InMemoryAppendOnlyStore(), {
+      ...(options.clock ? { clock: options.clock } : {}),
+      onApply: (record) => board.receive(record.payload),
+    });
+    await board.settle();
+    return board;
+  }
+
+  /** Verified champion; promotions still waiting for performance data are not counted yet. */
+  champion(domain: Domain): ModelKey | undefined {
+    this.assertHealthy();
+    return this.champions.get(domain);
+  }
+
+  history(): readonly ChampionChange[] {
+    this.assertHealthy();
+    return [...this.changeLog];
+  }
+
+  /** Performance first: promotions written elsewhere are verified against the observations they were based on. */
+  async sync(): Promise<void> {
+    this.assertHealthy();
+    await this.performance.sync();
+    await this.log.sync();
+    await this.settle();
+  }
+
+  verifyIntegrity() {
+    return this.log.verifyIntegrity();
+  }
+
+  /** Compares the champion with active challengers on published, point-in-time scores. */
+  evaluate(domain: Domain, registry: ModelRegistry, asOf: string): PromotionDecision {
+    this.assertHealthy();
+    const position = this.performance.position();
+    const current = this.champions.get(domain) ?? null;
+    const championScore = this.scoreOf(current, domain, asOf, position);
+    const reasons: string[] = [];
+    let best: { key: ModelKey; score: number } | null = null;
+
+    for (const entry of registry.list()) {
+      const key = modelKey(entry.provider, entry.model);
+      if (key === current || !entry.enabled) continue;
+      const stats = this.performance.stats(key, asOf, { domain, storedThrough: position });
+      if (entry.shadowMode) {
+        reasons.push(key + ': in shadow mode, needs benchmark gate and human activation first');
+        continue;
+      }
+      if (stats.sampleSize < this.policy.minSamplesForChampion) {
+        reasons.push(key + ': ' + stats.sampleSize + ' samples < ' + this.policy.minSamplesForChampion + ' required');
+        continue;
+      }
+      const published = this.performance.published(key, domain, undefined, asOf, position);
+      if (published && (best === null || published.score > best.score)) best = { key, score: published.score };
+    }
+
+    const promote = best !== null && best.score >= championScore + this.policy.minScoreMargin;
+    if (best !== null && !promote) reasons.push(best.key + ': score ' + best.score.toFixed(3) + ' does not beat champion ' + championScore.toFixed(3) + ' by ' + this.policy.minScoreMargin);
+    if (promote && best) reasons.push(best.key + ': score ' + best.score.toFixed(3) + ' beats champion ' + championScore.toFixed(3) + ' by at least ' + this.policy.minScoreMargin);
+    return { domain, evaluatedAt: asOf, performancePosition: position, currentChampion: current, candidate: best?.key ?? null, promote, championScore, candidateScore: best?.score ?? null, reasons };
+  }
+
+  /** Persists a promotion. It is verified again inside the log's critical section. */
+  async apply(decision: PromotionDecision, by: Actor): Promise<void> {
+    if (!decision.promote || decision.candidate === null) throw new Error('promotion decision does not promote anyone');
+    const event: ChampionEvent = {
+      type: 'promoted',
+      eventId: this.newId(),
+      domain: decision.domain,
+      from: decision.currentChampion,
+      to: decision.candidate,
+      at: decision.evaluatedAt,
+      performancePosition: decision.performancePosition,
+      by,
+      reason: decision.reasons.join('; '),
+    };
+    await this.sync();
+    await this.log.append(event.eventId, event, {
+      precondition: () => {
+        // A stale decision is an ordinary refusal, not an integrity problem.
+        if (this.pending.length > 0) throw new Error('champion board is catching up with promotions from another process; evaluate again');
+        const current = this.champions.get(event.domain) ?? null;
+        if (event.from !== current) throw new Error('stale promotion decision: champion of ' + event.domain + ' is now ' + current + '; evaluate again');
+        this.verify(event);
+      },
+    });
+  }
+
+  private scoreOf(key: ModelKey | null, domain: Domain, asOf: string, storedThrough: number): number {
+    return key === null ? this.performance.policy.priorScore : (this.performance.published(key, domain, undefined, asOf, storedThrough)?.score ?? this.performance.policy.priorScore);
+  }
+
+  /** Re-derives the promotion from measured performance; anything else is a governance integrity failure. */
+  private verify(event: ChampionEvent): void {
+    const fail = (message: string): never => {
+      throw new GovernanceIntegrityError('promotion ' + event.eventId + ' (' + event.domain + ' → ' + event.to + ') is not supported by measured performance: ' + message);
+    };
+    const position = event.performancePosition;
+    if (!Number.isSafeInteger(position) || position < 0) fail('invalid performance position ' + String(position));
+    if (position > this.performance.position()) fail('references performance records up to position ' + position + ' that do not exist (stored: ' + this.performance.position() + ')');
+    const current = this.champions.get(event.domain) ?? null;
+    if (event.from !== current) fail('recorded previous champion ' + event.from + ' differs from ' + current);
+    if (event.to === current) fail('candidate is already champion');
+    const candidate = this.performance.published(event.to, event.domain, undefined, event.at, position);
+    if (!candidate) fail('no published score at ' + event.at);
+    if (candidate && candidate.sampleSize < this.policy.minSamplesForChampion) fail(candidate.sampleSize + ' samples < ' + this.policy.minSamplesForChampion);
+    const championScore = this.scoreOf(current, event.domain, event.at, position);
+    if (candidate && candidate.score < championScore + this.policy.minScoreMargin) fail('score ' + candidate.score.toFixed(3) + ' does not beat ' + championScore.toFixed(3) + ' by ' + this.policy.minScoreMargin);
+  }
+
+  /** Called for every log record in order. Verifies now, or holds it back until performance has caught up. */
+  private receive(event: ChampionEvent): void {
+    if (this.pending.length > 0 || event.performancePosition > this.performance.position()) {
+      this.pending.push(event);
+      return;
+    }
+    this.applyPromotion(event);
+  }
+
+  /** Catches performance up and verifies held-back promotions; ones that still cannot be verified fail closed. */
+  private async settle(): Promise<void> {
+    if (this.pending.length === 0) return;
+    await this.performance.sync();
+    while (this.pending.length > 0) {
+      this.applyPromotion(this.pending[0]!);
+      this.pending.shift();
+    }
+  }
+
+  private applyPromotion(event: ChampionEvent): void {
+    try {
+      this.verify(event);
+    } catch (error) {
+      // Fail closed: once a stored promotion cannot be verified, the board answers nothing anymore.
+      this.failure = error instanceof GovernanceIntegrityError ? error : new GovernanceIntegrityError(error instanceof Error ? error.message : String(error));
+      throw this.failure;
+    }
+    this.changeLog.push({ domain: event.domain, from: event.from, to: event.to, at: event.at, by: event.by, reason: event.reason });
+    this.champions.set(event.domain, event.to);
+  }
+
+  private assertHealthy(): void {
+    if (this.failure) throw this.failure;
+  }
+}
+
+/** Benchmark gate for leaving shadow mode (the human activation itself happens in the registry). */
+export function shadowExitGate(key: ModelKey, performance: ModelPerformance, asOf: string, policy: ChampionPolicy = DEFAULT_CHAMPION_POLICY): { passed: boolean; reasons: string[] } {
+  const stats = performance.stats(key, asOf);
+  const reasons: string[] = [];
+  if (stats.sampleSize < policy.minSamplesToLeaveShadow) reasons.push(stats.sampleSize + ' benchmark samples < ' + policy.minSamplesToLeaveShadow);
+  if (stats.shrunk < policy.minScoreToLeaveShadow) reasons.push('benchmark score ' + stats.shrunk.toFixed(3) + ' < ' + policy.minScoreToLeaveShadow);
+  return { passed: reasons.length === 0, reasons };
+}

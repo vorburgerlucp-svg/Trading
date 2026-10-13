@@ -1,0 +1,226 @@
+[
+  {
+    "case": "resistance",
+    "runs": [
+      {
+        "asOfIndex": 41,
+        "ids": [
+          "double_bottom pi_94a9273fbd2dc6ad51e66f2c15f1777a8c657f9a",
+          "double_top pi_afefd085d4afa822852186475cb6ca8aeacd0073",
+          "rectangle pi_0d37b410207cebc811c58be82071c2774cdd1f6e",
+          "resistance_breakout pi_9d71f5670f804d7a1bec2040c718f148f62825ed"
+        ]
+      },
+      {
+        "asOfIndex": 56,
+        "ids": [
+          "breakout_retest pi_5fa9c99e82888e05b5aa98efd40eba92b2dfaba1",
+          "double_bottom pi_94a9273fbd2dc6ad51e66f2c15f1777a8c657f9a",
+          "double_top pi_afefd085d4afa822852186475cb6ca8aeacd0073",
+          "rectangle pi_0d37b410207cebc811c58be82071c2774cdd1f6e",
+          "resistance_breakout pi_9d71f5670f804d7a1bec2040c718f148f62825ed"
+        ]
+      },
+      {
+        "asOfIndex": 70,
+        "ids": [
+          "breakout_retest pi_5fa9c99e82888e05b5aa98efd40eba92b2dfaba1",
+          "double_bottom pi_94a9273fbd2dc6ad51e66f2c15f1777a8c657f9a",
+          "double_top pi_afefd085d4afa822852186475cb6ca8aeacd0073",
+          "rectangle pi_0d37b410207cebc811c58be82071c2774cdd1f6e",
+          "resistance_breakout pi_9d71f5670f804d7a1bec2040c718f148f62825ed",
+          "symmetrical_triangle pi_5d161dc2deef786086ab49f1202ab4c7d13358fe"
+        ]
+      }
+    ]
+  },
+  {
+    "case": "false",
+    "runs": [
+      {
+        "asOfIndex": 42,
+        "ids": [
+          "double_bottom pi_94a9273fbd2dc6ad51e66f2c15f1777a8c657f9a",
+          "double_top pi_afefd085d4afa822852186475cb6ca8aeacd0073",
+          "false_breakout pi_746bce204ece426b3a65e23bb86e2ac8d612d3f1",
+          "rectangle pi_0d37b410207cebc811c58be82071c2774cdd1f6e",
+          "resistance_breakout pi_9d71f5670f804d7a1bec2040c718f148f62825ed",
+          "support_breakdown pi_bc811ea8018dc08ce5e771a9594cc8a0b0aa8429"
+        ]
+      }
+    ]
+  },
+  {
+    "case": "recross",
+    "runs": [
+      {
+        "asOfIndex": 99,
+        "ids": [
+          "breakdown_retest pi_d293b114bab4017497d20e2a417f249207f448bb",
+          "breakout_retest pi_5fa9c99e82888e05b5aa98efd40eba92b2dfaba1",
+          "double_bottom pi_94a9273fbd2dc6ad51e66f2c15f1777a8c657f9a",
+          "double_top pi_afefd085d4afa822852186475cb6ca8aeacd0073",
+          "rectangle pi_0d37b410207cebc811c58be82071c2774cdd1f6e",
+          "resistance_breakout pi_9d71f5670f804d7a1bec2040c718f148f62825ed",
+          "support_breakdown pi_bc811ea8018dc08ce5e771a9594cc8a0b0aa8429",
+          "symmetrical_triangle pi_4dd776cbf035215e17fa614e350c21e3dee98414",
+          "symmetrical_triangle pi_5d161dc2deef786086ab49f1202ab4c7d13358fe"
+        ]
+      }
+    ]
+  },
+  {
+    "case": "mixed",
+    "runs": [
+      {
+        "asOfIndex": 45,
+        "ids": [
+          "breakdown_retest pi_c9149dc39ac67e828316ff83c26a80c6a4b64079",
+          "rectangle pi_bf6547ef163801b9c45093177a2635c3ed0989df",
+          "resistance_breakout pi_2739ef84d4ca94f165780f1bde74899b0a2eff92",
+          "rising_wedge pi_8eed58885ccf6829cab439bb59a9f041bd868c9a",
+          "support_breakdown pi_b64fecf5fbcc967fdaf715a9f948c68eacd1ee3f",
+          "symmetrical_triangle pi_7b6cbd084d589846d4da37bd3823d2648259f9bd"
+        ]
+      }
+    ]
+  },
+  {
+    "case": "rectangle",
+    "runs": [
+      {
+        "asOfIndex": 37,
+        "ids": [
+          "double_bottom pi_94a9273fbd2dc6ad51e66f2c15f1777a8c657f9a",
+          "double_top pi_afefd085d4afa822852186475cb6ca8aeacd0073",
+          "rectangle pi_0d37b410207cebc811c58be82071c2774cdd1f6e"
+        ]
+      },
+      {
+        "asOfIndex": 56,
+        "ids": [
+          "double_bottom pi_06a5de4941e006dba2ea2dff911b5747c5c02873",
+          "double_bottom pi_94a9273fbd2dc6ad51e66f2c15f1777a8c657f9a",
+          "double_top pi_afefd085d4afa822852186475cb6ca8aeacd0073",
+          "double_top pi_bd636b146a2d3de4260dfa25efc8b0c5b9183f11",
+          "rectangle pi_0d37b410207cebc811c58be82071c2774cdd1f6e",
+          "resistance_breakout pi_9d71f5670f804d7a1bec2040c718f148f62825ed"
+        ]
+      },
+      {
+        "asOfIndex": 62,
+        "ids": [
+          "double_bottom pi_06a5de4941e006dba2ea2dff911b5747c5c02873",
+          "double_bottom pi_94a9273fbd2dc6ad51e66f2c15f1777a8c657f9a",
+          "double_top pi_afefd085d4afa822852186475cb6ca8aeacd0073",
+          "double_top pi_bd636b146a2d3de4260dfa25efc8b0c5b9183f11",
+          "rectangle pi_0d37b410207cebc811c58be82071c2774cdd1f6e",
+          "resistance_breakout pi_9d71f5670f804d7a1bec2040c718f148f62825ed"
+        ]
+      }
+    ]
+  },
+  {
+    "case": "channel",
+    "runs": [
+      {
+        "asOfIndex": 51,
+        "ids": [
+          "ascending_channel pi_09e94af04775106c72b3866f22a438386e13a360",
+          "ascending_channel pi_54e5204afa6e5d65495e665a1e7b5a170df16469",
+          "ascending_channel pi_880f8172d65260588c2817a6348d8be84835c7e9",
+          "ascending_channel pi_955a96010682de836e224389dc3626a562d6d653"
+        ]
+      },
+      {
+        "asOfIndex": 73,
+        "ids": [
+          "ascending_channel pi_028ba80d647862b9eea47c5748038369f78d07cf",
+          "ascending_channel pi_09e94af04775106c72b3866f22a438386e13a360",
+          "ascending_channel pi_54e5204afa6e5d65495e665a1e7b5a170df16469",
+          "ascending_channel pi_5bb2edc7078ccd9f82bc1df06a83787e019ef8ac",
+          "ascending_channel pi_880f8172d65260588c2817a6348d8be84835c7e9",
+          "ascending_channel pi_955a96010682de836e224389dc3626a562d6d653",
+          "ascending_channel pi_c83682dbefc636935693e05b54560c57aefa9394"
+        ]
+      }
+    ]
+  },
+  {
+    "case": "wedge_down",
+    "runs": [
+      {
+        "asOfIndex": 45,
+        "ids": [
+          "double_top pi_04366e1724d2bd9a7e16c2d708c35126607d13f8",
+          "double_top pi_f74c9f2b9f1f2cdf9795bfb6b4f7dfc1e354a6c6",
+          "rising_wedge pi_24030fb75cbd6ae6c3ab7ef4a9dbfc62b4409984",
+          "rising_wedge pi_92c099ce96f9b4c070cfb363c1ca5f3cbe6fe130"
+        ]
+      },
+      {
+        "asOfIndex": 47,
+        "ids": [
+          "double_top pi_04366e1724d2bd9a7e16c2d708c35126607d13f8",
+          "double_top pi_f74c9f2b9f1f2cdf9795bfb6b4f7dfc1e354a6c6",
+          "rising_wedge pi_24030fb75cbd6ae6c3ab7ef4a9dbfc62b4409984",
+          "rising_wedge pi_92c099ce96f9b4c070cfb363c1ca5f3cbe6fe130"
+        ]
+      }
+    ]
+  },
+  {
+    "case": "wedge_up",
+    "runs": [
+      {
+        "asOfIndex": 48,
+        "ids": [
+          "double_top pi_04366e1724d2bd9a7e16c2d708c35126607d13f8",
+          "double_top pi_f74c9f2b9f1f2cdf9795bfb6b4f7dfc1e354a6c6",
+          "rising_wedge pi_24030fb75cbd6ae6c3ab7ef4a9dbfc62b4409984",
+          "rising_wedge pi_92c099ce96f9b4c070cfb363c1ca5f3cbe6fe130"
+        ]
+      }
+    ]
+  },
+  {
+    "case": "resistance_mirror",
+    "runs": [
+      {
+        "asOfIndex": 41,
+        "ids": [
+          "double_bottom pi_9d48a00a51a175ae56796369eba59514502bb64a",
+          "double_top pi_8a09af553fffd5ece3d66527695f77616d8efcc0",
+          "rectangle pi_38e0acade6042a91b1cf817663c5a1c461be26e1",
+          "support_breakdown pi_4acabb161f61645b8c19875fdb279f42463c8111"
+        ]
+      },
+      {
+        "asOfIndex": 56,
+        "ids": [
+          "breakdown_retest pi_ef24faad1e03ae4a556a2874ab8f34ff2f4fbaff",
+          "double_bottom pi_9d48a00a51a175ae56796369eba59514502bb64a",
+          "double_top pi_8a09af553fffd5ece3d66527695f77616d8efcc0",
+          "rectangle pi_38e0acade6042a91b1cf817663c5a1c461be26e1",
+          "support_breakdown pi_4acabb161f61645b8c19875fdb279f42463c8111"
+        ]
+      }
+    ]
+  },
+  {
+    "case": "false_mirror",
+    "runs": [
+      {
+        "asOfIndex": 42,
+        "ids": [
+          "double_bottom pi_9d48a00a51a175ae56796369eba59514502bb64a",
+          "double_top pi_8a09af553fffd5ece3d66527695f77616d8efcc0",
+          "false_breakdown pi_88e5cd27ba186822355ab76e2603a6c50f8ddf67",
+          "rectangle pi_38e0acade6042a91b1cf817663c5a1c461be26e1",
+          "resistance_breakout pi_51f022c4c90266c061f057b0a71498a9f52f3ad3",
+          "support_breakdown pi_4acabb161f61645b8c19875fdb279f42463c8111"
+        ]
+      }
+    ]
+  }
+]
