@@ -45,6 +45,7 @@ function fail(message: string): never {
 const isNonEmpty = (value: unknown): value is string => typeof value === 'string' && value.trim() !== '';
 const isAnchor = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 const isHash = (value: unknown): value is string => typeof value === 'string' && HEX64.test(value);
+const compareCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 function canonicalInstantMs(value: unknown, label: string): number {
   if (typeof value !== 'string') fail(label + ' is not a canonical UTC instant');
@@ -85,7 +86,7 @@ export function verifyHistoricalScannerReplayResult(result: HistoricalScannerRep
   for (const instrumentId of instrumentIds) {
     if (!isAnchor(anchors[instrumentId])) fail('market anchor ' + instrumentId + ' must be a non-negative safe integer');
   }
-  const canonicalOrder = [...instrumentIds].sort((a, b) => a.localeCompare(b));
+  const canonicalOrder = [...instrumentIds].sort(compareCodeUnit);
   if (instrumentIds.some((instrumentId, index) => instrumentId !== canonicalOrder[index])) fail('market anchor keys are not in canonical order');
   // An own property only: an inherited name such as "constructor" is never a pinned anchor.
   const pinnedAnchor = (instrumentId: string): number | undefined =>
@@ -181,6 +182,7 @@ export class InMemoryHistoricalScannerReplayStore implements HistoricalScannerRe
     if (existing) {
       // The stored row is verified before it is compared, so a tampered row is never reported as already applied.
       loadRow(result.replayRunId, existing);
+      sealOf(result.replayRunId, existing);
       if (existing.resultHash !== resultHash) throw new HistoricalScannerReplayConflictError('historical scanner replay already exists with different content');
       return 'ALREADY_APPLIED';
     }
