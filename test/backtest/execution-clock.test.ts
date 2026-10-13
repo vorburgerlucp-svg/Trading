@@ -78,7 +78,7 @@ describe('execution clock: protective exits', () => {
     expect(r.trades[0]!.exit.at).toBe(OPEN_OCT9);
   });
 
-  it('an intrabar stop touch is marked as intrabar-unknown timing, not presented as an exact open', () => {
+  it('an intrabar stop touch is bounded to the proven session window, not presented as an exact open', () => {
     const rows = [
       dailyAt('2026-10-07', ['100', '100', '100', '100'], '2026-10-07T20:00:00.000Z'),
       dailyAt('2026-10-08', ['100', '100', '100', '100'], '2026-10-08T20:00:00.000Z'),
@@ -86,7 +86,7 @@ describe('execution clock: protective exits', () => {
     ];
     const r = run(rows, strategy({ enterAt: 1, exitAt: 100, stop: '80', target: '120' }));
     expect(r.trades[0]!.exit.reason).toBe('stop');
-    expect(r.trades[0]!.exit.timing.kind).toBe('INTRABAR_UNKNOWN');
+    expect(r.trades[0]!.exit.timing.kind).toBe('INTRABAR_BOUNDED');
   });
 });
 
