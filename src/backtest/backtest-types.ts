@@ -6,10 +6,48 @@ import type { ExecutionClockIdentity } from './execution-clock.js';
 import type { AnyUniverseEvidence } from '../universe/universe-model.js';
 import type { IntrabarFillPolicy } from './execution-model.js';
 
+/**
+ * risk_per_trade: the modeled stress downside of the entry (entry and exit commissions, sell spread and slippage, and the configured gap stress) is at
+ * most riskBasisPoints of sizing equity. stopGapStressBasisPoints is optional in the type so that backtest-engine:v9 records still parse. The engine
+ * requires it for every v10 risk_per_trade run (docs/O5_EXECUTABLE_RISK_SIZING_V1.md §2).
+ */
 export type PositionSizing =
   | { type: 'fixed_cash'; amount: string }
   | { type: 'percent_equity'; basisPoints: number }
-  | { type: 'risk_per_trade'; riskBasisPoints: number; maxCashBasisPoints: number };
+  | { type: 'risk_per_trade'; riskBasisPoints: number; maxCashBasisPoints: number; stopGapStressBasisPoints?: number };
+
+/**
+ * The executable risk sizing of one market entry (risk-sizing:v1, docs/O5_EXECUTABLE_RISK_SIZING_V1.md §13). Only a BUY market_entry fill of a v10
+ * risk_per_trade run carries it. It is an input-derived record: verifyBacktestRun recomputes every field from the record's own inputs.
+ * modeledStressDownside is a configured stress figure, never a maximum or worst possible loss.
+ */
+export interface EntryRiskSizingAudit {
+  version: 'risk-sizing:v1';
+  riskBasisPoints: number;
+  maxCashBasisPoints: number;
+  stopGapStressBasisPoints: number;
+  /** The equity the risk budget is taken from: spendable cash at the entry event (V1, no receivables). */
+  sizingEquity: Decimal;
+  spendableCash: Decimal;
+  riskBudget: Decimal;
+  cashBudget: Decimal;
+  /** bar.open of the executable-open bar: the raw entry. */
+  rawEntryPrice: Decimal;
+  entryExecutionPrice: Decimal;
+  /** The stop after any due corporate-action transformation. */
+  stopLoss: Decimal;
+  stressRawExitPrice: Decimal;
+  stressExecutionPrice: Decimal;
+  quantity: Decimal;
+  entryCommission: Decimal;
+  stressExitCommission: Decimal;
+  modeledStressDownside: Decimal;
+  /** The largest quantity the risk budget alone allows, rounded down. */
+  riskLimitedQuantity: Decimal;
+  /** The largest quantity the cash budget alone allows, including the entry commission, rounded down. */
+  cashLimitedQuantity: Decimal;
+  bindingConstraint: 'risk_budget' | 'cash_budget' | 'both';
+}
 
 export interface BacktestPosition {
   instrumentId: string;
@@ -48,6 +86,8 @@ export interface BacktestFill {
   executionPrice: Decimal;
   quantity: Decimal;
   commission: Decimal;
+  /** The executable risk sizing of this entry. Present only on a market_entry BUY fill of a v10 risk_per_trade run (O5). */
+  riskSizing?: EntryRiskSizingAudit;
 }
 
 export interface BacktestTrade {

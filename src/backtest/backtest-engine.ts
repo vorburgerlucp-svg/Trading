@@ -24,7 +24,7 @@ import { protectiveExitForLong } from './execution-model.js';
 import { backtestMetrics } from './performance.js';
 import { PointInTimeBarState, buildBarAvailabilityQueue } from './point-in-time.js';
 import { assessBacktestQuality } from './quality.js';
-import { desiredLongQuantity } from './sizing.js';
+import { desiredLongQuantity, maxRiskSizedLongQuantity, RISK_SIZING_VERSION, riskPerTradeConfigOf } from './sizing.js';
 import type {
   BacktestBarKnowledge,
   BacktestFill,
@@ -41,12 +41,14 @@ import type { BacktestStrategy, StrategyDecision } from './strategy.js';
 import { validateWarmupPlan, type WarmupPlan } from './warmup.js';
 
 /**
+ * v10: risk_per_trade is sized by its executable stressed downside (risk-sizing:v1): entry and exit commissions, sell spread and slippage and a configured
+ * gap stress are in the budget, and every risk-sized entry carries an audit record. v9 and earlier runs are not reinterpreted (docs/O5_EXECUTABLE_RISK_SIZING_V1.md).
  * v8: the grade uses derived universe evidence (universe-engine:v1), never the caller's pointInTimeUniverse flag. v7 and earlier runs are not reinterpreted.
  * v9: the grade uses database-sealed knowledge of the universe (universe-engine:v2). A caller's claimed knowledge time never upgrades a grade. v8 runs are not reinterpreted.
  * v7: fills execute at the executable market open (execution-clock:v1), not at a daily bar's window start; a signal fills at an open only
  * if it was usable by then; fills carry explicit timing (OPEN_EXACT or INTRABAR_UNKNOWN). v6 and earlier runs are not reinterpreted.
  */
-export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v9';
+export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v10';
 
 interface PendingOrder {
   side: 'buy' | 'sell';
@@ -159,6 +161,8 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
   if (!ISO_CURRENCY.test(input.portfolioCurrency)) throw new Error('portfolio currency must be an ISO 4217 code');
   if (input.bars.length === 0) throw new Error('backtest requires bars');
   const warmup = validateWarmupPlan(input.strategy.warmup);
+  // risk_per_trade is refused before any event when its configuration is not a valid integer basis-point set (O5 §2).
+  const riskConfig = input.sizing.type === 'risk_per_trade' ? riskPerTradeConfigOf(input.sizing) : null;
   const instrumentId = input.bars[0]!.instrumentId;
   if (input.bars.some((b) => b.instrumentId !== instrumentId)) throw new Error('V1 backtest is single-instrument');
   if (input.bars.some((b) => !b.isFinal)) throw new Error('backtest accepts final bars only');
@@ -246,9 +250,22 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
       const open = executionOpenOf(bar, input.executionCalendar);
       if (isEligibleAtOpen(pending.decidedAt, open.openMs)) {
         const timing: FillTiming = { kind: 'OPEN_EXACT', executionAt: toUtcIso(open.openMs), barStart: bar.startTime, openSource: open.source };
-        if (pending.side === 'buy' && !position) {
+        if (pending.side === 'buy' && !position && riskConfig) {
+          // risk_per_trade (risk-sizing:v1). The quantity and its audit come from one calculation that reads only this entry event's values: the raw open,
+          // the stop after any due corporate action, the configuration and the cash at this event. Nothing later is read (O5 §8). A refusal creates no fill.
+          const sized = maxRiskSizedLongQuantity({ costModel, rawEntryPrice: bar.open, stopLoss: pending.stopLoss, config: riskConfig, sizingEquity: cash, spendableCash: cash });
+          if (sized.audit) {
+            const quote = costModel.quote(bar.open, 'buy', sized.quantity);
+            const total = quote.executionPrice.times(sized.quantity).plus(quote.commission);
+            if (total.lte(cash)) {
+              const fill = addFill({ instrumentId, side: 'buy', reason: 'market_entry', at: fillAt(timing), timing, rawPrice: bar.open, executionPrice: quote.executionPrice, quantity: sized.quantity, commission: quote.commission, riskSizing: sized.audit });
+              cash = cash.minus(total);
+              position = { instrumentId, entryFillId: fill.fillId, quantity: sized.quantity, entryPrice: quote.executionPrice, entryTime: fill.at, entryCommission: quote.commission, stopLoss: pending.stopLoss, takeProfit: pending.takeProfit };
+            }
+          }
+        } else if (pending.side === 'buy' && !position) {
           const estimatedExecution = costModel.executionPrice(bar.open, 'buy');
-          const desired = desiredLongQuantity({ sizing: input.sizing, cash, equity: cash, executionPrice: estimatedExecution, stopLoss: pending.stopLoss });
+          const desired = desiredLongQuantity({ sizing: input.sizing, cash, equity: cash, executionPrice: estimatedExecution });
           const affordable = costModel.maxAffordableQuantity(cash, bar.open);
           const quantity = minDecimal(desired, affordable);
           if (quantity.isPositive()) {
@@ -350,6 +367,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     initialCapital: input.initialCapital,
     portfolioCurrency: input.portfolioCurrency,
     sizing: input.sizing,
+    riskSizingVersion: RISK_SIZING_VERSION,
     costModel: costModel.config,
     intrabarPolicy,
     qualityContext: input.quality,

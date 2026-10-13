@@ -209,7 +209,7 @@ describe('Backtest warm-up enforcement (O3)', () => {
   });
 
   it('engine version: backtest-engine:v8 (v2 warm-up gate; v4 replay mode and knowledge at use; v5 corporate actions; v6 effective-instant knowledge boundary; v7 execution clock)', () => {
-    expect(BACKTEST_ENGINE_VERSION).toBe('backtest-engine:v9');
+    expect(BACKTEST_ENGINE_VERSION).toBe('backtest-engine:v10');
   });
 
   it('integrity: a run below the gate that shows a fill, or a flipped warm-up flag, fails verification', () => {
