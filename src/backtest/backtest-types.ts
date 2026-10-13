@@ -63,14 +63,14 @@ export interface BacktestPosition {
 }
 
 /**
- * How the execution instant of a fill is known (execution-clock:v1).
- *   OPEN_EXACT:       the fill executes at the executable open of its session (market entry, strategy exit, gap stop or gap take profit).
- *                     `executionAt` is that instant; the fill's `at` equals it.
- *   INTRABAR_UNKNOWN: a stop or target touched inside the bar's range. The instant is not knowable from OHLC. `at` is the bar window start
- *                     and is NOT an execution time. The touch lies somewhere in [barStart, barEnd). Trade duration must not use it as exact.
+ * How the execution instant of a fill is known.
+ * OPEN_EXACT is an exact executable open. INTRABAR_BOUNDED is a v11 OHLC range touch whose
+ * real instant is only known to lie within the proven economic window. INTRABAR_UNKNOWN is
+ * retained solely so historical v7-v10 records remain readable and are never reinterpreted.
  */
 export type FillTiming =
   | { kind: 'OPEN_EXACT'; executionAt: string; barStart: string; openSource: 'regular_session_open' | 'intraday_bar_start' }
+  | { kind: 'INTRABAR_BOUNDED'; earliestAt: string; latestAt: string; barStart: string; barEnd: string; basis: 'OHLC_RANGE_TOUCH' }
   | { kind: 'INTRABAR_UNKNOWN'; barStart: string; barEnd: string };
 
 export interface BacktestFill {
@@ -78,7 +78,7 @@ export interface BacktestFill {
   instrumentId: string;
   side: 'buy' | 'sell';
   reason: 'market_entry' | 'strategy_exit' | 'stop' | 'take_profit';
-  /** The economic execution instant for OPEN_EXACT fills. For INTRABAR_UNKNOWN fills it is the bar window start, not an execution time (see timing). */
+  /** Exact only for OPEN_EXACT. For bounded/legacy intrabar fills, `at` is a deterministic lower-bound/index key, not an exact execution instant. */
   at: string;
   /** Explicit timing semantics. Required from backtest-engine:v7. */
   timing: FillTiming;

@@ -19,8 +19,8 @@ import { Decimal } from '../money/decimal.js';
 import { hashOf } from '../persistence/canonical-json.js';
 import { DeterministicCostModel } from './cost-model.js';
 import { CORPORATE_ACTION_REASON_TEXT, CorporateActionLedger, type AttachedLevels } from './corporate-action-engine.js';
-import { executionClockIdentity, executionOpenOf, isEligibleAtOpen } from './execution-clock.js';
-import { protectiveExitForLong } from './execution-model.js';
+import { executionClockIdentity, executionOpenOf, executionWindowOf, isEligibleAtOpen } from './execution-clock.js';
+import { INTRABAR_TIMING_VERSION, protectiveExitForLong } from './execution-model.js';
 import { backtestMetrics } from './performance.js';
 import { PointInTimeBarState, buildBarAvailabilityQueue } from './point-in-time.js';
 import { assessBacktestQuality } from './quality.js';
@@ -48,7 +48,7 @@ import { validateWarmupPlan, type WarmupPlan } from './warmup.js';
  * v7: fills execute at the executable market open (execution-clock:v1), not at a daily bar's window start; a signal fills at an open only
  * if it was usable by then; fills carry explicit timing (OPEN_EXACT or INTRABAR_UNKNOWN). v6 and earlier runs are not reinterpreted.
  */
-export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v10';
+export const BACKTEST_ENGINE_VERSION = 'backtest-engine:v11';
 
 interface PendingOrder {
   side: 'buy' | 'sell';
@@ -105,9 +105,11 @@ function decisionToPending(decision: StrategyDecision, decidedAt: number): Pendi
   return null;
 }
 
-/** The economic execution instant of a fill: the open for an exact fill; for an intrabar touch, the bar window start (never an execution time). */
+/** Exact fills use their execution instant. Bounded touches use their lower bound only as a stable ordering key. */
 function fillAt(timing: FillTiming): string {
-  return timing.kind === 'OPEN_EXACT' ? timing.executionAt : timing.barStart;
+  if (timing.kind === 'OPEN_EXACT') return timing.executionAt;
+  if (timing.kind === 'INTRABAR_BOUNDED') return timing.earliestAt;
+  return timing.barStart;
 }
 
 function assertChronologicalAvailability(bars: readonly MarketBar[], mode: BarReplayMode): void {
@@ -284,19 +286,28 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
       }
     }
 
-    // 2. Protective exits over this bar. A gap through a level executes at the open (exact). A level touched inside the bar's range has
-    //    an instant that OHLC cannot give: it is recorded as INTRABAR_UNKNOWN with the bar window, never as an exact time.
+    // 2. Protective exits over this bar. A gap through a level executes at the proven open (exact).
+    //    A range touch is bounded to the proven economic bar window; OHLC never supplies an invented tick time (O6).
     if (position && (position.stopLoss !== null || position.takeProfit !== null)) {
       const protective = protectiveExitForLong(bar, position.stopLoss, position.takeProfit, intrabarPolicy);
       if (protective?.kind === 'ambiguous') ambiguousBars++;
       else if (protective?.rawFillPrice) {
+        const window = executionWindowOf(bar, input.executionCalendar);
         const timing: FillTiming =
           protective.timing === 'OPEN_EXACT'
-            ? (() => {
-                const open = executionOpenOf(bar, input.executionCalendar);
-                return { kind: 'OPEN_EXACT' as const, executionAt: toUtcIso(open.openMs), barStart: bar.startTime, openSource: open.source };
-              })()
-            : { kind: 'INTRABAR_UNKNOWN', barStart: bar.startTime, barEnd: bar.endTime };
+            ? { kind: 'OPEN_EXACT', executionAt: toUtcIso(window.openMs), barStart: bar.startTime, openSource: window.source }
+            : (() => {
+                const earliestMs = Math.max(window.openMs, parseUtc(position!.entryTime));
+                if (earliestMs > window.closeMs) throw new Error('O6 intrabar timing has no non-empty economic window');
+                return {
+                  kind: 'INTRABAR_BOUNDED' as const,
+                  earliestAt: toUtcIso(earliestMs),
+                  latestAt: toUtcIso(window.closeMs),
+                  barStart: bar.startTime,
+                  barEnd: bar.endTime,
+                  basis: 'OHLC_RANGE_TOUCH' as const,
+                };
+              })();
         closePosition(bar, protective.rawFillPrice, protective.kind, timing);
       }
     }
@@ -368,6 +379,7 @@ export function runBacktest(rawInput: BacktestInput & { strategy: BacktestStrate
     portfolioCurrency: input.portfolioCurrency,
     sizing: input.sizing,
     riskSizingVersion: RISK_SIZING_VERSION,
+    intrabarTimingVersion: INTRABAR_TIMING_VERSION,
     costModel: costModel.config,
     intrabarPolicy,
     qualityContext: input.quality,
