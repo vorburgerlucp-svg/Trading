@@ -91,7 +91,7 @@ class FakeScorer implements ShadowBenchmarkScorer {
       modelKey: input.modelKey,
       caseId: input.caseId,
       score,
-      scoringFingerprint: hashOf({ modelKey: input.modelKey, caseId: input.caseId, score, outcomeFingerprint: input.outcomeFingerprint }),
+      scoringFingerprint: hashOf({ modelKey: input.modelKey, caseId: input.caseId, score: String(score), outcomeFingerprint: input.outcomeFingerprint }),
     };
   }
 }
