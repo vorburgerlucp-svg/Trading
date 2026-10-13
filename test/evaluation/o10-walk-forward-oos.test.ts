@@ -281,6 +281,46 @@ describe('O10 walk-forward and out-of-sample evaluation — RED', () => {
     });
   });
 
+  it('normalizes fold input order by test-window chronology without changing identity', async () => {
+    const fold2: WalkForwardFoldSpec = {
+      foldId: 'fold-2',
+      train: { from: TIMES[0], through: TIMES[0] },
+      validation: { from: TIMES[1], through: TIMES[2] },
+      test: { from: TIMES[3], through: TIMES[4] },
+    };
+    const oneVariant = [variants[0]!];
+    const a = await runWalkForwardOos(request({ variants: oneVariant, folds: [fold, fold2] }), new FakeEvaluator());
+    const b = await runWalkForwardOos(request({ variants: oneVariant, folds: [fold2, fold] }), new FakeEvaluator());
+
+    expect(a.folds.map((f) => f.foldId)).toEqual(['fold-2', 'fold-1']);
+    expect(b.folds).toEqual(a.folds);
+    expect(b.foldResults).toEqual(a.foldResults);
+    expect(b.inputFingerprint).toBe(a.inputFingerprint);
+    expect(b.walkForwardRunId).toBe(a.walkForwardRunId);
+  });
+
+  it('passes runtime-frozen phase slices and steps to the evaluator', async () => {
+    const frozen: boolean[] = [];
+    const base = new FakeEvaluator();
+    const evaluator: WalkForwardEvaluator = {
+      async evaluate(input) {
+        frozen.push(Object.isFrozen(input), Object.isFrozen(input.steps), ...input.steps.map((s) => Object.isFrozen(s)));
+        return base.evaluate(input);
+      },
+    };
+
+    await runWalkForwardOos(request(), evaluator);
+    expect(frozen.every(Boolean)).toBe(true);
+  });
+
+  it('rejects a non-finite training threshold before evaluator calls', async () => {
+    const evaluator = new FakeEvaluator();
+    await expect(runWalkForwardOos(request({ minimumTrainingObjective: Number.POSITIVE_INFINITY }), evaluator)).rejects.toMatchObject({
+      code: 'INVALID_VARIANTS',
+    } satisfies Partial<WalkForwardOosError>);
+    expect(evaluator.calls).toHaveLength(0);
+  });
+
   it('changing the O9 source replay identity changes O10 identity', async () => {
     const first = await runWalkForwardOos(request(), new FakeEvaluator());
     const otherFingerprint = 'b'.repeat(64);
