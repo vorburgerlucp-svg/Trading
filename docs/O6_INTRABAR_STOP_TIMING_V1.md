@@ -6,9 +6,9 @@ Status: design, written before RED tests and implementation. Base: `29c9a48` (O5
 
 The engine already distinguishes exact open fills from protective levels touched somewhere inside an OHLC bar. A gap through a stop or take-profit is `OPEN_EXACT`; a level touched only by the bar range is currently `INTRABAR_UNKNOWN`.
 
-That distinction is directionally correct, but the current unknown timing uses `bar.startTime` as the fill's `at` and as the beginning of its timing window. For an intraday bar this commonly equals the executable bar open. For a daily/session bar it may not: the data window can start at a civil/UTC boundary while the economic session opens later. Recording the window from `bar.startTime` therefore makes the exit appear possible before the instrument could trade.
+That distinction is directionally correct, but the current unknown timing uses `bar.startTime` as the fill's `at` and as the beginning of its timing window. For an intraday bar this commonly equals the executable bar open. For a daily/session bar it may not: the data window can start at a civil/UTC boundary while the economic session opens later. Recording the window from `bar.startTime` can therefore make an exit appear possible before the market opened. Using `bar.endTime` as the upper bound can likewise extend the possible exit window beyond the regular-session close.
 
-O6 tightens the timing contract without inventing tick data or an OHLC path.
+O6 tightens the timing contract to the proven tradable window without inventing tick data or an OHLC path.
 
 ## 2. Scope
 
@@ -27,22 +27,38 @@ Unchanged:
 
 No tick feed, synthetic path, interpolation, Brownian bridge, random ordering or lower-timeframe reconstruction is introduced in V1.
 
-## 3. Timing categories
+## 3. Economic bar window
 
-### 3.1 OPEN_EXACT
+O6 derives the tradable window from the same execution calendar that proves the executable open.
+
+For a daily bar:
+- `economicOpen` is the regular-session open for the trading date;
+- `economicClose` is that regular session's close.
+
+For an intraday bar:
+- `economicOpen` is the validated intraday bar start;
+- `economicClose` is the validated `calendar.barWindow(...).end`, capped by the session close.
+
+The engine fails closed if the calendar cannot prove this window.
+
+The raw `bar.startTime` and `bar.endTime` remain provenance fields; they are not automatically treated as tradable bounds.
+
+## 4. Timing categories
+
+### 4.1 OPEN_EXACT
 
 A protective exit is exact only when the raw bar open itself proves the trigger:
 
 - long stop: `bar.open <= stopLoss`;
 - long take-profit: `bar.open >= takeProfit`.
 
-The raw fill price is the actual bar open and `executionAt` is the executable market open from `execution-clock:v1`.
+The raw fill price is the actual bar open and `executionAt = economicOpen`.
 
 This remains an exact instant.
 
-### 3.2 INTRABAR_BOUNDED
+### 4.2 INTRABAR_BOUNDED
 
-When the open does not trigger the level but the OHLC range proves that it was touched later in the bar, the exit time is not exact.
+When the open does not trigger the level but the OHLC range proves that it was touched later in the tradable window, the exit time is not exact.
 
 The timing record is:
 
@@ -50,7 +66,7 @@ The timing record is:
 {
   kind: 'INTRABAR_BOUNDED',
   earliestAt,
-  latestBefore,
+  latestAt,
   barStart,
   barEnd,
   basis: 'OHLC_RANGE_TOUCH'
@@ -59,31 +75,30 @@ The timing record is:
 
 Semantics:
 - `earliestAt` is the earliest economic instant at which this fill could have happened;
-- `latestBefore` is the exclusive upper bound;
-- the true fill instant lies in `[earliestAt, latestBefore)`;
+- `latestAt` is the latest economic instant at which it could have happened;
+- the true fill instant lies somewhere in the closed interval `[earliestAt, latestAt]`;
 - neither bound is claimed to be the actual execution instant;
-- `at` equals `earliestAt` only as a deterministic ordering key and must never be described as an exact execution time.
+- `at` equals `earliestAt` only as a deterministic ordering/index key and must never be described as an exact execution time.
 
 For a position already open before the bar:
-- `earliestAt = executable open of this bar`.
+- `earliestAt = economicOpen`.
 
 For a position entered at this bar's executable open:
 - `earliestAt = entry fill executionAt`.
-- In V1 that is the same executable open, but the dependency is explicit so the exit can never predate the entry.
+- In V1 that equals `economicOpen`, but the dependency is explicit so the exit can never predate the entry.
 
-`latestBefore = bar.endTime`.
+For every bounded touch:
+- `latestAt = economicClose`.
 
-The engine must reject an impossible bound where `earliestAt >= latestBefore`.
+The engine rejects an impossible bound where `earliestAt > latestAt`.
 
-## 4. Why bar.startTime is not enough
+## 5. Why the raw bar window is insufficient
 
-A bar window is a data interval, not necessarily an executable market session. For a daily XNAS bar, the data interval can start before the 09:30 America/New_York regular-session open. An OHLC stop touch cannot therefore be placed at the data window start.
+A bar window is a data interval, not necessarily an executable market session. For a daily XNAS bar the data interval begins at local midnight, while the regular session opens at 09:30 America/New_York and closes at 16:00. An OHLC stop touch cannot therefore be placed before 09:30 or after 16:00.
 
-O6 anchors the lower bound to `executionOpenOf(bar, calendar)`, not to `bar.startTime`.
+O6 anchors both bounds to the execution calendar, while retaining `barStart` and `barEnd` only for provenance.
 
-The original `barStart` and `barEnd` remain in the timing record for provenance and audit.
-
-## 5. Stop and take-profit semantics
+## 6. Stop and take-profit semantics
 
 For a long position:
 
@@ -97,7 +112,7 @@ For a long position:
 
 The conservative outcome is a policy choice about P&L, not evidence of which level traded first.
 
-## 6. Same-bar entry and protective exit
+## 7. Same-bar entry and protective exit
 
 The event order remains:
 
@@ -112,13 +127,14 @@ Therefore a market entry at the executable open may be stopped or targeted later
 For such an exit:
 - it may not predate the entry;
 - `earliestAt` is the entry's exact execution time;
-- an open-trigger cannot be applied twice after the entry because the entry itself happened at that open; only the post-open range-touch semantics apply to the newly opened position.
+- a range touch remains non-exact;
+- an open-trigger must not create an impossible exit before the newly created position existed.
 
 This point must be covered explicitly by RED tests.
 
-## 7. Fill schema
+## 8. Fill schema
 
-`FillTiming` becomes:
+`FillTiming` for new v11 runs becomes:
 
 ```
 type FillTiming =
@@ -131,7 +147,7 @@ type FillTiming =
   | {
       kind: 'INTRABAR_BOUNDED';
       earliestAt: string;
-      latestBefore: string;
+      latestAt: string;
       barStart: string;
       barEnd: string;
       basis: 'OHLC_RANGE_TOUCH';
@@ -142,7 +158,7 @@ Historical `backtest-engine:v7` through `v10` records with `INTRABAR_UNKNOWN` re
 
 The stored decoder/verifier must therefore understand the legacy variant when reading old runs, while new v11 runs must emit only `OPEN_EXACT` or `INTRABAR_BOUNDED`.
 
-## 8. `at` field
+## 9. `at` field
 
 For v11:
 - `OPEN_EXACT`: `fill.at === timing.executionAt`.
@@ -152,15 +168,14 @@ For bounded fills, `at` is a stable sort/index key, not an assertion that the fi
 
 Any duration or latency calculation must branch on timing kind. It may use an exact duration only when both relevant instants are exact. Otherwise it must report a range/unknown result rather than silently using `at` as an exact timestamp.
 
-## 9. Verification
+## 10. Verification
 
 `verifyBacktestRun` for v11 must fail closed when:
 
 - an `OPEN_EXACT` fill has `at != executionAt`;
 - an `INTRABAR_BOUNDED` fill has `at != earliestAt`;
-- `earliestAt >= latestBefore`;
-- either bound lies outside the economic bar window;
-- `latestBefore != barEnd`;
+- `earliestAt > latestAt`;
+- either bound lies outside the proven economic bar window;
 - `barStart >= barEnd`;
 - a v11 protective range-touch fill uses legacy `INTRABAR_UNKNOWN`;
 - a v11 market-entry or strategy-exit fill uses bounded timing;
@@ -168,7 +183,7 @@ Any duration or latency calculation must branch on timing kind. It may use an ex
 
 The verifier must not infer an exact intrabar timestamp.
 
-## 10. Identity and versioning
+## 11. Identity and versioning
 
 - Add `INTRABAR_TIMING_VERSION = 'intrabar-timing:v1'`.
 - `BACKTEST_ENGINE_VERSION` becomes `backtest-engine:v11`.
@@ -176,15 +191,15 @@ The verifier must not infer an exact intrabar timestamp.
 - The existing `intrabarPolicy` remains part of the input identity.
 - Historical runs are not reinterpreted.
 
-## 11. RED test matrix
+## 12. RED test matrix
 
 Before implementation, tests must demonstrate the v10 deficiencies and the intended v11 contract.
 
 Required RED cases:
 
-1. A daily XNAS bar whose `bar.startTime` precedes the regular-session open: a range-touch stop must have `earliestAt` equal to the session open, not `bar.startTime`.
-2. Same-bar entry at the executable open followed by a stop touch: bounded exit cannot predate the entry.
-3. Carried position stopped intrabar on a later bar: lower bound is that bar's executable open.
+1. A daily XNAS bar whose `bar.startTime` precedes the regular-session open: a range-touch stop has `earliestAt` equal to session open and `latestAt` equal to session close.
+2. Same-bar entry at executable open followed by a stop touch: bounded exit cannot predate the entry.
+3. Carried position stopped intrabar on a later bar: bounds are that later bar's economic open and close.
 4. Intrabar take-profit uses the same bounded timing semantics.
 5. Gap-through stop remains `OPEN_EXACT` and fills at actual open.
 6. Gap-through take-profit remains `OPEN_EXACT`.
@@ -195,7 +210,7 @@ Required RED cases:
 11. Repeated identical v11 runs produce identical timing records, fingerprint and run id.
 12. Changing only the engine/timing version changes identity; no v10 run is silently upgraded.
 
-## 12. Preservation tests
+## 13. Preservation tests
 
 The following must remain unchanged:
 
@@ -208,7 +223,7 @@ The following must remain unchanged:
 - same-bar final-close decisions remain unable to execute on their own bar;
 - point-in-time replay and warm-up behavior.
 
-## 13. Non-goals / limitations
+## 14. Non-goals / limitations
 
 O6 V1 does not determine the exact instant of an OHLC range touch.
 
@@ -216,7 +231,7 @@ It also does not determine whether stop or take-profit traded first when both li
 
 A future version may accept independently sourced lower-timeframe or tick evidence. Such evidence must carry its own point-in-time provenance and must never be synthesized from the parent OHLC bar.
 
-## 14. Safety
+## 15. Safety
 
 O6 changes backtest evidence quality only. It does not unlock execution.
 
