@@ -7,6 +7,7 @@ import { hashOf } from '../persistence/canonical-json.js';
 import type { BacktestStrategy, StrategyDecision } from './strategy.js';
 import {
   type BacktestBarKnowledge,
+  type BacktestCorporateActionResult,
   type BacktestEquityPoint,
   type BacktestFill,
   type BacktestMetrics,
@@ -14,10 +15,13 @@ import {
   type BacktestQuality,
   type BacktestQualityContext,
   type BacktestTrade,
+  type CorporateActionInput,
+  type CorporateActionReasonCode,
   type EntryRiskSizingAudit,
   type FillTiming,
   type PositionSizing,
 } from './backtest-types.js';
+import { CorporateActionLedger, type AttachedLevels } from './corporate-action-engine.js';
 import { DeterministicCostModel, type CostModelConfig } from './cost-model.js';
 import { executionClockIdentity, executionOpenOf, executionWindowOf, isEligibleAtOpen } from './execution-clock.js';
 import { INTRABAR_TIMING_VERSION, protectiveExitForLong, type IntrabarFillPolicy } from './execution-model.js';
@@ -40,6 +44,8 @@ export interface PortfolioBacktestInput {
   quality: BacktestQualityContext;
   intrabarPolicy?: IntrabarFillPolicy;
   replay?: BarReplayMode;
+  /** Optional explicit accounting, keyed by instrument. Omitted instruments are not modeled. */
+  corporateActionsByInstrument?: Readonly<Record<string, CorporateActionInput>>;
 }
 
 export interface PortfolioBacktestResult {
@@ -63,6 +69,7 @@ export interface PortfolioBacktestResult {
   metrics: BacktestMetrics;
   quality: BacktestQuality;
   ambiguousBars: number;
+  corporateActionsByInstrument?: Readonly<Record<string, BacktestCorporateActionResult>>;
 }
 
 export class PortfolioAllocationAmbiguousError extends Error {
@@ -104,6 +111,15 @@ function fillAt(timing: FillTiming): string {
   if (timing.kind === 'OPEN_EXACT') return timing.executionAt;
   if (timing.kind === 'INTRABAR_BOUNDED') return timing.earliestAt;
   return timing.barStart;
+}
+
+function levelsOf(order: PendingOrder | null): AttachedLevels | null {
+  return order === null ? null : { stopLoss: order.stopLoss, takeProfit: order.takeProfit };
+}
+
+function withLevels(order: PendingOrder | null, levels: AttachedLevels | null): PendingOrder | null {
+  if (order === null || levels === null) return order;
+  return { ...order, stopLoss: levels.stopLoss, takeProfit: levels.takeProfit };
 }
 
 function decisionToPending(decision: StrategyDecision, decidedAt: number): PendingOrder | null {
@@ -163,8 +179,8 @@ function assertChronologicalAvailability(bars: readonly MarketBar[], mode: BarRe
   }
 }
 
-function markedEquity(cash: Decimal, positions: ReadonlyMap<string, BacktestPosition>, marks: ReadonlyMap<string, Decimal>): Decimal {
-  let equity = cash;
+function markedEquity(cash: Decimal, positions: ReadonlyMap<string, BacktestPosition>, marks: ReadonlyMap<string, Decimal>, receivables: Decimal = Decimal.ZERO): Decimal {
+  let equity = cash.plus(receivables);
   for (const position of positions.values()) {
     const mark = marks.get(position.instrumentId);
     if (!mark) throw new Error('PORTFOLIO_MARK_UNPROVEN: no point-in-time-known mark for ' + position.instrumentId);
@@ -221,11 +237,25 @@ export function runPortfolioBacktest(rawInput: PortfolioBacktestInput): Portfoli
     normalized[instrumentId] = bars;
   }
 
+  const ledgers = new Map<string, CorporateActionLedger>();
+  for (const instrumentId of instrumentIds) {
+    const ca = rawInput.corporateActionsByInstrument?.[instrumentId];
+    if (!ca) continue;
+    const calendar = rawInput.executionCalendars[instrumentId]!;
+    const bars = normalized[instrumentId]!;
+    if (bars[0]!.adjustment !== 'raw') throw new Error('CORPORATE_ACTION_DOUBLE_ADJUSTMENT_RISK: portfolio corporate-action accounting requires raw bars');
+    if (ca.calendar.calendarId !== calendar.calendarId) {
+      throw new Error('corporate actions and execution use different calendars for ' + instrumentId);
+    }
+    ledgers.set(instrumentId, new CorporateActionLedger(ca, rawInput.portfolioCurrency, bars[0]!));
+  }
+
   const events = buildBarAvailabilityQueue(normalized, replay);
   const state = new PointInTimeBarState(replay);
   const positions = new Map<string, BacktestPosition>();
   const pending = new Map<string, PendingOrder>();
   let latestMarks = new Map<string, Decimal>();
+  const lastRawClose = new Map<string, Decimal>();
   let cash = rawInput.initialCapital;
   let fillSequence = 0;
   let tradeSequence = 0;
@@ -288,6 +318,29 @@ export function runPortfolioBacktest(rawInput: PortfolioBacktestInput): Portfoli
     // Atomic information boundary: all same-time bars become visible before any strategy evaluation.
     for (const event of batch) state.advance(event);
 
+    // Corporate actions are instrument-local and occur before orders at that instrument's open.
+    const actionEvents = [...batch].sort((a, b) => {
+      const byStart = parseUtc(a.bar.startTime) - parseUtc(b.bar.startTime);
+      return byStart !== 0 ? byStart : a.instrumentId.localeCompare(b.instrumentId);
+    });
+    for (const event of actionEvents) {
+      const ledger = ledgers.get(event.instrumentId);
+      if (!ledger) continue;
+      const order = pending.get(event.instrumentId) ?? null;
+      const step = ledger.applyDue({
+        bar: event.bar,
+        eventMs: parseUtc(batchAt),
+        position: positions.get(event.instrumentId) ?? null,
+        levels: levelsOf(order),
+        lastRawClose: lastRawClose.get(event.instrumentId) ?? null,
+      });
+      if (step.position) positions.set(event.instrumentId, step.position);
+      else positions.delete(event.instrumentId);
+      const transformed = withLevels(order, step.levels);
+      if (transformed) pending.set(event.instrumentId, transformed);
+      else pending.delete(event.instrumentId);
+    }
+
     // Previously-created market orders. Select the first eligible bar of this batch per instrument.
     const eligible: EligibleOrder[] = [];
     for (const instrumentId of [...pending.keys()].sort()) {
@@ -315,7 +368,8 @@ export function runPortfolioBacktest(rawInput: PortfolioBacktestInput): Portfoli
     for (const openMs of [...groups.keys()].sort((a, b) => a - b)) {
       const group = groups.get(openMs)!.sort((a, b) => a.instrumentId.localeCompare(b.instrumentId));
       const cashBeforeGroup = cash;
-      const equityBeforeGroup = markedEquity(cashBeforeGroup, positions, sizingMarks);
+      const receivablesBeforeGroup = [...ledgers.values()].reduce((sum, ledger) => sum.plus(ledger.receivablesValue()), Decimal.ZERO);
+      const equityBeforeGroup = markedEquity(cashBeforeGroup, positions, sizingMarks, receivablesBeforeGroup);
       const plannedBuys: PlannedBuy[] = [];
 
       for (const item of group) {
@@ -442,10 +496,12 @@ export function runPortfolioBacktest(rawInput: PortfolioBacktestInput): Portfoli
       if (!mark) throw new Error('PORTFOLIO_MARK_UNPROVEN: no point-in-time-known mark for ' + position.instrumentId);
       marketValue = marketValue.plus(position.quantity.times(mark.close));
     }
-    const equity = cash.plus(marketValue);
-    equityCurve.push({ at: batchAt, cash, marketValue, receivablesValue: Decimal.ZERO, equity });
+    const receivablesValue = [...ledgers.values()].reduce((sum, ledger) => sum.plus(ledger.receivablesValue()), Decimal.ZERO);
+    const equity = cash.plus(marketValue).plus(receivablesValue);
+    equityCurve.push({ at: batchAt, cash, marketValue, receivablesValue, equity });
 
     latestMarks = new Map([...snapshot.entries()].map(([instrumentId, latest]) => [instrumentId, latest.close]));
+    for (const [instrumentId, latest] of snapshot.entries()) lastRawClose.set(instrumentId, latest.close);
 
     // Strategy evaluation happens only after the entire batch is visible. One evaluation per instrument,
     // using the latest bar that became usable in this batch.
@@ -461,11 +517,13 @@ export function runPortfolioBacktest(rawInput: PortfolioBacktestInput): Portfoli
       const history = Object.freeze([...state.historyAt(instrumentId, batchAt)]);
       if (history.length < warmup.requiredBars) continue;
       evaluatedThisBatch = true;
+      const ledger = ledgers.get(instrumentId);
+      const view = ledger ? ledger.strategyView(history, event.bar, parseUtc(batchAt)) : { history, currentBar: event.bar };
       const decision = rawInput.strategy.evaluate({
         instrumentId,
         asOf: batchAt,
-        currentBar: event.bar,
-        history,
+        currentBar: view.currentBar,
+        history: view.history,
         position: positions.get(instrumentId) ?? null,
       });
       if (pending.has(instrumentId)) continue;
@@ -496,13 +554,21 @@ export function runPortfolioBacktest(rawInput: PortfolioBacktestInput): Portfoli
   });
 
   const allBars = instrumentIds.flatMap((instrumentId) => normalized[instrumentId]!);
+  const corporateActionResults = Object.fromEntries(
+    instrumentIds.filter((instrumentId) => ledgers.has(instrumentId)).map((instrumentId) => [instrumentId, ledgers.get(instrumentId)!.result()]),
+  ) as Record<string, BacktestCorporateActionResult>;
+  const caReasonSet = new Set<CorporateActionReasonCode>();
+  for (const result of Object.values(corporateActionResults)) for (const reason of result.reasons) caReasonSet.add(reason);
+  const allActionsModeled =
+    instrumentIds.every((instrumentId) => corporateActionResults[instrumentId]?.complete === true) && caReasonSet.size === 0;
+  if (rawInput.quality.corporateActions === 'modeled' && !allActionsModeled) caReasonSet.add('CORPORATE_ACTION_CLAIM_NOT_PROVEN');
   const quality = assessBacktestQuality(
-    { ...rawInput.quality, corporateActions: 'not_modeled' },
+    { ...rawInput.quality, corporateActions: allActionsModeled ? 'modeled' : 'not_modeled' },
     trades.length,
     ambiguousBars,
     costModel.isZeroCost(),
     barKnowledgeAtUse(allBars, replay),
-    [],
+    [...caReasonSet],
     null,
   );
 
@@ -527,6 +593,7 @@ export function runPortfolioBacktest(rawInput: PortfolioBacktestInput): Portfoli
     instruments: instrumentIds.map((instrumentId) => ({
       instrumentId,
       executionClock: executionClockIdentity(rawInput.executionCalendars[instrumentId]!),
+      corporateActions: ledgers.get(instrumentId)?.fingerprintRows() ?? null,
       bars: normalized[instrumentId]!.map(barFingerprint),
     })),
   });
@@ -552,5 +619,6 @@ export function runPortfolioBacktest(rawInput: PortfolioBacktestInput): Portfoli
     metrics,
     quality,
     ambiguousBars,
+    ...(Object.keys(corporateActionResults).length > 0 ? { corporateActionsByInstrument: corporateActionResults } : {}),
   };
 }
