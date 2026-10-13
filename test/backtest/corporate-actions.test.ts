@@ -420,3 +420,16 @@ describe('O2 multiple actions and replay modes (Phases 10, 17)', () => {
     expect(decision.corporateActions!.applied.map((a) => a.transformation)).toEqual(research.corporateActions!.applied.map((a) => a.transformation));
   });
 });
+
+describe('O5 risk sizing after a split (docs/O5_EXECUTABLE_RISK_SIZING_V1.md §9)', () => {
+  it('a risk-sized entry decided before a 4-for-1 split sizes with the transformed stop 20, not 80, and records the post-split raw entry 25', () => {
+    const rows: Row[] = [...SPLIT_ROWS.slice(0, 3), ['2026-10-08', '25', '26', '24', '25'], ['2026-10-09', '25', '26', '24', '25']];
+    const sizing = { type: 'risk_per_trade' as const, riskBasisPoints: 100, maxCashBasisPoints: 10_000, stopGapStressBasisPoints: 0 };
+    const r = run(series(rows), strategy({ enterAt: 3, exitAt: 100, stop: '80', target: '120' }), { ...withActions([SPLIT_4_1]), sizing, costModel: { commissionBps: 0, spreadBps: 0, slippageBps: 0, minCommission: '0' } });
+    const fill = r.fills.find((f) => f.side === 'buy')!;
+    expect(fill.quantity.toString()).toBe('20');
+    expect(fill.riskSizing!.stopLoss.toString()).toBe('20');
+    expect(fill.riskSizing!.rawEntryPrice.toString()).toBe('25');
+    expect(fill.riskSizing!.modeledStressDownside.toString()).toBe('100');
+  });
+});
