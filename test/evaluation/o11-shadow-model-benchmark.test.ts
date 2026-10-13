@@ -73,7 +73,14 @@ class FakeEvaluator implements ShadowBenchmarkEvaluator {
       confidenceScore: 0.7,
       modelVersion: 'fixture-v1',
       evidenceFingerprint: hashOf({ caseId: input.caseId, evidence: input.modelInputFingerprint }),
-      outputFingerprint: hashOf({ modelKey: this.modelKey, caseId: input.caseId, recommendation: 'buy', confidenceScore: 0.7, modelVersion: 'fixture-v1' }),
+      outputFingerprint: hashOf({
+        modelKey: this.modelKey,
+        caseId: input.caseId,
+        recommendation: 'buy',
+        confidenceScore: 0.7,
+        modelVersion: 'fixture-v1',
+        evidenceFingerprint: hashOf({ caseId: input.caseId, evidence: input.modelInputFingerprint }),
+      }),
     };
     return this.mutate ? this.mutate(output, input) : output;
   }
@@ -91,7 +98,13 @@ class FakeScorer implements ShadowBenchmarkScorer {
       modelKey: input.modelKey,
       caseId: input.caseId,
       score,
-      scoringFingerprint: hashOf({ modelKey: input.modelKey, caseId: input.caseId, score: String(score), outcomeFingerprint: input.outcomeFingerprint }),
+      scoringFingerprint: hashOf({
+        modelKey: input.modelKey,
+        caseId: input.caseId,
+        score: String(score),
+        outcomeFingerprint: input.outcomeFingerprint,
+        outputFingerprint: input.modelOutput.outputFingerprint,
+      }),
     };
   }
 }
@@ -213,6 +226,33 @@ describe('O11 shadow model benchmark — RED', () => {
       code: 'INVALID_SCORE',
     } satisfies Partial<ShadowModelBenchmarkError>);
     await expect(runShadowModelBenchmark({ modelKey: MODEL, cases: cases(1), registry }, new FakeEvaluator(), new FakeScorer(1.01))).rejects.toMatchObject({
+      code: 'INVALID_SCORE',
+    } satisfies Partial<ShadowModelBenchmarkError>);
+  });
+
+  it('rejects a model output fingerprint that does not bind the returned output fields', async () => {
+    const registry = await registryWith(MODEL);
+    const forged = new FakeEvaluator(MODEL, (output) => ({ ...output, recommendation: 'sell' }));
+
+    await expect(runShadowModelBenchmark({ modelKey: MODEL, cases: cases(1), registry }, forged, new FakeScorer())).rejects.toMatchObject({
+      code: 'INVALID_MODEL_OUTPUT',
+    } satisfies Partial<ShadowModelBenchmarkError>);
+  });
+
+  it('rejects a scoring fingerprint that does not bind the frozen output and outcome', async () => {
+    const registry = await registryWith(MODEL);
+    const scorer: ShadowBenchmarkScorer = {
+      async score(input) {
+        return {
+          modelKey: input.modelKey,
+          caseId: input.caseId,
+          score: 0.8,
+          scoringFingerprint: hashOf({ unrelated: true, caseId: input.caseId }),
+        };
+      },
+    };
+
+    await expect(runShadowModelBenchmark({ modelKey: MODEL, cases: cases(1), registry }, new FakeEvaluator(), scorer)).rejects.toMatchObject({
       code: 'INVALID_SCORE',
     } satisfies Partial<ShadowModelBenchmarkError>);
   });
