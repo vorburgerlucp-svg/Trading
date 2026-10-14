@@ -386,6 +386,21 @@ describe('O12 point-in-time confidence calibration — RED', () => {
     expect(b.calibrationRunId).not.toBe(a.calibrationRunId);
   });
 
+  it('review: fit run identity binds eligible evidence content, not only the caller evidence id', () => {
+    const baseRows = request().observations;
+    const a = fitPitConfidenceCalibration(request({ observations: baseRows }));
+    const changed = baseRows.map((row, index) =>
+      index === 0 ? { ...row, outcomeLabel: row.outcomeLabel === 1 ? 0 as const : 1 as const } : row,
+    );
+    // Deliberately keep the same external evidenceFingerprint. The underlying fit payload changed.
+    expect(changed[0]!.evidenceFingerprint).toBe(baseRows[0]!.evidenceFingerprint);
+
+    const b = fitPitConfidenceCalibration(request({ observations: changed }));
+    expect(b.inputFingerprint).not.toBe(a.inputFingerprint);
+    expect(b.calibrationRunId).not.toBe(a.calibrationRunId);
+    expect(b.modelFingerprint).not.toBe(a.modelFingerprint);
+  });
+
   it('requires an explicit binary target identity; no performance score is accepted implicitly', () => {
     expect(() => fitPitConfidenceCalibration(request({ targetId: '' }))).toThrow(PitConfidenceCalibrationError);
     const raw = observation('x', 0.8, 1) as CalibrationObservation & { score?: number };
