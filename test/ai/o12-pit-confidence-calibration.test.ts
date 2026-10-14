@@ -392,6 +392,77 @@ describe('O12 point-in-time confidence calibration — RED', () => {
     expect(fitted.eligibleSampleSize).toBe(2);
   });
 
+  it('rejects model keys with control characters before fitting', () => {
+    expect(() => fitPitConfidenceCalibration(request({ modelKey: 'openai/model\nother' }))).toThrow(PitConfidenceCalibrationError);
+  });
+
+  it('verifier rejects target, policy, status and fit-evidence tampering', () => {
+    const result = fitPitConfidenceCalibration(request());
+
+    const target = structuredClone(result);
+    target.targetVersion = 'v2';
+    expect(() => verifyPitConfidenceCalibrationModel(target)).toThrow(PitConfidenceCalibrationError);
+
+    const policyTamper = structuredClone(result);
+    policyTamper.policy.minimumSamplesPerBin += 1;
+    expect(() => verifyPitConfidenceCalibrationModel(policyTamper)).toThrow(PitConfidenceCalibrationError);
+
+    const statusTamper = structuredClone(result);
+    statusTamper.status = 'INSUFFICIENT_SAMPLES';
+    expect(() => verifyPitConfidenceCalibrationModel(statusTamper)).toThrow(PitConfidenceCalibrationError);
+
+    const evidenceTamper = structuredClone(result);
+    evidenceTamper.fitEvidence[0]!.outcomeLabel = evidenceTamper.fitEvidence[0]!.outcomeLabel === 1 ? 0 : 1;
+    expect(() => verifyPitConfidenceCalibrationModel(evidenceTamper)).toThrow(PitConfidenceCalibrationError);
+  });
+
+  it('returns null metrics with zero coverage instead of inventing evaluation quality', () => {
+    const fit = fitPitConfidenceCalibration(
+      request({
+        observations: [
+          observation('fit-a', 0.1, 0),
+          observation('fit-b', 0.2, 1),
+        ],
+      }),
+    );
+
+    const evaluation = evaluatePitConfidenceCalibration({
+      model: fit,
+      asOf: '2026-04-01T00:00:00.000Z',
+      observations: [
+        observation('eval-empty-bin', 0.8, 1, {
+          asOf: '2026-03-01T00:00:00.000Z',
+          knownAt: '2026-03-02T00:00:00.000Z',
+          evidenceFingerprint: evidenceFingerprint('eval-empty-bin'),
+        }),
+      ],
+    });
+
+    expect(evaluation).toMatchObject({
+      eligibleSampleSize: 1,
+      coveredSampleSize: 0,
+      uncoveredSampleCount: 1,
+      coverageRate: 0,
+      brierScore: null,
+      meanPredictedProbability: null,
+      observedPositiveRate: null,
+      bins: [],
+    });
+  });
+
+  it('includes an observation whose outcome becomes known exactly at fitAsOf', () => {
+    const result = fitPitConfidenceCalibration(
+      request({
+        observations: [
+          observation('a', 0.2, 0),
+          observation('boundary-known', 0.8, 1, { knownAt: FIT_AS_OF }),
+        ],
+      }),
+    );
+    expect(result.eligibleSampleSize).toBe(2);
+    expect(result.excludedFutureSampleCount).toBe(0);
+  });
+
   it('preserves the existing calibrate helper semantics', () => {
     const legacy: CalibrationModel = {
       method: 'histogram_binning',
