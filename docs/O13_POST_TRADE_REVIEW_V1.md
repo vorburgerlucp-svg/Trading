@@ -442,3 +442,34 @@ No assertion was weakened or removed. Three existing tests and one shared helper
 - `strongTrace` removes the critic and counter-analyst steps together with their requirements, and sets the analyst step to one model and one provider. The base fixture is a committee plan with two analysts of which one answered, so it is `PROCESS_WEAK` under the new shortfall rule.
 
 One regression test was added: routing fallback order changes the review id.
+
+
+## 25. Owner follow-up after independent review
+
+The two merge-blocking findings from §24.5 items 1–2 were resolved before PR #12 was allowed to advance.
+
+### 25.1 Quarantined evidence is no longer DecisionRecord evidence
+
+The Brain still records quarantined external input in the trace security section so the audit trail shows that the input existed and why it was isolated. It no longer writes a quarantined evidence id into `DecisionRecord.evidenceRefs`.
+
+This makes the producer and the O13 verifier agree on the same invariant:
+
+- quarantined evidence remains visible for security/audit;
+- quarantined evidence is not cited as usable decision evidence.
+
+A regression assertion in `test/nexus/nexus-brain.test.ts` pins this integration rule.
+
+### 25.2 Executed outcomes must agree with the original execution gate
+
+O13 now refuses `executed: true` unless the source decision:
+
+- has `outcome === 'RECOMMEND'`; and
+- has `execution.paperIntentAllowed === true`.
+
+The normal NO_ACTION fixture is therefore reviewed as a counterfactual outcome (`executed: false`). Executed-path tests use a real paper-eligible RECOMMEND decision rather than rewriting a NO_ACTION trace.
+
+This does not unlock execution. `liveOrderAllowed` and `physicalPurchaseAllowed` remain compile-time locked false.
+
+### 25.3 Remaining trust limits
+
+The remaining §24.5 limits still apply: counterfactual net-result provenance, trace authenticity, external run timing, instrument binding, neutral/contested stop-target scope, shared scoring-rule trust, and requirement-without-step reporting.
