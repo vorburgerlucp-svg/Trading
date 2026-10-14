@@ -424,7 +424,7 @@ describe('O13 post-trade review — RED', () => {
     const base = await fixture();
     expect(codeOf(() => buildPostTradeReview(requestOf(base, {
       policy: { version: POST_TRADE_REVIEW_POLICY_VERSION, minimumEvidenceCountForStrong: -1 },
-    }))).toBe('INVALID_POLICY');
+    })))).toBe('INVALID_POLICY');
 
     const request = requestOf(base);
     const review = buildPostTradeReview(request);
