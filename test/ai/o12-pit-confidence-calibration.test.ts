@@ -735,9 +735,15 @@ function reissue(model: PitConfidenceCalibrationModel): PitConfidenceCalibration
     policy: model.policy,
     fitEvidenceFingerprints,
   });
-  const modelFingerprint = hashOf({
+  const modelFingerprint = modelFingerprintFor({ ...model, fitEvidence, fitEvidenceFingerprints, inputFingerprint });
+  return { ...model, fitEvidence, fitEvidenceFingerprints, inputFingerprint, calibrationRunId: 'pcc_' + inputFingerprint.slice(0, 40), modelFingerprint };
+}
+
+/** The model fingerprint formula, as a forger would reproduce it. */
+function modelFingerprintFor(model: PitConfidenceCalibrationModel): string {
+  return hashOf({
     engineVersion: model.engineVersion,
-    inputFingerprint,
+    inputFingerprint: model.inputFingerprint,
     modelKey: model.modelKey,
     targetId: model.targetId,
     targetVersion: model.targetVersion,
@@ -747,10 +753,9 @@ function reissue(model: PitConfidenceCalibrationModel): PitConfidenceCalibration
     eligibleSampleSize: model.eligibleSampleSize,
     status: model.status,
     bins: model.bins,
-    fitEvidence,
-    fitEvidenceFingerprints,
+    fitEvidence: model.fitEvidence,
+    fitEvidenceFingerprints: model.fitEvidenceFingerprints,
   });
-  return { ...model, fitEvidence, fitEvidenceFingerprints, inputFingerprint, calibrationRunId: 'pcc_' + inputFingerprint.slice(0, 40), modelFingerprint };
 }
 
 describe('O12 review — re-issued hashes do not make impossible states verifiable (guards)', () => {
@@ -787,6 +792,12 @@ describe('O12 review — re-issued hashes do not make impossible states verifiab
   it('T6 a model fitted on other evidence verifies as itself: consistency is not provenance (limit pinned, see the design doc)', () => {
     const changed = request().observations.map((one, index) => (index === 0 ? { ...one, outcomeLabel: 1 as const, evidenceFingerprint: evidenceFingerprint('changed') } : one));
     expect(() => verifyPitConfidenceCalibrationModel(fitPitConfidenceCalibration(request({ observations: changed })))).not.toThrow();
+  });
+
+  it('T8 a re-issued policy change is refused: the bins publish probabilities under the stated policy only', () => {
+    const forged = structuredClone(fitPitConfidenceCalibration(request()));
+    forged.policy = { ...forged.policy, minimumSamplesPerBin: 10 };
+    expect(codeOf(() => verifyPitConfidenceCalibrationModel(reissue(forged)))).toBe('INVALID_CALIBRATION_MODEL');
   });
 
   it('T7 a re-issued excluded-future count changes no identity: it is audit metadata, not fit evidence (limit pinned)', () => {
@@ -836,6 +847,157 @@ describe('O12 review — evidence identity boundaries (guards)', () => {
 function evaluationFingerprint(): string {
   return evidenceFingerprint('evaluation-shared');
 }
+
+function messageOf(run: () => unknown): string {
+  try {
+    run();
+    return 'NO_ERROR';
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+describe('O12 review — every refusal names its reason (guards)', () => {
+  it('A01 a row that is not an object is refused as an observation error', () => {
+    expect(codeOf(() => fitPitConfidenceCalibration(request({ observations: [...request().observations, null as unknown as CalibrationObservation] })))).toBe('INVALID_OBSERVATIONS');
+  });
+
+  it('A02 a later row with a blank observationId is refused: every row must be identifiable', () => {
+    expect(codeOf(() => fitPitConfidenceCalibration(request({ observations: [...request().observations, observation(' ', 0.9, 0, { knownAt: FUTURE })] })))).toBe('INVALID_OBSERVATIONS');
+  });
+
+  it('G8b an unreadable knownAt is refused with its own reason', () => {
+    expect(messageOf(() => fitPitConfidenceCalibration(request({ observations: [...request().observations, observation('future-time', 0.9, 0, { knownAt: 'Mar 1 2026' })] })))).toMatch(/knownAt must be a canonical UTC instant/);
+  });
+
+  it('B01 two rows with one observationId and different evidence are refused as duplicate ids', () => {
+    expect(messageOf(() => fitPitConfidenceCalibration(request({ observations: [observation('same-id', 0.3, 1), observation('same-id', 0.6, 0)] })))).toMatch(/duplicate observationId same-id/);
+  });
+
+  it('B02 a non-canonical asOf of an eligible row is refused with its reason', () => {
+    expect(messageOf(() => fitPitConfidenceCalibration(request({ observations: [observation('x', 0.5, 1, { asOf: '2026-01-01' })] })))).toMatch(/asOf must be a canonical UTC instant/);
+  });
+
+  it('B03 knownAt before asOf is refused by the observation check, not by the later self-verification', () => {
+    expect(messageOf(() => fitPitConfidenceCalibration(request({ observations: [observation('x', 0.5, 1, { asOf: '2026-01-03T00:00:00.000Z', knownAt: '2026-01-02T00:00:00.000Z' })] })))).toMatch(/knownAt precedes asOf/);
+  });
+
+  it('B05 a non-binary label is refused by the observation check', () => {
+    expect(codeOf(() => fitPitConfidenceCalibration(request({ observations: [{ ...observation('x', 0.5, 1), outcomeLabel: 0.5 as never }] })))).toBe('INVALID_OBSERVATIONS');
+  });
+
+  it('B06 a malformed evidence fingerprint is refused by the observation check', () => {
+    expect(messageOf(() => fitPitConfidenceCalibration(request({ observations: [{ ...observation('x', 0.5, 1), evidenceFingerprint: 'short' }] })))).toMatch(/evidenceFingerprint must be a lowercase/);
+  });
+
+  it('C04 a bin below minimumSamplesPerBin publishes no probability, while a bin that meets it does', () => {
+    const fit = fitPitConfidenceCalibration(
+      request({
+        observations: [observation('a', 0.1, 0), observation('b', 0.2, 1), observation('c', 0.8, 1), observation('d', 0.9, 1), observation('e', 0.85, 1)],
+        policy: { ...policy, minimumFitSamples: 2, minimumSamplesPerBin: 3 },
+      }),
+    );
+    expect(fit.bins.map((bin) => [bin.sampleSize, bin.probability])).toEqual([
+      [2, null],
+      [3, 1],
+    ]);
+  });
+
+  it('F01 a tampered engine version is refused', () => {
+    const forged = { ...fitPitConfidenceCalibration(request()), engineVersion: 'pit-confidence-calibration:v0' as never };
+    expect(messageOf(() => verifyPitConfidenceCalibrationModel(forged))).toMatch(/engineVersion is invalid/);
+  });
+
+  it('F02 a tampered method is refused', () => {
+    const forged = { ...fitPitConfidenceCalibration(request()), method: 'platt_scaling' as never };
+    expect(messageOf(() => verifyPitConfidenceCalibrationModel(forged))).toMatch(/method is not histogram_binning/);
+  });
+
+  it('F03 a non-canonical fitAsOf is refused by the verifier', () => {
+    const forged = { ...structuredClone(fitPitConfidenceCalibration(request())), fitAsOf: '2026-02-01' };
+    expect(messageOf(() => verifyPitConfidenceCalibrationModel(forged))).toMatch(/fitAsOf is not canonical UTC/);
+  });
+
+  it('F04 a negative excluded-future count is refused', () => {
+    const forged = { ...structuredClone(fitPitConfidenceCalibration(request())), excludedFutureSampleCount: -1 };
+    expect(messageOf(() => verifyPitConfidenceCalibrationModel(forged))).toMatch(/excludedFutureSampleCount is invalid/);
+  });
+
+  it('F06 a re-issued confidence outside 0..1 is refused by the verifier, not by binning', () => {
+    const forged = structuredClone(fitPitConfidenceCalibration(request()));
+    forged.fitEvidence[0]!.confidenceScore = 2;
+    expect(messageOf(() => verifyPitConfidenceCalibrationModel(reissue(forged)))).toMatch(/confidenceScore is invalid/);
+  });
+
+  it('F07 a re-issued label outside 0 and 1 is refused by the verifier, not by the bin totals', () => {
+    const forged = structuredClone(fitPitConfidenceCalibration(request()));
+    forged.fitEvidence[0]!.outcomeLabel = 2 as never;
+    expect(messageOf(() => verifyPitConfidenceCalibrationModel(reissue(forged)))).toMatch(/outcomeLabel is invalid/);
+  });
+
+  it('F08 a fit row changed without re-issuing its content binding is refused', () => {
+    const forged = structuredClone(fitPitConfidenceCalibration(request()));
+    forged.fitEvidence[0]!.knownAt = '2026-01-03T12:00:00.000Z';
+    expect(messageOf(() => verifyPitConfidenceCalibrationModel(forged))).toMatch(/does not bind the evidence/);
+  });
+
+  it('F09 a re-issued model that repeats one evidence under another observation id is refused', () => {
+    const model = structuredClone(fitPitConfidenceCalibration(request()));
+    const copy = { ...model.fitEvidence[0]!, observationId: 'a2' };
+    const forged = { ...model, fitEvidence: [model.fitEvidence[0]!, copy, ...model.fitEvidence.slice(1)] };
+    expect(messageOf(() => verifyPitConfidenceCalibrationModel(reissue(forged)))).toMatch(/duplicate fit evidence/);
+  });
+
+  it('F10 a re-issued model whose fit evidence is out of observationId order is refused', () => {
+    const model = structuredClone(fitPitConfidenceCalibration(request()));
+    const forged = { ...model, fitEvidence: [...model.fitEvidence].reverse() };
+    expect(messageOf(() => verifyPitConfidenceCalibrationModel(reissue(forged)))).toMatch(/canonical observationId order/);
+  });
+
+  it('F12 a changed fit-evidence identity list is refused even when the model fingerprint is re-issued', () => {
+    const model = structuredClone(fitPitConfidenceCalibration(request()));
+    const forged = { ...model, fitEvidenceFingerprints: ['f'.repeat(64), ...model.fitEvidenceFingerprints.slice(1)] };
+    const reissued = { ...forged, modelFingerprint: modelFingerprintFor(forged) };
+    expect(messageOf(() => verifyPitConfidenceCalibrationModel(reissued))).toMatch(/fitEvidenceFingerprints do not match fit evidence/);
+  });
+
+  it('F16 a changed input fingerprint is refused even when the run id and model fingerprint are re-issued', () => {
+    const model = structuredClone(fitPitConfidenceCalibration(request()));
+    const inputFingerprint = 'e'.repeat(64);
+    const forged = { ...model, inputFingerprint, calibrationRunId: 'pcc_' + inputFingerprint.slice(0, 40) };
+    const reissued = { ...forged, modelFingerprint: modelFingerprintFor(forged) };
+    expect(messageOf(() => verifyPitConfidenceCalibrationModel(reissued))).toMatch(/inputFingerprint does not match calibration inputs/);
+  });
+
+  it('F19 a blank target version is refused by the verifier with its reason', () => {
+    const forged = { ...fitPitConfidenceCalibration(request()), targetVersion: ' ' };
+    expect(messageOf(() => verifyPitConfidenceCalibrationModel(forged))).toMatch(/targetVersion must be a non-empty trimmed string/);
+  });
+
+  it('G5b applying a NaN confidence is refused with its reason', () => {
+    const fit = fitPitConfidenceCalibration(request());
+    expect(messageOf(() => applyFittedCalibration(fit, MODEL, Number.NaN))).toMatch(/confidenceScore must be within 0..1/);
+  });
+
+  it('H5 mean predicted probability and observed positive rate cover only covered rows', () => {
+    const fit = fitPitConfidenceCalibration(
+      request({
+        observations: [observation('fit-a', 0.1, 0), observation('fit-b', 0.2, 1), observation('fit-c', 0.8, 1)],
+        policy: { ...policy, minimumFitSamples: 3, minimumSamplesPerBin: 2 },
+      }),
+    );
+    const known = { asOf: '2026-03-01T00:00:00.000Z', knownAt: '2026-03-02T00:00:00.000Z' };
+    const evaluation = evaluatePitConfidenceCalibration({
+      model: fit,
+      asOf: '2026-04-01T00:00:00.000Z',
+      observations: [
+        observation('covered', 0.2, 1, { ...known, evidenceFingerprint: evidenceFingerprint('covered') }),
+        observation('uncovered', 0.8, 0, { ...known, evidenceFingerprint: evidenceFingerprint('uncovered') }),
+      ],
+    });
+    expect(evaluation).toMatchObject({ meanPredictedProbability: 0.5, observedPositiveRate: 1 });
+  });
+});
 
 describe('O12 review — evaluation time and mixed rows (guards)', () => {
   it('V2 an evaluation row decided and known after the evaluation instant is excluded', () => {
