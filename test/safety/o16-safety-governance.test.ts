@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { chf } from '../../src/money/money.js';
 import {
   authorizeResetRequest,
   createResetAuthorizationRequest,
@@ -41,15 +42,15 @@ function decision(): PortfolioSafetyDecision {
     liveOrderAllowed: false,
     physicalPurchaseAllowed: false,
     metrics: {
-      adjustedCurrentNetWorthChf: 90000n,
-      adjustedDailyPnlChf: -10000n,
-      adjustedDailyLossChf: 10000n,
+      adjustedCurrentNetWorthChf: chf(900),
+      adjustedDailyPnlChf: chf(-100),
+      adjustedDailyLossChf: chf(100),
       adjustedDailyLossBp: 1000,
-      realizedTradingPnlTodayChf: -10000n,
-      realizedTradingLossChf: 10000n,
-      intradayDrawdownChf: 10000n,
+      realizedTradingPnlTodayChf: chf(-100),
+      realizedTradingLossChf: chf(100),
+      intradayDrawdownChf: chf(100),
       intradayDrawdownBp: 1000,
-      grossExposureChf: 0n,
+      grossExposureChf: chf(0),
       grossExposureBp: 0,
       maximumPositionExposureBp: 0,
       openPositionCount: 0,
