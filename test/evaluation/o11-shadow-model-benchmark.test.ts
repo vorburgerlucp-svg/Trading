@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_CHAMPION_POLICY } from '../../src/ai/champion-challenger.js';
-import { DEFAULT_PERFORMANCE_POLICY } from '../../src/ai/model-performance.js';
+import { DEFAULT_CHAMPION_POLICY, type ChampionPolicy } from '../../src/ai/champion-challenger.js';
+import { DEFAULT_PERFORMANCE_POLICY, type PerformancePolicy } from '../../src/ai/model-performance.js';
 import { ModelRegistry } from '../../src/ai/model-registry.js';
 import { modelKey } from '../../src/ai/model-types.js';
 import {
@@ -720,5 +720,181 @@ describe('O11 review — frozen inputs, substitution and comparison (guards)', (
     expect(result.gate.status).toBe('GATE_PASSED_HUMAN_REVIEW_REQUIRED');
     expect(registry.get(MODEL)).toEqual(before);
     expect(registry.changes()).toEqual(changesBefore);
+  });
+});
+
+// Coverage of the individual validation branches (guards and tests that would catch each branch if it were removed).
+
+function messageOf(run: () => unknown): string {
+  try {
+    run();
+    return 'NO_ERROR';
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function messageOfAsync(run: () => Promise<unknown>): Promise<string> {
+  try {
+    await run();
+    return 'NO_ERROR';
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+describe('O11 review — each validation branch is covered (guards)', () => {
+  it('A6 a case field edited without re-issuing its caseFingerprint is refused', async () => {
+    const tampered = structuredClone(await benchmark(cases(2), await registryWith(MODEL), 0.4));
+    tampered.cases[0]!.asOf = '2026-01-05T20:00:00.000Z';
+    expect(codeOf(() => verifyShadowModelBenchmarkResult(tampered))).toBe('INVALID_RESULT');
+    expect(messageOf(() => verifyShadowModelBenchmarkResult(tampered))).toMatch(/caseFingerprint/);
+  });
+
+  it('A7 a model output edited without re-issuing its outputFingerprint is refused', async () => {
+    const tampered = structuredClone(await benchmark(cases(2), await registryWith(MODEL), 0.4));
+    tampered.cases[0]!.modelOutput.recommendation = 'sell';
+    expect(messageOf(() => verifyShadowModelBenchmarkResult(tampered))).toMatch(/outputFingerprint/);
+  });
+
+  it('A8 a forged gateAsOf is refused', async () => {
+    const a = await benchmark(cases(3), await registryWith(MODEL), 0.4);
+    expect(messageOf(() => verifyShadowModelBenchmarkResult({ ...a, gateAsOf: '2026-02-01T00:00:00.000Z' }))).toMatch(/gateAsOf/);
+  });
+
+  it('A9 a forged benchmark run id and a forged engine version are refused', async () => {
+    const a = await benchmark(cases(2), await registryWith(MODEL), 0.4);
+    expect(messageOf(() => verifyShadowModelBenchmarkResult({ ...a, benchmarkRunId: 'smb_' + 'c'.repeat(40) }))).toMatch(/benchmarkRunId/);
+    expect(messageOf(() => verifyShadowModelBenchmarkResult({ ...a, engineVersion: 'shadow-model-benchmark:v0' as typeof a.engineVersion }))).toMatch(/engine version/);
+  });
+
+  it('A10 a result without cases, or with cases out of canonical order, is refused', async () => {
+    const a = await benchmark(cases(2), await registryWith(MODEL), 0.4);
+    expect(codeOf(() => verifyShadowModelBenchmarkResult({ ...a, cases: [] }))).toBe('INVALID_RESULT');
+    expect(messageOf(() => verifyShadowModelBenchmarkResult({ ...a, cases: [a.cases[1]!, a.cases[0]!] }))).toMatch(/canonical caseId order/);
+  });
+
+  it('C4b the getter refusal names the accessor, not a downstream check', async () => {
+    let calls = 0;
+    const cs = cases(1);
+    cs[0] = { ...cs[0]!, modelInput: { get v() { calls += 1; return calls; } }, modelInputFingerprint: hashOf({ v: 1 }) };
+    expect(await messageOfAsync(async () => benchmark(cs, await registryWith(MODEL)))).toMatch(/accessor/);
+  });
+
+  it('C12 a symbol-keyed property is refused: structured cloning would drop it', async () => {
+    const cs = cases(1);
+    cs[0] = withInput(cs[0]!, { a: 1, [Symbol('hidden')]: 2 } as unknown as Record<string, unknown>);
+    cs[0] = { ...cs[0]!, modelInputFingerprint: hashOf({ a: 1 }) };
+    expect(await messageOfAsync(async () => benchmark(cs, await registryWith(MODEL)))).toMatch(/symbol key/);
+  });
+
+  it('C13 a non-enumerable property is refused: canonical hashing would not bind it', async () => {
+    const input = { a: 1 } as Record<string, unknown>;
+    Object.defineProperty(input, 'hidden', { value: 1, enumerable: false });
+    const cs = cases(1);
+    cs[0] = { ...cs[0]!, modelInput: input, modelInputFingerprint: hashOf({ a: 1 }) };
+    expect(await messageOfAsync(async () => benchmark(cs, await registryWith(MODEL)))).toMatch(/not enumerable/);
+  });
+
+  it('C14 a sparse array is refused', async () => {
+    const cs = cases(1);
+    const list = [1, , 3] as unknown[];
+    cs[0] = { ...cs[0]!, modelInput: { list } as Record<string, unknown>, modelInputFingerprint: hashOf({ list: [1, null, 3] }) };
+    expect(await messageOfAsync(async () => benchmark(cs, await registryWith(MODEL)))).toMatch(/sparse/);
+  });
+
+  it('C15 an array with a foreign prototype is refused', async () => {
+    const list = [1, 2];
+    Object.setPrototypeOf(list, {});
+    const cs = cases(1);
+    cs[0] = { ...cs[0]!, modelInput: { list } as Record<string, unknown>, modelInputFingerprint: hashOf({ list: [1, 2] }) };
+    expect(await messageOfAsync(async () => benchmark(cs, await registryWith(MODEL)))).toMatch(/non-standard prototype/);
+  });
+
+  it('D6 blank and untrimmed case ids, unknown domains and unknown subtasks are refused', async () => {
+    const registry = await registryWith(MODEL);
+    const invalid = [
+      { ...oneCase('case-001', 0), caseId: '  ' },
+      { ...oneCase('case-001', 0), caseId: ' padded' },
+      { ...oneCase('case-001', 0), domain: 'weather' as never },
+      { ...oneCase('case-001', 0), subtask: 'vibes' as never },
+    ];
+    for (const one of invalid) {
+      expect(await codeOfAsync(async () => benchmark([one], registry))).toBe('INVALID_CASES');
+    }
+  });
+
+  it('F4 a frozen model input still reads back its original value after an attempted write', async () => {
+    const observed: unknown[] = [];
+    const evaluator: ShadowBenchmarkEvaluator = {
+      async evaluate(input) {
+        try {
+          (input.modelInput as Record<string, unknown>).feature = 999;
+        } catch {
+          /* the frozen input refuses the write */
+        }
+        observed.push(input.modelInput.feature);
+        return new FakeEvaluator().evaluate(input);
+      },
+    };
+    await runShadowModelBenchmark({ modelKey: MODEL, cases: cases(2), registry: await registryWith(MODEL) }, evaluator, new FakeScorer());
+    expect(observed).toEqual([0, 1]);
+  });
+
+  it('F5 a frozen outcome still reads back its original value after an attempted write', async () => {
+    const observed: unknown[] = [];
+    const scorer: ShadowBenchmarkScorer = {
+      async score(input) {
+        try {
+          (input.outcome as Record<string, unknown>).returnBp = 0;
+        } catch {
+          /* the frozen outcome refuses the write */
+        }
+        observed.push(input.outcome.returnBp);
+        return new FakeScorer(0.8).score(input);
+      },
+    };
+    await runShadowModelBenchmark({ modelKey: MODEL, cases: cases(2), registry: await registryWith(MODEL) }, new FakeEvaluator(), scorer);
+    expect(observed).toEqual([500, -300]);
+  });
+
+  it('G5 an invalid recommendation, a blank model version and a malformed evidence hash are refused', async () => {
+    const registry = await registryWith(MODEL);
+    const recommendation = new FakeEvaluator(MODEL, (output) => ({ ...output, recommendation: 'maybe' as never }));
+    expect(await codeOfAsync(async () => runShadowModelBenchmark({ modelKey: MODEL, cases: cases(1), registry }, recommendation, new FakeScorer()))).toBe('INVALID_MODEL_OUTPUT');
+    const blankVersion = new FakeEvaluator(MODEL, (output) => ({ ...output, modelVersion: ' ' }));
+    expect(await codeOfAsync(async () => runShadowModelBenchmark({ modelKey: MODEL, cases: cases(1), registry }, blankVersion, new FakeScorer()))).toBe('INVALID_MODEL_OUTPUT');
+    const shortEvidence = new FakeEvaluator(MODEL, (output) => ({ ...output, evidenceFingerprint: 'short' }));
+    expect(await codeOfAsync(async () => runShadowModelBenchmark({ modelKey: MODEL, cases: cases(1), registry }, shortEvidence, new FakeScorer()))).toBe('INVALID_MODEL_OUTPUT');
+  });
+
+  it('H7 a comparison needs at least two results', async () => {
+    const a = await benchmark(cases(3), await registryWith(MODEL), 0.4);
+    expect(codeOf(() => compareShadowBenchmarks([a]))).toBe('BENCHMARK_COMPARISON_MISMATCH');
+  });
+
+  it('I2 every performance and champion policy bound is enforced with the policy code', async () => {
+    const registry = await registryWith(MODEL);
+    const invalid: Array<{ performancePolicy?: PerformancePolicy; championPolicy?: ChampionPolicy }> = [
+      { performancePolicy: { minSamplesForScore: 0, priorScore: 0.5, priorWeight: 10 } },
+      { performancePolicy: { minSamplesForScore: 20, priorScore: 0.5, priorWeight: -1 } },
+      { performancePolicy: { minSamplesForScore: 20, priorScore: -0.1, priorWeight: 10 } },
+      { championPolicy: { ...DEFAULT_CHAMPION_POLICY, minSamplesToLeaveShadow: 0 } },
+      { championPolicy: { ...DEFAULT_CHAMPION_POLICY, minScoreToLeaveShadow: 1.5 } },
+      { championPolicy: { ...DEFAULT_CHAMPION_POLICY, minSamplesForChampion: 0 } },
+      { championPolicy: { ...DEFAULT_CHAMPION_POLICY, minScoreMargin: 2 } },
+    ];
+    for (const policy of invalid) {
+      expect(await codeOfAsync(async () => runShadowModelBenchmark({ modelKey: MODEL, cases: cases(1), registry, ...policy }, new FakeEvaluator(), new FakeScorer()))).toBe('INVALID_POLICY');
+    }
+  });
+
+  it('E3 model keys with leading, trailing or inner spaces, or with an empty side, are refused before any evaluator call', async () => {
+    const registry = await registryWith(MODEL);
+    for (const key of [' google/shadow-gemini', 'google/shadow-gemini ', '/shadow-gemini', 'google/', 'google/shadow gemini']) {
+      const evaluator = new FakeEvaluator(key);
+      expect(await codeOfAsync(async () => runShadowModelBenchmark({ modelKey: key, cases: cases(1), registry }, evaluator, new FakeScorer())), key).toBe('INVALID_MODEL');
+      expect(evaluator.calls).toHaveLength(0);
+    }
   });
 });
