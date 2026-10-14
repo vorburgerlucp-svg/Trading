@@ -12,7 +12,7 @@ const MAX_BARS_WINDOW_MS = 366 * 24 * 60 * 60 * 1000;
 export interface RuntimeHealth {
   status: 'ok' | 'degraded';
   database: 'connected' | 'unavailable';
-  marketData: 'connected' | 'demo' | 'not_configured';
+  marketData: 'configured' | 'demo' | 'not_configured';
   providerHealth: 'closed' | 'open' | 'half_open' | 'not_configured';
   tradingMode: 'paper';
   liveTrading: 'locked';
