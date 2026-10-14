@@ -602,6 +602,70 @@ describe('O15 review — RED probes', () => {
   });
 });
 
+describe('O15 review — input integrity, day identity and state matrix pins', () => {
+  it('a negative market value, an invalid price status or a duplicated stale id is refused', () => {
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ positions: [position('AAPL', chf(200), { marketValueChf: -1n as never })] }),
+    })))).toBe('INVALID_PORTFOLIO');
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ positions: [position('AAPL', chf(200), { priceStatus: 'banana' as never })] }),
+    })))).toBe('INVALID_PORTFOLIO');
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(1000), { dataStatus: { financialMarketData: 'complete', inventoryMarketData: 'not_required', unpricedPositions: [], stalePositions: ['paper:AAPL', 'paper:AAPL'] } }) }),
+    })))).toBe('INVALID_PORTFOLIO');
+  });
+
+  it('a non-bigint capital number is refused, and a malformed financial coverage status holds open positions', () => {
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ portfolio: portfolio({ capital: capital(1000 as never) }) })))).toBe('INVALID_PORTFOLIO');
+    const malformed = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(1000), { dataStatus: { financialMarketData: 'banana' as never, inventoryMarketData: 'not_required', unpricedPositions: [], stalePositions: [] } }) }),
+    }));
+    expect(malformed.state).toBe('DATA_HOLD');
+  });
+
+  it('a malformed broker id is refused', () => {
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ positions: [position('AAPL', chf(200), { brokerId: '  ' })] }),
+    })))).toBe('INVALID_PORTFOLIO');
+  });
+
+  it('a risk day that starts exactly at asOf on the same UTC day is accepted; one that starts after asOf is refused', () => {
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ day: day({ dayStartedAt: AS_OF }) })))).toBe('NO_ERROR');
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ day: day({ dayStartedAt: '2026-10-14T13:00:00.000Z' }) })))).toBe('INVALID_DAY');
+  });
+
+  it('the same economics with a different source fingerprint yields a different decision identity', () => {
+    const base = evaluatePortfolioSafetyEnvelope(request());
+    expect(evaluatePortfolioSafetyEnvelope(request({ day: day({ sourceFingerprint: 'e'.repeat(64) }) })).decisionId).not.toBe(base.decisionId);
+  });
+
+  it('risk increase is allowed only in NORMAL, risk reduction is allowed in every state, and live and physical execution stay false', () => {
+    const cases: Array<[string, PortfolioSafetyRequest, string]> = [
+      ['NORMAL', request(), 'NORMAL'],
+      ['CAPACITY_BLOCK', request({ policy: policy({ maxOpenPositions: 1 }) }), 'CAPACITY_BLOCK'],
+      ['DATA_HOLD', request({ portfolio: portfolio({ positions: [position('AAPL', chf(200), { marketValueChf: null, priceStatus: 'stale' })] }) }), 'DATA_HOLD'],
+      ['TRIPPED', request({ previousKillSwitch: tripped() }), 'TRIPPED'],
+    ];
+    for (const [label, req, expected] of cases) {
+      const result = evaluatePortfolioSafetyEnvelope(req);
+      expect(result.state, label).toBe(expected);
+      expect(result.canIncreaseRisk, label).toBe(result.state === 'NORMAL');
+      expect(result.canReduceRisk, label).toBe(true);
+      expect(result.liveOrderAllowed, label).toBe(false);
+      expect(result.physicalPurchaseAllowed, label).toBe(false);
+    }
+  });
+
+  it('a breach and a data hold together are TRIPPED, and the data-hold reason is still reported', () => {
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(850)), positions: [position('AAPL', chf(200), { marketValueChf: null, priceStatus: 'stale' })] }),
+    }));
+    expect(result.state).toBe('TRIPPED');
+    expect(result.dataHoldReasons).toContain('financial pricing is incomplete');
+    expect(result.hardBreachReasons).toContain('adjusted daily loss reached CHF limit');
+  });
+});
+
 describe('O15 review — pins that already hold', () => {
   it('a loss one basis point below the bp limit does not trip; exactly at it does; a fraction above it trips conservatively', () => {
     const at = (total: string) => evaluatePortfolioSafetyEnvelope(request({
