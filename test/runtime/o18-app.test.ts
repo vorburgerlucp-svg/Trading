@@ -20,6 +20,17 @@ function services(overrides: Partial<RuntimeServices> = {}): RuntimeServices {
       version: 'test',
     }),
     searchInstruments: async () => [],
+    registerInstrument: async (request) => ({
+      instrumentId: 'ins_test',
+      provider: 'twelvedata',
+      providerSymbol: request.providerSymbol,
+      name: 'Test Instrument',
+      assetClass: 'stock',
+      exchange: request.exchange ?? null,
+      mic: request.mic ?? null,
+      currency: 'USD',
+      timezone: 'America/New_York',
+    }),
     readBars: async () => ({ bars: [] }),
     quote: async () => ({ quote: null }),
     runQuant: async () => ({ status: 'insufficient_data' }),
@@ -98,6 +109,22 @@ describe('O18 runtime HTTP surface', () => {
       expect(response.status, interval).toBe(200);
     }
     expect(seen).toEqual(['1m', '5m', '15m', '1h', '4h', '1d']);
+  });
+
+  it('instrument registration is explicit and requires a canonical mapping start', async () => {
+    await start(services());
+    const good = await fetch(base + '/api/instruments/register', {
+      method: 'POST',
+      body: JSON.stringify({ providerSymbol: 'AAPL', validFrom: '1980-12-12T00:00:00.000Z', mic: 'XNAS', exchange: 'NASDAQ' }),
+    });
+    expect(good.status).toBe(201);
+    expect(await good.json()).toMatchObject({ instrument: { instrumentId: 'ins_test', providerSymbol: 'AAPL' } });
+
+    const bad = await fetch(base + '/api/instruments/register', {
+      method: 'POST',
+      body: JSON.stringify({ providerSymbol: 'AAPL', validFrom: '1980-12-12T00:00:00Z' }),
+    });
+    expect(bad.status).toBe(400);
   });
 
   it('the quant run rejects unknown body fields and non-JSON, and refuses oversized bodies', async () => {
