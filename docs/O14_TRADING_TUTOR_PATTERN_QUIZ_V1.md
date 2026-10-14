@@ -422,3 +422,46 @@ O14 defends in depth against observations whose fields are later than their `asO
 8. **Outcome-bias wording** is pinned by a matrix over every process and outcome combination. It is not semantic review: a new sentence template needs a new matrix entry.
 
 No field in any artifact can place, route, size or cancel an order. Live Trading, Broker Orders and Physical Purchase remain LOCKED.
+
+
+## 25. Owner follow-up after independent review
+
+The two merge-blocking trust limits from §24.6 items 1 and 3 were resolved before PR #13 was allowed to advance.
+
+### 25.1 One O13 classification rule
+
+O13 now exports two pure deterministic helpers from `src/evaluation/post-trade-review.ts`:
+
+- `classifyPostTradeProcess(diagnostics, policy)`
+- `classifyPostTradeOutcome(returnBp)`
+
+The O13 review builder itself uses these helpers, and the O14 tutor imports and uses the same helpers when validating an embedded review.
+
+The duplicated tutor copy of the process rule and the duplicated flat-band outcome rule were removed. A future O13 classification change therefore has one implementation point rather than two drifting copies.
+
+This is an integration-only API extraction: it does not change O13's classification semantics.
+
+### 25.2 Source-proven grading is mandatory
+
+The public grading API is now:
+
+```ts
+gradePatternQuiz(observation, quiz, submittedOptionId, expectedPolicy?)
+```
+
+Before evaluating the selected option, it calls `verifyPatternQuiz` against the supplied source observation and optional expected policy.
+
+Therefore:
+
+- self-consistency alone is not sufficient for grading;
+- an internally consistent quiz re-issued from another observation is refused;
+- an edited quiz is refused before a learner score is produced;
+- callers cannot accidentally treat quiz-local hashes as provenance on the normal grading path.
+
+There are no repository callers of the previous two-argument grading form, so the safer contract was adopted directly rather than retaining an unsafe legacy entry point.
+
+### 25.3 Remaining trust limits
+
+The remaining §24.6 limits still apply: tutor provenance ultimately depends on O13 source verification, policy pinning is optional unless a consumer supplies an expected policy, some pattern geometry has no independent field-level timestamp, chart-context PIT validity remains upstream, distractor quality is broad-vocabulary rather than family-specific, and outcome-bias wording remains template-tested rather than semantically interpreted.
+
+Live Trading, Broker Orders and Physical Purchase remain LOCKED.
