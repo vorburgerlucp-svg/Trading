@@ -551,3 +551,89 @@ These cannot be proven from `PortfolioSnapshot`, `RiskDaySummary` and `Portfolio
 ### 27.4 Scope
 
 No broker adapter, Capital Engine accounting rule, registry, champion governance, alert transport, audit persistence or kill-switch reset flow was changed. `LockedBroker.place` is unchanged.
+
+
+## 28. Owner follow-up after independent review
+
+The three integration prerequisites from the independent O15 review were closed before PR #14 was allowed to advance.
+
+### 28.1 Independent quote freshness
+
+`PortfolioSafetyPolicy` now includes `maxFinancialQuoteAgeMs`.
+
+O15 independently compares every open position's `lastQuote.asOf` with the decision `asOf`. A quote older than the configured threshold produces `DATA_HOLD` even when an upstream `PositionView` incorrectly claims `priceStatus: 'live'`.
+
+A quote exactly on the freshness boundary remains valid; one millisecond older is held.
+
+This removes the previous dependency on the upstream CapitalPolicy freshness label alone.
+
+### 28.2 Append-only authoritative RiskDay producer
+
+`RiskDayTracker` records append-only checkpoints produced directly from `CapitalEngine.snapshot(...)` plus the current capital-ledger head.
+
+Callers do not supply:
+
+- `netExternalFlowsTodayChf`;
+- `realizedTradingPnlTodayChf`;
+- `peakAdjustedNetWorthChf`.
+
+The tracker derives:
+
+- external flows from the change in `CapitalState.netContributionsChf`;
+- realized trading P&L from the change in cumulative position realized P&L;
+- the flow-adjusted intraday peak from the append-only checkpoint sequence;
+- `sourceLedgerHeadHash` from the actual `CapitalLedger.head()`;
+- `sourceFingerprint` from the hash-chained checkpoint history.
+
+The first checkpoint must be exactly at `dayStartedAt`, and later checkpoints must move forward strictly inside the same UTC risk day.
+
+**Remaining sampling contract:** the peak is authoritative over recorded checkpoints. Phase-4 wiring must record a checkpoint on every authoritative portfolio refresh / broker-sync valuation event. Omitting a real intraday peak between checkpoints cannot be reconstructed later from O15 alone.
+
+### 28.3 Append-only kill-switch ownership
+
+`PortfolioKillSwitchStore` is a monotonic append-only store:
+
+- empty history means `ARMED`;
+- exactly one valid trip may be appended;
+- a second different trip is refused;
+- there is no reset, clear, arm or unlatch mutation API;
+- a stored trip id must derive from its triggering decision fingerprint;
+- malformed trip timestamps fail closed.
+
+The store accepts the repository's generic `AppendOnlyStore` port, so production may use `PostgresAppendOnlyStore` with the existing cross-process locking and hash-chain guarantees.
+
+### 28.4 Safe integration entry point
+
+`PortfolioSafetyService` is the Phase-4-preparation entry point.
+
+It:
+
+1. obtains the current portfolio from `CapitalEngine`;
+2. appends a trusted RiskDay checkpoint;
+3. derives `RiskDaySummary` from the tracker;
+4. synchronizes and reads the previous kill-switch state from append-only storage;
+5. invokes the pure `evaluatePortfolioSafetyEnvelope`;
+6. atomically attempts to latch a newly tripped switch;
+7. on a concurrent latch race, re-reads the persisted winner and re-evaluates fail closed.
+
+A successful local trip returns the exact triggering decision rather than replacing it with a post-latch reissue, preserving auditability.
+
+Callers of this service never provide `previousKillSwitch` or risk-day loss/flow/peak fields.
+
+### 28.5 Remaining trust limits before live execution
+
+O15 still does not prove:
+
+- that every possible intraday valuation point was checkpointed;
+- external authenticity of the market quote source itself;
+- availability of the PostgreSQL store in a deployment;
+- alert delivery;
+- human-approved kill-switch reset semantics.
+
+Those are later integration/operations milestones.
+
+Live Trading remains LOCKED.
+
+Broker Orders remain LOCKED.
+
+Physical Purchase remains LOCKED.
