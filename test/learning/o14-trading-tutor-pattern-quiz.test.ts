@@ -273,6 +273,7 @@ describe('O14 Trading Tutor — RED', () => {
 
   it('maps O13 feedback codes to deterministic lesson categories', () => {
     const source = review({
+      processClassification: 'PROCESS_ACCEPTABLE',
       feedback: [
         feedback('REVIEW_EVIDENCE_QUALITY'),
         feedback('REVIEW_MODEL_CONFIDENCE', 'both'),
