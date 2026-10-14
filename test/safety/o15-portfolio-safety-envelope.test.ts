@@ -30,7 +30,7 @@ function position(
     brokerId: 'paper',
     instrumentId,
     symbol: instrumentId,
-    assetClass: 'equity',
+    assetClass: 'stock',
     isOpen: true,
     quantity: Decimal.from('1'),
     costBasisChf: marketValueChf,
