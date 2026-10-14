@@ -22,7 +22,8 @@ function urlFor(database: string): string {
 }
 
 function envFor(database: string, port: number): Record<string, string> {
-  return { DATABASE_URL: urlFor(database), HOST: '127.0.0.1', PORT: String(port), NEXUS_TWELVE_DATA_DEMO: '1' };
+  // The provider is a test fixture. A syntactically valid test-only key selects the runtime's production/raw path.
+  return { DATABASE_URL: urlFor(database), HOST: '127.0.0.1', PORT: String(port), TWELVE_DATA_API_KEY: 'TESTKEY12345678' };
 }
 
 function freePort(): Promise<number> {
@@ -99,7 +100,7 @@ describe.skipIf(!pgAvailable)('O18 runtime on PostgreSQL' + (pgAvailable ? '' : 
     const first = await startRuntime(envFor(db.name, await freePort()), options);
     try {
       const health = await (await fetch(first.url + '/health')).json() as Record<string, unknown>;
-      expect(health).toMatchObject({ status: 'ok', database: 'connected', marketData: 'demo', tradingMode: 'paper', liveTrading: 'locked' });
+      expect(health).toMatchObject({ status: 'ok', database: 'connected', marketData: 'configured', tradingMode: 'paper', liveTrading: 'locked' });
 
       const bars = await (await fetch(first.url + '/api/market/bars?instrumentId=ins_aapl&interval=1d&from=2026-08-01T00:00:00.000Z&to=2026-10-14T00:00:00.000Z')).json() as { bars: unknown[]; usableForTrading: boolean };
       expect(bars.bars.length).toBeGreaterThan(0);
