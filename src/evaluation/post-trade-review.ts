@@ -242,7 +242,7 @@ function validatePolicy(raw: PostTradeReviewPolicy | undefined): PostTradeReview
   if (
     policy.version !== POST_TRADE_REVIEW_POLICY_VERSION ||
     !Number.isSafeInteger(policy.minimumEvidenceCountForStrong) ||
-    policy.minimumEvidenceCountForStrong < 0
+    policy.minimumEvidenceCountForStrong < 1
   ) {
     fail('INVALID_POLICY', 'post-trade review policy is invalid');
   }
@@ -337,6 +337,12 @@ function validateOutcome(trace: DecisionTrace, outcome: TradeOutcome): void {
   if (closedAtMs === null) fail('INVALID_OUTCOME', 'closedAt must be a canonical UTC instant');
   if (closedAtMs < openedAtMs) fail('INVALID_OUTCOME', 'closedAt cannot precede openedAt');
   if (knownAtMs < closedAtMs) fail('INVALID_OUTCOME', 'knownAt cannot precede closedAt');
+  if (openedAtMs < decisionMs) fail('INVALID_OUTCOME', 'trade cannot open before the decision was made');
+  if (typeof outcome.executed !== 'boolean') fail('INVALID_OUTCOME', 'executed must be a boolean');
+  if (typeof outcome.feesChf !== 'bigint' || outcome.feesChf < 0n) {
+    fail('INVALID_OUTCOME', 'feesChf must be a non-negative Rappen amount');
+  }
+  if (typeof outcome.netResultChf !== 'bigint') fail('INVALID_OUTCOME', 'netResultChf must be a Rappen amount');
 
   if (!(outcome.entryPrice instanceof Decimal) || !outcome.entryPrice.isPositive()) fail('INVALID_OUTCOME', 'entryPrice must be a positive Decimal');
   if (!(outcome.exitPrice instanceof Decimal) || !outcome.exitPrice.isPositive()) fail('INVALID_OUTCOME', 'exitPrice must be a positive Decimal');
@@ -354,6 +360,19 @@ function validateOutcome(trace: DecisionTrace, outcome: TradeOutcome): void {
   }
   if (outcome.takeProfit !== undefined && (!(outcome.takeProfit instanceof Decimal) || !outcome.takeProfit.isPositive())) {
     fail('INVALID_OUTCOME', 'takeProfit must be a positive Decimal when set');
+  }
+  // evaluateTrade treats a stop as "lowest price at or below the stop" and a target as "highest price at or above the target",
+  // which is only the long-side meaning. A short cannot be graded with those semantics, so it is refused rather than mis-graded.
+  if (trace.decision.direction === 'bearish' && (outcome.stopLoss !== undefined || outcome.takeProfit !== undefined)) {
+    fail('INVALID_OUTCOME', 'bearish trades cannot carry a stop or target: stop and target semantics are long-only');
+  }
+  if (trace.decision.direction === 'bullish') {
+    if (outcome.stopLoss !== undefined && !outcome.stopLoss.lt(outcome.entryPrice)) {
+      fail('INVALID_OUTCOME', 'bullish stop must sit below the entry price');
+    }
+    if (outcome.takeProfit !== undefined && !outcome.takeProfit.gt(outcome.entryPrice)) {
+      fail('INVALID_OUTCOME', 'bullish target must sit above the entry price');
+    }
   }
 }
 
