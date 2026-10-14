@@ -137,6 +137,7 @@ function policy(overrides: Partial<PortfolioSafetyPolicy> = {}): PortfolioSafety
     maxGrossExposureBp: 8000,
     maxSinglePositionExposureBp: 5000,
     maxOpenPositions: 5,
+    maxFinancialQuoteAgeMs: 15 * 60_000,
     requireCompleteFinancialPricing: true,
     ...overrides,
   };
@@ -341,6 +342,26 @@ describe('O15 portfolio safety envelope — RED', () => {
       policy: policy({ maxOpenPositions: 2, maxGrossExposureBp: 9999, maxSinglePositionExposureBp: 9999 }),
     }));
     expect(above.state).toBe('TRIPPED');
+  });
+
+  it('independently holds an old quote even when the upstream PositionView claims it is live', () => {
+    const oldQuote = position('AAPL', chf(200), {
+      priceStatus: 'live',
+      lastQuote: {
+        instrumentId: 'AAPL',
+        price: Decimal.from('200'),
+        currency: 'CHF',
+        asOf: '2026-10-14T11:44:59.999Z',
+        source: 'fixture',
+      },
+    });
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ positions: [oldQuote] }),
+      policy: policy({ maxFinancialQuoteAgeMs: 15 * 60_000 }),
+    }));
+    expect(result.state).toBe('DATA_HOLD');
+    expect(result.killSwitch.status).toBe('ARMED');
+    expect(result.dataHoldReasons).toContain('financial pricing is incomplete');
   });
 
   it('incomplete, stale and unpriced financial data create DATA_HOLD without newly tripping', () => {
