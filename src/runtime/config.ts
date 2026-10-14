@@ -47,6 +47,7 @@ export interface RuntimeConfigSummary {
 
 const API_KEY = /^[A-Za-z0-9]{8,128}$/;
 const DATABASE_URL = /^postgres(ql)?:\/\/\S+$/;
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
 function invalid(message: string): never {
   throw new RuntimeConfigError('CONFIG_INVALID', message);
@@ -71,7 +72,9 @@ export function loadRuntimeConfig(env: Environment): RuntimeConfig {
   if (allow !== undefined && allow !== 'false') invalid('ALLOW_LIVE_TRADING must be false');
 
   const host = text(env, 'HOST') ?? '127.0.0.1';
-  if (host.length > 255 || /\s/.test(host)) invalid('HOST is not a valid host name');
+  if (host.length > 255 || /\s/.test(host) || !LOOPBACK_HOSTS.has(host)) {
+    invalid('HOST must be a loopback address (127.0.0.1, localhost or ::1) until API authentication exists');
+  }
 
   const rawPort = text(env, 'PORT') ?? '3000';
   const port = Number(rawPort);
