@@ -740,6 +740,7 @@ function contentOfEvidence(model: PitConfidenceCalibrationModel, row: PitConfide
 function reissue(model: PitConfidenceCalibrationModel): PitConfidenceCalibrationModel {
   const fitEvidence = model.fitEvidence.map((row) => ({ ...row, calibrationEvidenceFingerprint: contentOfEvidence(model, row) }));
   const fitEvidenceFingerprints = fitEvidence.map((row) => identityOfEvidence(model, row.evidenceFingerprint));
+  const fitContentFingerprints = fitEvidence.map((row) => row.calibrationEvidenceFingerprint);
   const inputFingerprint = hashOf({
     engine: PIT_CONFIDENCE_CALIBRATION_VERSION,
     method: 'histogram_binning',
@@ -749,6 +750,7 @@ function reissue(model: PitConfidenceCalibrationModel): PitConfidenceCalibration
     fitAsOf: model.fitAsOf,
     policy: model.policy,
     fitEvidenceFingerprints,
+    fitContentFingerprints,
   });
   const modelFingerprint = modelFingerprintFor({ ...model, fitEvidence, fitEvidenceFingerprints, inputFingerprint });
   return { ...model, fitEvidence, fitEvidenceFingerprints, inputFingerprint, calibrationRunId: 'pcc_' + inputFingerprint.slice(0, 40), modelFingerprint };
