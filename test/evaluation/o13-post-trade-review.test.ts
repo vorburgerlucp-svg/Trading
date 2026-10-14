@@ -33,7 +33,7 @@ function tradeOutcome(decisionId: string, overrides: Partial<TradeOutcome> = {})
     kind: 'trade',
     decisionId,
     instrumentId: 'AAPL',
-    executed: true,
+    executed: false,
     entryPrice: Decimal.from('100'),
     exitPrice: Decimal.from('108'),
     stopLoss: Decimal.from('95'),
@@ -60,7 +60,26 @@ async function fixture(overrides: { recommendation?: 'buy' | 'sell' | 'hold' | '
   const ctx = await setupBrain({ adapters: [adapter], active: [MODELS.anthropic] });
   const decision = await ctx.brain.decide(decisionRequest(task({ importance: 'low', requiresIndependentOpinions: false })));
   const trace = ctx.brain.trace(decision.decisionId) as DecisionTrace;
-  const outcome = tradeOutcome(decision.decisionId, { executed: overrides.executed ?? true });
+  const outcome = tradeOutcome(decision.decisionId, { executed: overrides.executed ?? false });
+  const evaluator = new OutcomeEvaluator(ctx.memory, ctx.performance);
+  const { evaluation, observations } = await evaluator.evaluate(trace, outcome);
+  if (evaluation.kind !== 'trade') throw new Error('fixture expected trade evaluation');
+  return { trace, outcome, evaluation, observations };
+}
+
+async function executableFixture() {
+  const adapter = new ScriptedAdapter(
+    'anthropic',
+    'test-claude',
+    byRole({ analyst: opinion({ recommendation: 'buy', stance: 'bullish', confidence: 0.7 }) }),
+  );
+  const ctx = await setupBrain({ capitalChf: '50', adapters: [adapter], active: [MODELS.anthropic] });
+  const decision = await ctx.brain.decide(decisionRequest(task({ importance: 'low', requiresIndependentOpinions: false })));
+  if (decision.outcome !== 'RECOMMEND' || !decision.execution.paperIntentAllowed) {
+    throw new Error('executable fixture must produce a paper-eligible RECOMMEND decision');
+  }
+  const trace = ctx.brain.trace(decision.decisionId) as DecisionTrace;
+  const outcome = tradeOutcome(decision.decisionId, { executed: true });
   const evaluator = new OutcomeEvaluator(ctx.memory, ctx.performance);
   const { evaluation, observations } = await evaluator.evaluate(trace, outcome);
   if (evaluation.kind !== 'trade') throw new Error('fixture expected trade evaluation');
@@ -253,7 +272,7 @@ describe('O13 post-trade review — RED', () => {
   });
 
   it('distinguishes executed from counterfactual outcomes', async () => {
-    const executed = await fixture({ executed: true });
+    const executed = await executableFixture();
     const counterfactual = await fixture({ executed: false });
 
     expect(buildPostTradeReview(requestOf(executed)).executed).toBe(true);
@@ -488,8 +507,8 @@ describe('O13 post-trade review — RED', () => {
 
 // ---------------------------------------------------------------------------
 // Independent review probes (RED). Each probe names the review item it attacks. Probes that test a fail-closed refusal expect an error code; probes that
-// test a classification expect the classification. The fixture is the real Brain output (see the explore note in the review commit): its decision is
-// NO_ACTION and its outcome is executed, which is itself inconsistent and is documented as a finding rather than repaired here.
+// test a classification expect the classification. The standard fixture is the real Brain NO_ACTION output and is reviewed counterfactually
+// (executed=false). Executed-path tests use executableFixture(), which produces a real paper-eligible RECOMMEND decision.
 // ---------------------------------------------------------------------------
 
 function messageOf(run: () => unknown): string {
@@ -829,7 +848,7 @@ describe('O13 review — isolated rule tests (from the mutation campaign)', () =
   });
 
   it('reports only KEEP_PROCESS when no process-review trigger fires', async () => {
-    const base = await fixture();
+    const base = await executableFixture();
     const review = buildPostTradeReview(requestOf(base, { trace: strongTrace(base.trace) }));
     expect(review.feedback.map((item) => item.code)).toEqual(['KEEP_PROCESS']);
   });
