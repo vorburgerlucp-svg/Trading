@@ -702,6 +702,13 @@ describe('O13 review — isolated rule tests (from the mutation campaign)', () =
     expect(codeOf(() => buildPostTradeReview(requestOf(base, { outcome })))).toBe('INVALID_OUTCOME');
   });
 
+  it('refuses an executed trade when the original decision did not allow a paper intent', async () => {
+    const base = await fixture({ executed: true });
+    expect(base.trace.decision.outcome).toBe('NO_ACTION');
+    expect(base.trace.decision.execution.paperIntentAllowed).toBe(false);
+    expect(codeOf(() => buildPostTradeReview(requestOf(base)))).toBe('INVALID_OUTCOME');
+  });
+
   it('refuses an executed flag that is not a boolean', async () => {
     const base = await fixture();
     const outcome = tradeOutcome(base.trace.decision.decisionId, { executed: 'yes' as never });
