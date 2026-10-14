@@ -17,9 +17,10 @@ import {
   buildPatternQuiz,
   gradePatternQuiz,
   verifyPatternQuiz,
+  type PatternQuiz,
   type PatternQuizPolicy,
 } from '../../src/learning/pattern-quiz.js';
-import type { PatternObservation } from '../../src/patterns/pattern-types.js';
+import { PATTERN_TYPES, type PatternObservation } from '../../src/patterns/pattern-types.js';
 
 function feedback(code: PostTradeFeedbackItem['code'], basis: PostTradeFeedbackItem['basis'] = 'process'): PostTradeFeedbackItem {
   return {
@@ -747,6 +748,78 @@ describe('O14 review — quiz probes (RED)', () => {
     const reissued = buildPatternQuiz(observation(), quizPolicy({ optionCount: 2 }));
     const verifyPinned = verifyPatternQuiz as unknown as (o: PatternObservation, q: unknown, expected: PatternQuizPolicy) => void;
     expect(errorCode(() => verifyPinned(observation(), reissued, quizPolicy()))).toBe('INVALID_QUIZ');
+  });
+});
+
+describe('O14 review — matrix pins: outcome-bias wording, distractors and safety strings', () => {
+  const processes = ['PROCESS_STRONG', 'PROCESS_ACCEPTABLE', 'PROCESS_WEAK', 'PROCESS_BLOCKED'] as const;
+  const outcomes = ['OUTCOME_FAVORABLE', 'OUTCOME_FLAT', 'OUTCOME_ADVERSE'] as const;
+
+  function matrixReview(process: (typeof processes)[number], outcome: (typeof outcomes)[number]): PostTradeReview {
+    const returnBp = outcome === 'OUTCOME_FAVORABLE' ? 800 : outcome === 'OUTCOME_ADVERSE' ? -800 : 0;
+    const diagnostics =
+      process === 'PROCESS_STRONG' ? cleanProcessDiagnostics() :
+      process === 'PROCESS_ACCEPTABLE' ? { ...cleanProcessDiagnostics(), evidenceCount: 0 } :
+      process === 'PROCESS_BLOCKED' ? { ...review().processDiagnostics, riskPassed: false } :
+      review().processDiagnostics;
+    const items =
+      process === 'PROCESS_STRONG' || process === 'PROCESS_ACCEPTABLE' ? [feedback('KEEP_PROCESS')] :
+      process === 'PROCESS_BLOCKED' ? [feedback('REVIEW_RISK_DISCIPLINE')] :
+      [feedback('REVIEW_PROVIDER_DIVERSITY')];
+    return review({
+      processClassification: process,
+      outcomeClassification: outcome,
+      outcomeDiagnostics: { ...review().outcomeDiagnostics, returnBp },
+      processDiagnostics: diagnostics,
+      feedback: items,
+    });
+  }
+
+  it('the outcome-bias wording never praises a weak or blocked process for its result, nor calls a strong one bad', () => {
+    for (const process of processes) {
+      for (const outcome of outcomes) {
+        const lesson = buildTradingTutorLesson(matrixReview(process, outcome), tutorPolicy);
+        const text = lesson.processOutcomeExplanation.toLowerCase();
+        if (process === 'PROCESS_WEAK' || process === 'PROCESS_BLOCKED') {
+          expect(text, process + '/' + outcome).not.toMatch(/\b(strong|good|successful|sound)\b/);
+        }
+        if (process === 'PROCESS_STRONG') expect(text, process + '/' + outcome).not.toMatch(/\b(weak|blocked|bad|poor)\b/);
+        if (process === 'PROCESS_ACCEPTABLE') expect(text, process + '/' + outcome).not.toMatch(/\b(strong|weak|blocked)\b/);
+        expect(JSON.stringify(lesson), process + '/' + outcome).not.toMatch(/good decision|bad decision|made money|justified by|confidence was justified/i);
+      }
+    }
+  });
+
+  it('no lesson string reads as an execution command', () => {
+    for (const process of processes) {
+      for (const outcome of outcomes) {
+        const lesson = buildTradingTutorLesson(matrixReview(process, outcome), tutorPolicy);
+        expect(JSON.stringify(lesson), process + '/' + outcome).not.toMatch(/\b(place|submit|route) (an? )?(order|trade)\b|\bbuy now\b|\bsell now\b|\bexecute\b/i);
+      }
+    }
+  });
+
+  it('distractors are unique, valid and contain the correct answer exactly once at every vocabulary position and option count', () => {
+    const directions = ['bullish', 'bearish', 'neutral'] as const;
+    const check = (src: PatternObservation, mode: 'pattern_identification' | 'direction', count: number): void => {
+      const label = mode + '/' + src.patternType + '/' + src.direction + '/' + count;
+      const quiz: PatternQuiz = buildPatternQuiz(src, quizPolicy({ mode, optionCount: count }));
+      const labels = quiz.publicView.options.map((o) => o.label);
+      expect(new Set(labels).size, label).toBe(labels.length);
+      expect(labels.filter((x) => x === quiz.answer.label), label).toHaveLength(1);
+      expect(buildPatternQuiz(src, quiz.policy).publicView.options, label).toEqual(quiz.publicView.options);
+    };
+    for (let count = 2; count <= 6; count++) {
+      for (const patternType of PATTERN_TYPES) check(observation({ patternType }), 'pattern_identification', count);
+      for (const direction of directions) {
+        if (count <= 3) check(observation({ direction, status: 'forming', confirmedAt: null, resolvedAt: null }), 'direction', count);
+      }
+    }
+  });
+
+  it('the explanation is kept in the internal answer and never appears in the public view', () => {
+    const quiz = buildPatternQuiz(observation(), quizPolicy());
+    expect(JSON.stringify(quiz.publicView)).not.toContain(quiz.answer.explanation);
   });
 });
 
