@@ -344,6 +344,24 @@ describe('O15 portfolio safety envelope — RED', () => {
     expect(above.state).toBe('TRIPPED');
   });
 
+  it('accepts a quote exactly at the independent freshness boundary', () => {
+    const boundaryQuote = position('AAPL', chf(200), {
+      priceStatus: 'live',
+      lastQuote: {
+        instrumentId: 'AAPL',
+        price: Decimal.from('200'),
+        currency: 'CHF',
+        asOf: '2026-10-14T11:45:00.000Z',
+        source: 'fixture',
+      },
+    });
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ positions: [boundaryQuote] }),
+      policy: policy({ maxFinancialQuoteAgeMs: 15 * 60_000 }),
+    }));
+    expect(result.state).toBe('NORMAL');
+  });
+
   it('independently holds an old quote even when the upstream PositionView claims it is live', () => {
     const oldQuote = position('AAPL', chf(200), {
       priceStatus: 'live',
