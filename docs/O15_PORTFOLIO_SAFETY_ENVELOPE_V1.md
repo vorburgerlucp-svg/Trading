@@ -1,0 +1,639 @@
+# O15: Portfolio Safety Envelope & Kill Switch V1
+
+Status: design first. Base: `69d4ed7` (O14 Trading Tutor & Pattern Quiz V1 merged and green).
+
+## 1. Goal
+
+O15 is the first Phase-4 prerequisite.
+
+It adds a deterministic, fail-closed safety envelope around the existing capital and portfolio state:
+
+- daily loss limits;
+- intraday drawdown limits;
+- gross portfolio exposure limits;
+- single-position exposure limits;
+- maximum open-position count;
+- data-quality holds;
+- a latching kill switch.
+
+O15 **does not enable live trading**.
+
+Its authority is one-way:
+
+> O15 may reduce or revoke permission to add risk. It can never unlock a broker, enable live trading, or override an existing safety lock.
+
+## 2. Existing foundations reused
+
+O15 must reuse rather than duplicate:
+
+- `CapitalState`
+- `PortfolioSnapshot`
+- exact CHF/Rappen arithmetic
+- existing portfolio position views
+- existing market-data coverage flags
+- existing Risk Gate / capital risk gate semantics
+- canonical hashing via `hashOf`
+
+The broker adapters remain locked.
+
+## 3. Version identities
+
+Safety engine:
+
+`portfolio-safety-envelope:v1`
+
+Policy:
+
+`portfolio-safety-policy:v1`
+
+Daily accounting summary:
+
+`risk-day-summary:v1`
+
+Kill-switch state:
+
+`portfolio-kill-switch:v1`
+
+## 4. Pure-core requirement
+
+Primary API:
+
+```ts
+evaluatePortfolioSafetyEnvelope({
+  portfolio,
+  day,
+  previousKillSwitch,
+  policy
+}) -> PortfolioSafetyDecision
+```
+
+The function is pure:
+
+- no ledger writes;
+- no broker calls;
+- no audit writes;
+- no network;
+- no wall clock;
+- no random ids.
+
+All time is explicit input.
+
+## 5. Risk-day summary
+
+O15 consumes an explicit, point-in-time daily summary produced from authoritative ledger/accounting inputs:
+
+```ts
+interface RiskDaySummary {
+  version: 'risk-day-summary:v1';
+  dayId: string;                  // YYYY-MM-DD policy/trading day
+  dayStartedAt: string;           // canonical UTC
+  asOf: string;                   // canonical UTC
+  startNetWorthChf: Rappen;
+  peakAdjustedNetWorthChf: Rappen;
+  netExternalFlowsTodayChf: Rappen;
+  realizedTradingPnlTodayChf: Rappen;
+  sourceLedgerHeadHash: string;
+  sourceFingerprint: string;
+}
+```
+
+`netExternalFlowsTodayChf` means deposits minus withdrawals since the day start.
+
+The source summary is not invented by O15.
+
+## 6. Flow-adjusted daily P&L
+
+External deposits and withdrawals must not look like trading profit/loss.
+
+Define:
+
+```
+adjustedCurrentNetWorth
+  = portfolio.capital.totalNetWorthChf
+    - day.netExternalFlowsTodayChf
+
+adjustedDailyPnl
+  = adjustedCurrentNetWorth
+    - day.startNetWorthChf
+
+adjustedDailyLoss
+  = max(0, -adjustedDailyPnl)
+```
+
+The daily-loss basis is therefore flow-adjusted.
+
+## 7. Intraday drawdown
+
+The daily summary supplies the highest flow-adjusted net worth seen so far:
+
+```
+intradayDrawdownChf
+  = max(0, day.peakAdjustedNetWorthChf - adjustedCurrentNetWorth)
+```
+
+Drawdown basis points are relative to `peakAdjustedNetWorthChf`.
+
+The peak must never be below both:
+
+- `day.startNetWorthChf`; and
+- current `adjustedCurrentNetWorth`.
+
+Otherwise the summary is inconsistent and O15 fails closed.
+
+## 8. Financial portfolio exposure
+
+V1 portfolio limits apply to financial positions only.
+
+For every open position:
+
+- a fresh market value is required;
+- stale or missing prices create a data hold;
+- no cost-basis fallback may be used for exposure limits.
+
+When pricing is complete:
+
+```
+grossExposureChf = sum(open position marketValueChf)
+
+grossExposureBp
+  = grossExposureChf / current total net worth
+
+positionExposureBp
+  = position marketValueChf / current total net worth
+```
+
+If total net worth is zero or negative, the safety envelope is tripped.
+
+## 9. Policy
+
+V1 policy:
+
+```ts
+interface PortfolioSafetyPolicy {
+  version: 'portfolio-safety-policy:v1';
+
+  maxAdjustedDailyLossChf: Rappen;
+  maxAdjustedDailyLossBp: number;
+
+  maxRealizedTradingLossChf: Rappen;
+
+  maxIntradayDrawdownChf: Rappen;
+  maxIntradayDrawdownBp: number;
+
+  maxGrossExposureBp: number;
+  maxSinglePositionExposureBp: number;
+  maxOpenPositions: number;
+
+  requireCompleteFinancialPricing: true;
+}
+```
+
+All CHF limits are non-negative bigint Rappen.
+
+All basis-point limits are positive safe integers.
+
+No floating-point money is allowed.
+
+## 10. Limit semantics
+
+### Hard trip limits
+
+The kill switch trips when:
+
+- adjusted daily loss is **greater than or equal to** either daily-loss limit;
+- realized trading loss is **greater than or equal to** its limit;
+- intraday drawdown is **greater than or equal to** either drawdown limit;
+- gross exposure is **greater than** the gross-exposure cap;
+- any single position is **greater than** the position cap;
+- open-position count is **greater than** the maximum;
+- capital shortfall is positive;
+- total net worth is zero or negative.
+
+Loss/drawdown limits trigger at the limit because no additional downside budget remains.
+
+### Capacity blocks without a kill-switch trip
+
+New risk is blocked, but the kill switch does not newly trip, when:
+
+- gross exposure equals the cap;
+- a position equals the single-position cap;
+- open-position count equals the cap.
+
+This distinguishes “at capacity” from “already beyond the safety limit”.
+
+## 11. Data hold
+
+Incomplete risk measurement must not be mistaken for a healthy portfolio.
+
+A `DATA_HOLD` blocks new risk when:
+
+- there is at least one open position and financial market-data coverage is not `complete`;
+- an open position has `marketValueChf === null`;
+- an open position has price status `stale` or `not_connected`;
+- `capital.dataStatus.unpricedPositions` or `stalePositions` is non-empty.
+
+A data hold by itself does not newly latch the kill switch.
+
+If the kill switch was already tripped, data recovery does not reset it.
+
+## 12. Safety decision states
+
+```
+NORMAL
+DATA_HOLD
+CAPACITY_BLOCK
+TRIPPED
+```
+
+Priority:
+
+```
+TRIPPED > DATA_HOLD > CAPACITY_BLOCK > NORMAL
+```
+
+Output includes all reasons even when a higher-priority state wins.
+
+## 13. New-risk vs risk-reduction semantics
+
+Decision output includes:
+
+- `canIncreaseRisk`
+- `canReduceRisk`
+- `liveOrderAllowed: false`
+- `physicalPurchaseAllowed: false`
+
+V1 invariant:
+
+- `canIncreaseRisk === true` only in `NORMAL`;
+- `canReduceRisk === true` in every valid state.
+
+This expresses the future safety intent that a kill switch blocks risk-increasing activity without trapping the portfolio in risk.
+
+It does not itself execute a reduction.
+
+## 14. Latching kill switch
+
+Input:
+
+```ts
+interface KillSwitchState {
+  version: 'portfolio-kill-switch:v1';
+  status: 'ARMED' | 'TRIPPED';
+  tripId: string | null;
+  trippedAt: string | null;
+  reasons: readonly string[];
+  triggeringDecisionFingerprint: string | null;
+}
+```
+
+Rules:
+
+- `ARMED` + hard breach -> `TRIPPED`;
+- `TRIPPED` stays `TRIPPED`, even if current metrics recover;
+- O15 has no automatic reset;
+- O15 V1 exposes no “clear” or “arm” mutation API;
+- a human-approved reset workflow is a later, separately audited milestone.
+
+A previously tripped switch is therefore monotonic inside O15.
+
+## 15. Deterministic trip identity
+
+A new trip id is derived deterministically from:
+
+- safety-engine version;
+- decision `asOf`;
+- portfolio fingerprint;
+- risk-day summary fingerprint;
+- policy fingerprint;
+- sorted hard-breach reasons.
+
+No randomness and no wall clock.
+
+## 16. Portfolio input consistency
+
+O15 validates at least:
+
+- `portfolio.capital.timestamp === day.asOf`;
+- canonical UTC timestamps;
+- `day.dayStartedAt <= day.asOf`;
+- `day.startNetWorthChf > 0`;
+- `day.peakAdjustedNetWorthChf > 0`;
+- day peak consistency;
+- all Rappen values are bigint;
+- all open-position market values are non-negative when present;
+- duplicate `brokerId + instrumentId` position identities are refused;
+- data-status lists contain no duplicates.
+
+## 17. Daily-summary identity
+
+`sourceLedgerHeadHash` and `sourceFingerprint` are validated as lowercase 64-character hashes.
+
+O15 binds them into the safety decision identity.
+
+V1 verifies structural consistency, not cryptographic provenance of the ledger summary.
+
+An append-only/sealed producer remains the authoritative source.
+
+## 18. Metrics
+
+Decision reports at least:
+
+- adjustedCurrentNetWorthChf;
+- adjustedDailyPnlChf;
+- adjustedDailyLossChf;
+- adjustedDailyLossBp;
+- realizedTradingPnlTodayChf;
+- realizedTradingLossChf;
+- intradayDrawdownChf;
+- intradayDrawdownBp;
+- grossExposureChf or null under data hold;
+- grossExposureBp or null;
+- maximumPositionExposureBp or null;
+- openPositionCount.
+
+No hidden approximations.
+
+## 19. Exact arithmetic
+
+Money uses bigint Rappen.
+
+Ratio calculations use the repository’s deterministic basis-point arithmetic.
+
+No JS floating-point CHF calculations.
+
+No NaN/Infinity metric is allowed.
+
+## 20. Decision identity
+
+Output:
+
+```ts
+interface PortfolioSafetyDecision {
+  decisionId: string;
+  engineVersion: 'portfolio-safety-envelope:v1';
+  inputFingerprint: string;
+  asOf: string;
+  state: 'NORMAL' | 'DATA_HOLD' | 'CAPACITY_BLOCK' | 'TRIPPED';
+  ...
+}
+```
+
+Identity binds:
+
+- portfolio source state;
+- risk-day summary;
+- previous kill-switch state;
+- policy;
+- derived metrics;
+- breach/capacity/data-hold reasons.
+
+Input order of set-like reason/status lists must not change identity.
+
+Position identity order must be canonicalized.
+
+## 21. Verification
+
+Expose:
+
+```ts
+verifyPortfolioSafetyDecision(request, decision)
+```
+
+The verifier recomputes the decision from the source request.
+
+It does not trust stored metrics, state, reason lists, fingerprints or trip id.
+
+## 22. Alert/audit hand-off
+
+O15 may return deterministic alert descriptors such as:
+
+- `DAILY_LOSS_LIMIT`
+- `REALIZED_LOSS_LIMIT`
+- `INTRADAY_DRAWDOWN_LIMIT`
+- `GROSS_EXPOSURE_LIMIT`
+- `POSITION_EXPOSURE_LIMIT`
+- `OPEN_POSITION_LIMIT`
+- `CAPITAL_SHORTFALL`
+- `PRICING_DATA_HOLD`
+- `KILL_SWITCH_LATCHED`
+
+It does not send alerts or write audit events.
+
+O16 may connect these descriptors to append-only audit/alert delivery.
+
+## 23. RED test matrix
+
+Before implementation, tests should prove at least:
+
+1. same inputs -> same safety decision
+2. valid zero-loss portfolio -> NORMAL
+3. deposit does not look like profit
+4. withdrawal does not look like trading loss
+5. adjusted daily loss exactly at CHF limit -> TRIPPED
+6. one Rappen below loss limit -> not loss-tripped
+7. adjusted daily loss exactly at bp limit -> TRIPPED
+8. realized trading loss exactly at limit -> TRIPPED
+9. drawdown exactly at CHF limit -> TRIPPED
+10. drawdown exactly at bp limit -> TRIPPED
+11. gross exposure below cap -> allowed
+12. gross exposure exactly at cap -> CAPACITY_BLOCK
+13. gross exposure above cap -> TRIPPED
+14. single position exactly at cap -> CAPACITY_BLOCK
+15. single position above cap -> TRIPPED
+16. position count exactly at cap -> CAPACITY_BLOCK
+17. position count above cap -> TRIPPED
+18. incomplete financial pricing -> DATA_HOLD
+19. stale position -> DATA_HOLD
+20. unpriced position -> DATA_HOLD
+21. data hold alone does not newly trip kill switch
+22. capital shortfall -> TRIPPED
+23. zero/negative net worth -> TRIPPED
+24. previously TRIPPED remains TRIPPED after recovery
+25. previously TRIPPED retains original trip identity
+26. no automatic reset API exists
+27. risk reduction remains permitted under TRIPPED
+28. liveOrderAllowed always false
+29. physicalPurchaseAllowed always false
+30. inconsistent day peak fails closed
+31. timestamp mismatch fails closed
+32. malformed hashes fail closed
+33. duplicate position identity fails closed
+34. invalid bigint/runtime money payload fails closed
+35. invalid bp policy fails closed
+36. input position order does not change identity
+37. set-like data-status list order does not change identity
+38. tampered metrics fail verification
+39. tampered state/reasons fail verification
+40. tampered trip id fails verification
+41. data recovery after DATA_HOLD can return NORMAL when no other block remains
+42. O14–O9 and existing capital/risk/broker tests remain green
+
+## 24. Four-eyes review targets
+
+Independent review should attack:
+
+- external-flow sign convention;
+- deposit/withdrawal manipulation of daily loss;
+- day-peak manipulation;
+- exact limit boundaries;
+- missing-price fail-open paths;
+- exposure denominator edge cases;
+- stale quote handling;
+- kill-switch auto-reset paths;
+- reason-order nondeterminism;
+- reissued trip ids;
+- integer overflow / unsafe-number basis-point inputs;
+- accidental broker or ledger side effects.
+
+## 25. Scope restrictions
+
+O15 does not:
+
+- configure a real broker;
+- place or preview an order;
+- enable `allowLiveTrading`;
+- change `LockedBroker.place`;
+- remove build locks;
+- reset a tripped switch;
+- modify allocation policy;
+- mutate the capital ledger;
+- send alerts.
+
+## 26. Safety
+
+Live Trading remains LOCKED.
+
+Broker Orders remain LOCKED.
+
+Physical Purchase remains LOCKED.
+
+O15 only adds a stricter, independently verifiable permission-reduction layer.
+
+## 27. Independent review amendment (Haiku, branch `feature/o15-haiku-review-hardening-v1`)
+
+This section records the decisions the independent review took where the sections above left a choice open, the rules it added, and the trust boundaries that remain. Where it differs from the sections above, this section is authoritative.
+
+### 27.1 Decisions
+
+- **Risk day is the UTC calendar day (§5, §16).** The policy has no day-boundary input, so a trading-day boundary cannot be proven by O15. A day whose `dayStartedAt` or `asOf` falls on another UTC date than `dayId` is refused. A prior-day start with the current `dayId` is therefore a refusal, not a silent regrade.
+- **CHF loss, realized-loss and drawdown limits are positive (§9).** A zero limit trips a flat portfolio: zero loss meets a zero limit. Such a policy would latch the kill switch on a healthy day, so it is refused at policy time. The bp limits were already positive.
+- **Peak rule (§7).** The text says the peak must never be below "both" the day start and the current adjusted net worth. The code refuses a peak below either. The code is the sound reading: the day's peak is the maximum over the points that include the start and the current state, so it is at least each of them.
+- **Ceiling rounding is conservative (§10, §19).** Daily-loss bp, drawdown bp and exposure bp use the ceiling. A value that exceeds its boundary by a fraction of a basis point therefore trips or blocks on the next whole basis point. This is deliberate: a fractional excess must not pass as "not over the limit".
+- **`isOpen` is derived from the quantity (§8, §16).** The capital engine sets `isOpen = !quantity.isZero()`. O15 refuses a position whose flag contradicts its quantity, since a hidden holding would escape exposure and the open-position count. V1 is long-only, so a negative quantity is refused.
+- **A quote prices its own position and is not from the future.** A quote for another instrument, a quote whose time is not canonical UTC, or a quote later than the portfolio `asOf` is refused as `INVALID_PORTFOLIO`. An open position with a market value but no quote is a `DATA_HOLD`, because the value cannot be shown to be fresh.
+- **A latched trip id is derived from its triggering fingerprint (§14, §15).** O15 derives the id as `trip_` plus the first 40 hex digits of the fingerprint. A previously tripped state carrying any other id is not a state O15 could have produced, so it is refused rather than preserved as a trip identity.
+- **The inventory array is required.** The snapshot's inventory is part of the identity hash, so a malformed value is a classified refusal, not an unclassified `TypeError`.
+
+### 27.2 Rules that already hold, now pinned
+
+- Adjusted net worth subtracts the net external flow: a deposit with a loss shows the loss; a withdrawal with a gain shows the gain; flows larger than current net worth produce a large adjusted loss that trips.
+- Loss and drawdown trip exactly at their limits (`>=`); exposure caps trip above the cap (`>`) and block at the cap (`=`), for the gross, single-position and open-position dimensions.
+- A breach together with a data hold is `TRIPPED`, and the data-hold reason is still reported. Capacity reasons are reported under a data hold.
+- A gross-exposure capacity block and a single-position breach in the same decision keep both reasons and trip.
+- A tripped switch stays tripped under data recovery, under a data hold, and when the current breach differs; its trip id and reasons are preserved.
+- Decision identity is independent of position order, of the order of previous kill-switch reasons and of the data-status lists; it changes with policy, source hashes, data hold, capacity state and hard breaches.
+- The verifier recomputes the decision from the request and rejects any reissued flag, alert, source fingerprint or identity.
+- `canIncreaseRisk` is true only in `NORMAL`; `canReduceRisk` is true in every state; `liveOrderAllowed` and `physicalPurchaseAllowed` are false in every state.
+- The module exposes no reset, clear, arm, unlatch or enable function. The module imports no broker, ledger, registry, champion, capital, audit or network module at runtime.
+
+### 27.3 Trust boundaries that remain
+
+These cannot be proven from `PortfolioSnapshot`, `RiskDaySummary` and `PortfolioKillSwitch` alone. The authoritative producer or the store owns them.
+
+1. **External flows (§5, §6).** O15 cannot verify `netExternalFlowsTodayChf`. A sign-flipped or understated flow can hide a trading loss, and the summary remains structurally consistent. `sourceLedgerHeadHash` binds the summary to a ledger head, but O15 does not verify the ledger. The append-only ledger producer is the authority for flows.
+2. **Day peak (§7).** `peakAdjustedNetWorthChf` is caller-supplied. O15 proves only that it is at least the start and the current adjusted net worth. A deflated peak at that minimum hides an intraday drawdown. The producer must track the true intraday maximum.
+3. **Quote freshness (§8, §11).** The capital policy's quote-age limit is not an O15 input. A quote that is old by policy but still marked `live` by the position view is not detectable here. O15 relies on the position view's `priceStatus` for freshness.
+4. **Kill-switch provenance (§14).** `previousKillSwitch` is an input. A self-consistent latched state that was never stored by O15 is accepted. The store must be append-only, which is outside this branch.
+5. **Trip identity content (§15).** The trip id hashes more than the list in §15: it also binds the metrics and the previous kill-switch hash. It is deterministic; the spec list is a minimum, not an exact definition.
+6. **Realized trading P&L (§5).** `realizedTradingPnlTodayChf` is caller-supplied and is not reconciled with the adjusted daily P&L.
+7. **Stale closed positions.** A closed position listed as stale or unpriced still holds the decision. This is conservative and is pinned.
+
+### 27.4 Scope
+
+No broker adapter, Capital Engine accounting rule, registry, champion governance, alert transport, audit persistence or kill-switch reset flow was changed. `LockedBroker.place` is unchanged.
+
+
+## 28. Owner follow-up after independent review
+
+The three integration prerequisites from the independent O15 review were closed before PR #14 was allowed to advance.
+
+### 28.1 Independent quote freshness
+
+`PortfolioSafetyPolicy` now includes `maxFinancialQuoteAgeMs`.
+
+O15 independently compares every open position's `lastQuote.asOf` with the decision `asOf`. A quote older than the configured threshold produces `DATA_HOLD` even when an upstream `PositionView` incorrectly claims `priceStatus: 'live'`.
+
+A quote exactly on the freshness boundary remains valid; one millisecond older is held.
+
+This removes the previous dependency on the upstream CapitalPolicy freshness label alone.
+
+### 28.2 Append-only authoritative RiskDay producer
+
+`RiskDayTracker` records append-only checkpoints produced directly from `CapitalEngine.snapshot(...)` plus the current capital-ledger head.
+
+Callers do not supply:
+
+- `netExternalFlowsTodayChf`;
+- `realizedTradingPnlTodayChf`;
+- `peakAdjustedNetWorthChf`.
+
+The tracker derives:
+
+- external flows from the change in `CapitalState.netContributionsChf`;
+- realized trading P&L from the change in cumulative position realized P&L;
+- the flow-adjusted intraday peak from the append-only checkpoint sequence;
+- `sourceLedgerHeadHash` from the actual `CapitalLedger.head()`;
+- `sourceFingerprint` from the hash-chained checkpoint history.
+
+The first checkpoint must be exactly at `dayStartedAt`, and later checkpoints must move forward strictly inside the same UTC risk day.
+
+**Remaining sampling contract:** the peak is authoritative over recorded checkpoints. Phase-4 wiring must record a checkpoint on every authoritative portfolio refresh / broker-sync valuation event. Omitting a real intraday peak between checkpoints cannot be reconstructed later from O15 alone.
+
+### 28.3 Append-only kill-switch ownership
+
+`PortfolioKillSwitchStore` is a monotonic append-only store:
+
+- empty history means `ARMED`;
+- exactly one valid trip may be appended;
+- a second different trip is refused;
+- there is no reset, clear, arm or unlatch mutation API;
+- a stored trip id must derive from its triggering decision fingerprint;
+- malformed trip timestamps fail closed.
+
+The store accepts the repository's generic `AppendOnlyStore` port, so production may use `PostgresAppendOnlyStore` with the existing cross-process locking and hash-chain guarantees.
+
+### 28.4 Safe integration entry point
+
+`PortfolioSafetyService` is the Phase-4-preparation entry point.
+
+It:
+
+1. obtains the current portfolio from `CapitalEngine`;
+2. appends a trusted RiskDay checkpoint;
+3. derives `RiskDaySummary` from the tracker;
+4. synchronizes and reads the previous kill-switch state from append-only storage;
+5. invokes the pure `evaluatePortfolioSafetyEnvelope`;
+6. atomically attempts to latch a newly tripped switch;
+7. on a concurrent latch race, re-reads the persisted winner and re-evaluates fail closed.
+
+A successful local trip returns the exact triggering decision rather than replacing it with a post-latch reissue, preserving auditability.
+
+Callers of this service never provide `previousKillSwitch` or risk-day loss/flow/peak fields.
+
+### 28.5 Remaining trust limits before live execution
+
+O15 still does not prove:
+
+- that every possible intraday valuation point was checkpointed;
+- external authenticity of the market quote source itself;
+- availability of the PostgreSQL store in a deployment;
+- alert delivery;
+- human-approved kill-switch reset semantics.
+
+Those are later integration/operations milestones.
+
+Live Trading remains LOCKED.
+
+Broker Orders remain LOCKED.
+
+Physical Purchase remains LOCKED.
