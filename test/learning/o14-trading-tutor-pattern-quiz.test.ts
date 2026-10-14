@@ -823,6 +823,121 @@ describe('O14 review — matrix pins: outcome-bias wording, distractors and safe
   });
 });
 
+// Pins written from the mutation campaign: each one closes a rule that a mutation could remove without a test noticing.
+describe('O14 review — mutation-driven pins', () => {
+  it('accepts an adverse return just beyond the flat band and a flat return exactly on it', () => {
+    const adverse = review({ outcomeClassification: 'OUTCOME_ADVERSE', outcomeDiagnostics: { ...review().outcomeDiagnostics, returnBp: -60 } });
+    expect(errorCode(() => buildTradingTutorLesson(adverse, tutorPolicy))).toBe('NO_ERROR');
+    const flat = review({ outcomeClassification: 'OUTCOME_FLAT', outcomeDiagnostics: { ...review().outcomeDiagnostics, returnBp: -50 } });
+    expect(errorCode(() => buildTradingTutorLesson(flat, tutorPolicy))).toBe('NO_ERROR');
+  });
+
+  it('refuses a STRONG process while a required approval is pending, and accepts ACCEPTABLE', () => {
+    const pending = { ...cleanProcessDiagnostics(), humanApprovalRequired: true, humanApprovalStatus: 'pending' as const };
+    expect(errorCode(() => buildTradingTutorLesson(review({ processClassification: 'PROCESS_STRONG', processDiagnostics: pending }), tutorPolicy))).toBe('INVALID_REVIEW');
+    expect(errorCode(() => buildTradingTutorLesson(review({ processClassification: 'PROCESS_ACCEPTABLE', processDiagnostics: pending, feedback: [feedback('KEEP_PROCESS')] }), tutorPolicy))).toBe('NO_ERROR');
+  });
+
+  it('classifies blocking evidence impact as weak, never strong', () => {
+    const impact = { ...cleanProcessDiagnostics(), blockingEvidenceImpactCount: 1 };
+    expect(errorCode(() => buildTradingTutorLesson(review({ processClassification: 'PROCESS_WEAK', processDiagnostics: impact }), tutorPolicy))).toBe('NO_ERROR');
+    expect(errorCode(() => buildTradingTutorLesson(review({ processClassification: 'PROCESS_STRONG', processDiagnostics: impact, feedback: [feedback('KEEP_PROCESS')] }), tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
+  it('classifies a quant contradiction as weak, never strong', () => {
+    const contradicted = { ...cleanProcessDiagnostics(), quantStatus: 'contradicts' as const };
+    expect(errorCode(() => buildTradingTutorLesson(review({ processClassification: 'PROCESS_WEAK', processDiagnostics: contradicted }), tutorPolicy))).toBe('NO_ERROR');
+    expect(errorCode(() => buildTradingTutorLesson(review({ processClassification: 'PROCESS_STRONG', processDiagnostics: contradicted, feedback: [feedback('KEEP_PROCESS')] }), tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
+  it('maps a weak process to the process-discipline lesson whatever its feedback', () => {
+    const lesson = buildTradingTutorLesson(review({ feedback: [feedback('REVIEW_QUANT_SUPPORT')] }), tutorPolicy);
+    expect(lesson.categories).toContain('PROCESS_DISCIPLINE');
+  });
+
+  it('refuses a fractional basis-point return', () => {
+    const r = review({ outcomeClassification: 'OUTCOME_FLAT', outcomeDiagnostics: { ...review().outcomeDiagnostics, returnBp: 0.5 } });
+    expect(errorCode(() => buildTradingTutorLesson(r, tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
+  it('refuses a review whose execution lock is open', () => {
+    const r = review({ processDiagnostics: { ...review().processDiagnostics, liveOrderAllowed: true as never } });
+    expect(errorCode(() => buildTradingTutorLesson(r, tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
+  it('refuses a quiz whose visible evidence was edited without re-deriving its fingerprint, on the grading path too', () => {
+    const quiz = buildPatternQuiz(observation(), quizPolicy());
+    const edited = structuredClone(quiz);
+    edited.publicView.visibleEvidence.instrumentId = 'MSFT';
+    expect(errorCode(() => gradePatternQuiz(edited, quiz.answer.optionId))).toBe('INVALID_QUIZ');
+  });
+
+  it('refuses a quiz whose identity was edited without re-deriving it, on the grading path too', () => {
+    const quiz = buildPatternQuiz(observation(), quizPolicy());
+    const edited = structuredClone(quiz);
+    edited.inputFingerprint = 'f'.repeat(64);
+    expect(errorCode(() => gradePatternQuiz(edited, quiz.answer.optionId))).toBe('INVALID_QUIZ');
+  });
+
+  it('refuses a quiz whose distractor was swapped for another vocabulary label, on the grading path too', () => {
+    const quiz = buildPatternQuiz(observation(), quizPolicy());
+    const edited = structuredClone(quiz);
+    const distractor = edited.publicView.options.find((o) => o.id !== quiz.answer.optionId)!;
+    const labels = edited.publicView.options.map((o) => o.label);
+    distractor.label = PATTERN_TYPES.find((t) => !labels.includes(t))!;
+    expect(errorCode(() => gradePatternQuiz(edited, quiz.answer.optionId))).toBe('INVALID_QUIZ');
+  });
+
+  it('distractor selection depends on the input, not on a fixed list for each answer', () => {
+    const sets = new Set<string>();
+    for (let i = 0; i < 40; i++) {
+      const quiz = buildPatternQuiz(observation({ patternObservationId: 'po_variety_' + i }), quizPolicy({ mode: 'pattern_identification', optionCount: 4 }));
+      sets.add(JSON.stringify(quiz.publicView.options.map((o) => o.label).filter((x) => x !== quiz.answer.label).sort()));
+    }
+    expect(sets.size).toBeGreaterThan(1);
+  });
+
+  it('the verifier refuses a quiz re-issued from a different observation, even when the quiz is internally consistent', () => {
+    const quiz = buildPatternQuiz(observation(), quizPolicy());
+    const otherSource = observation({ patternObservationId: 'po_other', confirmedAt: null, resolvedAt: null });
+    expect(errorCode(() => verifyPatternQuiz(otherSource, quiz))).toBe('INVALID_QUIZ');
+  });
+
+  it('accepts a first sighting exactly at asOf', () => {
+    expect(errorCode(() => buildPatternQuiz(observation({ firstSeenAt: '2026-01-10T00:00:00.000Z', confirmedAt: null, resolvedAt: null }), quizPolicy()))).toBe('NO_ERROR');
+  });
+
+  it('reveals a lifecycle timestamp that is exactly at asOf', () => {
+    const quiz = buildPatternQuiz(
+      observation({ status: 'confirmed', confirmedAt: '2026-01-10T00:00:00.000Z', resolvedAt: null }),
+      quizPolicy({ mode: 'lifecycle', revealLifecycleTimestampsAvailableByAsOfOnly: true }),
+    );
+    expect(quiz.publicView.visibleEvidence.lifecycleTimestamps.confirmedAt).toBe('2026-01-10T00:00:00.000Z');
+  });
+
+  it('shows the breakout direction in lifecycle mode once the confirmation is known by asOf', () => {
+    const quiz = buildPatternQuiz(observation({ status: 'confirmed', confirmedAt: '2026-01-09T00:00:00.000Z', resolvedAt: null }), quizPolicy({ mode: 'lifecycle' }));
+    expect(quiz.publicView.visibleEvidence.confirmation.direction).toBe('down');
+  });
+
+  it('hides an anchor whose time is before asOf but whose confirmation is after asOf', () => {
+    const base = observation();
+    const quiz = buildPatternQuiz(
+      observation({ anchors: [base.anchors[0]!, { ...base.anchors[1]!, confirmedAt: '2026-01-15T00:00:00.000Z' }, base.anchors[2]!] }),
+      quizPolicy(),
+    );
+    expect(quiz.publicView.visibleEvidence.anchors.map((a) => a.confirmedAt)).toEqual([
+      '2026-01-03T00:00:00.000Z',
+      '2026-01-07T00:00:00.000Z',
+    ]);
+  });
+
+  it('refuses a confirmation buffer that is not exact decimal text', () => {
+    const src = observation({ confirmation: { direction: 'down', level: '100', buffer: 'wide', confirmedByBarTime: null } });
+    expect(errorCode(() => buildPatternQuiz(src, quizPolicy()))).toBe('INVALID_OBSERVATION');
+  });
+});
+
 describe('O14 review — pins that already hold', () => {
   it('the tutor and quiz modules import no memory, registry, champion, risk, capital, broker, audit, provider or network module at runtime', async () => {
     const { readFileSync } = await import('node:fs');
