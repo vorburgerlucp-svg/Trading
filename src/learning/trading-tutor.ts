@@ -101,6 +101,30 @@ function validatePolicy(raw: TradingTutorPolicy): TradingTutorPolicy {
   return { ...raw };
 }
 
+function expectedProcessClassification(review: PostTradeReview): PostTradeReview['processClassification'] {
+  const d = review.processDiagnostics;
+  if (!d.riskPassed || d.blockingFindingCount > 0) return 'PROCESS_BLOCKED';
+  if (
+    d.independentOpinionShortfall > 0 ||
+    d.planStepShortfallCount > 0 ||
+    (d.criticRequired && !d.criticObserved) ||
+    (d.counterAnalysisRequired && !d.counterAnalysisObserved) ||
+    d.majorFindingCount > 0 ||
+    d.blockingEvidenceImpactCount > 0 ||
+    d.quantStatus === 'contradicts'
+  ) {
+    return 'PROCESS_WEAK';
+  }
+  if (d.humanApprovalStatus === 'pending') return 'PROCESS_ACCEPTABLE';
+  if (
+    d.evidenceCount >= review.policy.minimumEvidenceCountForStrong &&
+    d.evidenceWarningCount === 0
+  ) {
+    return 'PROCESS_STRONG';
+  }
+  return 'PROCESS_ACCEPTABLE';
+}
+
 function validateReview(review: PostTradeReview): void {
   if (!review || typeof review !== 'object' || review.engineVersion !== POST_TRADE_REVIEW_VERSION) {
     fail('INVALID_REVIEW', 'only post-trade-review:v1 is supported');
@@ -129,8 +153,16 @@ function validateReview(review: PostTradeReview): void {
   ) {
     fail('INVALID_REVIEW', 'outcome classification is invalid');
   }
-  if (process === 'PROCESS_BLOCKED' && review.processDiagnostics.riskPassed && review.processDiagnostics.blockingFindingCount === 0) {
-    fail('INVALID_REVIEW', 'blocked process has no blocking diagnostic');
+  if (
+    !review.policy ||
+    review.policy.version !== 'post-trade-review-policy:v1' ||
+    !Number.isSafeInteger(review.policy.minimumEvidenceCountForStrong) ||
+    review.policy.minimumEvidenceCountForStrong < 1
+  ) {
+    fail('INVALID_REVIEW', 'embedded O13 process policy is invalid');
+  }
+  if (process !== expectedProcessClassification(review)) {
+    fail('INVALID_REVIEW', 'process classification does not match the embedded O13 diagnostics');
   }
   for (const diagnostic of review.calibrationDiagnostics) {
     if (
