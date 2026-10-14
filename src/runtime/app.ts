@@ -45,10 +45,18 @@ export interface QuantRequest {
   asOf: string;
 }
 
+export interface InstrumentRegisterRequest {
+  providerSymbol: string;
+  validFrom: string;
+  mic?: string;
+  exchange?: string;
+}
+
 /** What the routes need. Every implementation returns validated NEXUS data, never a raw provider response. */
 export interface RuntimeServices {
   health(): Promise<RuntimeHealth>;
   searchInstruments(query: string): Promise<InstrumentSearchItem[]>;
+  registerInstrument(request: InstrumentRegisterRequest): Promise<InstrumentSearchItem>;
   readBars(request: BarsRequest): Promise<unknown>;
   quote(instrumentId: string): Promise<unknown>;
   runQuant(request: QuantRequest): Promise<unknown>;
@@ -56,7 +64,10 @@ export interface RuntimeServices {
 }
 
 const INSTRUMENT_ID = /^[A-Za-z0-9_.-]{1,128}$/;
+const PROVIDER_SYMBOL = /^[A-Za-z0-9._\-/:]{1,64}$/;
 const SEARCH_TEXT = /^[A-Za-z0-9 .\-/&]{1,64}$/;
+const MIC = /^[A-Z0-9]{4}$/;
+const EXCHANGE = /^[A-Za-z0-9._-]{1,32}$/;
 const CANONICAL_UTC = (value: string): number | null => {
   const ms = Date.parse(value);
   return Number.isFinite(ms) && new Date(ms).toISOString() === value ? ms : null;
@@ -68,6 +79,7 @@ const ROUTES: readonly Route[] = Object.freeze([
   { method: 'GET', path: '/health' },
   { method: 'GET', path: '/api/health' },
   { method: 'GET', path: '/api/instruments/search' },
+  { method: 'POST', path: '/api/instruments/register' },
   { method: 'GET', path: '/api/market/bars' },
   { method: 'GET', path: '/api/market/quote' },
   { method: 'POST', path: '/api/quant/run' },
@@ -141,6 +153,25 @@ function quantBody(value: unknown): QuantRequest {
   };
 }
 
+function registerBody(value: unknown): InstrumentRegisterRequest {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid();
+  const body = value as Record<string, unknown>;
+  const allowed = new Set(['providerSymbol', 'validFrom', 'mic', 'exchange']);
+  if (Object.keys(body).some((key) => !allowed.has(key))) invalid();
+  if (typeof body.providerSymbol !== 'string' || !PROVIDER_SYMBOL.test(body.providerSymbol)) invalid();
+  if (typeof body.validFrom !== 'string') invalid();
+  const request: InstrumentRegisterRequest = { providerSymbol: body.providerSymbol, validFrom: parseCanonicalUtc(body.validFrom) };
+  if (body.mic !== undefined) {
+    if (typeof body.mic !== 'string' || !MIC.test(body.mic)) invalid();
+    request.mic = body.mic;
+  }
+  if (body.exchange !== undefined) {
+    if (typeof body.exchange !== 'string' || !EXCHANGE.test(body.exchange)) invalid();
+    request.exchange = body.exchange;
+  }
+  return request;
+}
+
 function send(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
@@ -167,6 +198,8 @@ export function createRuntimeHandler(services: RuntimeServices): (req: IncomingM
           return send(res, 200, await services.health());
         case '/api/instruments/search':
           return send(res, 200, { instruments: await services.searchInstruments(parseSearch(requiredText(params, 'q'))) });
+        case '/api/instruments/register':
+          return send(res, 201, { instrument: await services.registerInstrument(registerBody(await readJsonBody(req))) });
         case '/api/market/bars': {
           const window = parseBarsWindow(requiredText(params, 'from'), requiredText(params, 'to'));
           return send(res, 200, await services.readBars({
