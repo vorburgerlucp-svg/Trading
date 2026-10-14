@@ -92,6 +92,11 @@ function strongTrace(source: DecisionTrace): DecisionTrace {
   return trace;
 }
 
+/** A look-ahead item as the Brain records it: listed as evidence with status not_yet_available, and excluded. */
+function lookAheadItem(id: string): DecisionTrace['inputs']['evidence'][number] {
+  return { id, type: 'news', source: 'test', observedAt: '2026-10-01T09:00:00.000Z', availableAt: '2026-10-01T09:00:00.000Z', status: 'not_yet_available', version: null };
+}
+
 function codeOf(run: () => unknown): string {
   try {
     run();
@@ -182,6 +187,7 @@ describe('O13 post-trade review — RED', () => {
   it('preserves look-ahead exclusions and empirical-support references in process diagnostics', async () => {
     const base = await fixture();
     const trace = structuredClone(base.trace);
+    trace.inputs.evidence = [...trace.inputs.evidence, lookAheadItem('future-news'), lookAheadItem('future-price')];
     trace.inputs.excludedLookAhead = ['future-news', 'future-price'];
     trace.inputs.quant = {
       status: 'confirmed',
@@ -358,6 +364,8 @@ describe('O13 post-trade review — RED', () => {
     const base = await fixture();
     const aTrace = structuredClone(base.trace);
     const bTrace = structuredClone(base.trace);
+    aTrace.inputs.evidence = [...aTrace.inputs.evidence, lookAheadItem('a'), lookAheadItem('z')];
+    bTrace.inputs.evidence = [...bTrace.inputs.evidence, lookAheadItem('z'), lookAheadItem('a')];
     aTrace.inputs.excludedLookAhead = ['z', 'a'];
     bTrace.inputs.excludedLookAhead = ['a', 'z'];
     aTrace.inputs.quant = { status: 'confirmed', backtestRunIds: ['b', 'a'] };

@@ -271,6 +271,8 @@ function validateTrace(trace: DecisionTrace): void {
   ) {
     fail('INVALID_TRACE', 'execution locks must remain false');
   }
+  validateRecordAgreement(trace, decisionMs);
+  validateEvidence(trace, decisionMs);
 
   const steps = new Map(trace.plan.steps.map((step) => [step.id, step]));
   const attributable = new Set<string>();
@@ -295,6 +297,88 @@ function validateTrace(trace: DecisionTrace): void {
       attributable.add(key);
       validateProbabilityFields(attempt);
     }
+  }
+}
+
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  const x = [...a].sort(compareCodeUnit);
+  const y = [...b].sort(compareCodeUnit);
+  return x.length === y.length && x.every((value, i) => value === y[i]);
+}
+
+/** The record, the decision, the capital read and the approval state must describe one decision, not three. */
+function validateRecordAgreement(trace: DecisionTrace, asOfMs: number): void {
+  const { record, decision, inputs, humanApproval } = trace;
+  if (record.finalAction !== decision.finalAction) fail('INVALID_TRACE', 'record and decision disagree on finalAction');
+  if (!sameStrings(record.reasonCodes, decision.reasonCodes)) fail('INVALID_TRACE', 'record and decision disagree on reasonCodes');
+  if (record.capitalStateRef !== decision.capitalStateRef || decision.capitalStateRef !== inputs.capitalStateRef) {
+    fail('INVALID_TRACE', 'record, decision and inputs disagree on the capital state reference');
+  }
+  const capitalMs = canonicalMs(inputs.capitalStateTimestamp);
+  if (capitalMs === null || capitalMs > asOfMs) fail('INVALID_TRACE', 'capital state must be read at or before the decision asOf');
+  if (decision.requiresHumanApproval !== humanApproval.required) {
+    fail('INVALID_TRACE', 'decision and humanApproval disagree on whether approval is required');
+  }
+  if (humanApproval.required ? humanApproval.status !== 'pending' : humanApproval.status !== 'not_required') {
+    fail('INVALID_TRACE', 'humanApproval status contradicts whether approval is required');
+  }
+  const runIds = trace.attempts.map((attempt) => {
+    if (!attempt.runId) fail('INVALID_TRACE', 'attempt has no recorded model run');
+    return attempt.runId;
+  });
+  if (!sameStrings(runIds, record.modelRuns)) fail('INVALID_TRACE', 'record model runs do not match the recorded attempts');
+}
+
+type EvidenceItem = DecisionTrace['inputs']['evidence'][number];
+
+/** Evidence the decision could use: the Brain only cites statuses other than unknown and not_yet_available. */
+function isUsable(item: EvidenceItem): boolean {
+  return item.status !== 'unknown' && item.status !== 'not_yet_available';
+}
+
+/**
+ * Evidence inside the trace must be point-in-time: availability never precedes observation, look-ahead items are
+ * exactly the excluded ones, quarantined items are never cited, and every usable item is cited by the record.
+ */
+function validateEvidence(trace: DecisionTrace, asOfMs: number): void {
+  const { inputs, record, security } = trace;
+  const excluded = new Set<string>();
+  for (const id of inputs.excludedLookAhead) {
+    if (excluded.has(id)) fail('INVALID_TRACE', 'duplicate excluded look-ahead evidence ' + id);
+    excluded.add(id);
+  }
+  const items = new Map<string, EvidenceItem>();
+  for (const item of inputs.evidence) {
+    if (items.has(item.id)) fail('INVALID_TRACE', 'duplicate evidence id ' + item.id);
+    items.set(item.id, item);
+    if (item.status === 'unknown') continue;
+    const observedMs = canonicalMs(item.observedAt);
+    const availableMs = canonicalMs(item.availableAt);
+    if (observedMs === null || availableMs === null) fail('INVALID_TRACE', 'evidence ' + item.id + ' has non-canonical timestamps');
+    if (availableMs < observedMs) fail('INVALID_TRACE', 'evidence ' + item.id + ' is available before it was observed');
+    const lookAhead = availableMs > asOfMs;
+    if (lookAhead !== (item.status === 'not_yet_available')) {
+      fail('INVALID_TRACE', 'evidence ' + item.id + ' status contradicts its availability time');
+    }
+    if (lookAhead !== excluded.has(item.id)) fail('INVALID_TRACE', 'evidence ' + item.id + ' look-ahead exclusion is inconsistent');
+  }
+  for (const id of excluded) {
+    const item = items.get(id);
+    if (!item || item.status !== 'not_yet_available') fail('INVALID_TRACE', 'excluded look-ahead evidence is not a look-ahead item: ' + id);
+  }
+
+  const cited = new Set(record.evidenceRefs);
+  if (cited.size !== record.evidenceRefs.length) fail('INVALID_TRACE', 'record evidence references contain duplicates');
+  const quarantined = new Set(security.quarantinedEvidence.map((q) => q.evidenceId));
+  for (const ref of cited) {
+    if (ref === inputs.capitalEvidenceId) continue;
+    const item = items.get(ref);
+    if (!item) fail('INVALID_TRACE', 'record evidence reference does not resolve to trace inputs: ' + ref);
+    if (!isUsable(item)) fail('INVALID_TRACE', 'record cites evidence that was not usable: ' + ref);
+    if (quarantined.has(ref)) fail('INVALID_TRACE', 'record cites quarantined evidence: ' + ref);
+  }
+  for (const item of items.values()) {
+    if (isUsable(item) && !cited.has(item.id)) fail('INVALID_TRACE', 'usable evidence is missing from the record references: ' + item.id);
   }
 }
 
@@ -470,7 +554,7 @@ function processDiagnosticsOf(trace: DecisionTrace): ProcessDiagnostics {
   const quant = trace.inputs.quant;
   const requiredIndependentOpinions = trace.plan.minIndependentOpinions;
   return {
-    evidenceCount: trace.inputs.evidence.length,
+    evidenceCount: trace.inputs.evidence.filter(isUsable).length,
     excludedLookAheadCount: trace.inputs.excludedLookAhead.length,
     evidenceWarningCount: trace.decision.evidence.warnings.length,
     blockingEvidenceImpactCount: trace.decision.evidence.impact.length,
