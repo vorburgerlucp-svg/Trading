@@ -644,7 +644,11 @@ function processDiagnosticsOf(trace: DecisionTrace): ProcessDiagnostics {
   };
 }
 
-function classifyProcess(diagnostics: ProcessDiagnostics, policy: PostTradeReviewPolicy): ProcessClassification {
+/** Pure O13 process classifier shared by the review builder and downstream educational consumers. */
+export function classifyPostTradeProcess(
+  diagnostics: ProcessDiagnostics,
+  policy: PostTradeReviewPolicy,
+): ProcessClassification {
   if (!diagnostics.riskPassed || diagnostics.blockingFindingCount > 0) return 'PROCESS_BLOCKED';
   if (
     diagnostics.independentOpinionShortfall > 0 ||
@@ -665,9 +669,10 @@ function classifyProcess(diagnostics: ProcessDiagnostics, policy: PostTradeRevie
   return 'PROCESS_ACCEPTABLE';
 }
 
-function classifyOutcome(evaluation: TradeEvaluation): OutcomeClassification {
-  if (evaluation.returnBp > FLAT_BAND_BP) return 'OUTCOME_FAVORABLE';
-  if (evaluation.returnBp < -FLAT_BAND_BP) return 'OUTCOME_ADVERSE';
+/** Pure O13 outcome classifier shared by the review builder and downstream educational consumers. */
+export function classifyPostTradeOutcome(returnBp: number): OutcomeClassification {
+  if (returnBp > FLAT_BAND_BP) return 'OUTCOME_FAVORABLE';
+  if (returnBp < -FLAT_BAND_BP) return 'OUTCOME_ADVERSE';
   return 'OUTCOME_FLAT';
 }
 
@@ -856,8 +861,8 @@ export function buildPostTradeReview(request: PostTradeReviewRequest): PostTrade
   );
 
   const processDiagnostics = processDiagnosticsOf(request.trace);
-  const processClassification = classifyProcess(processDiagnostics, policy);
-  const outcomeClassification = classifyOutcome(request.evaluation);
+  const processClassification = classifyPostTradeProcess(processDiagnostics, policy);
+  const outcomeClassification = classifyPostTradeOutcome(request.evaluation.returnBp);
   const { attributions, calibration } = attributionsOf(request.trace, request.evaluation, performance);
 
   const sourceFingerprints = {
