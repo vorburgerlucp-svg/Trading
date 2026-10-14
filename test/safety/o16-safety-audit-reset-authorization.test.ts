@@ -411,7 +411,7 @@ describe('O16 recovery and reset authorization — RED', () => {
     });
 
     expect(errorCode(() => buildKillSwitchResetApproval(request, {
-      approvedAt: '2026-10-14T10:29:59.999Z',
+      approvedAt: '2026-10-14T10:14:59.999Z',
       approver: { kind: 'human', id: 'human-b' },
       decision: 'APPROVE',
       rationale: 'Independent review confirms recovery.',
@@ -541,11 +541,25 @@ describe('O16 append-only governance and safety audit — RED', () => {
     const store = await SafetyGovernanceStore.open();
     await store.saveRequest(request, source.previousKillSwitch.tripId!);
     await store.saveApproval(approval);
-    await expect(store.saveApproval({ ...approval, approvalId: 'ksra_' + 'f'.repeat(40) })).rejects.toMatchObject({
+    const secondApproval = buildKillSwitchResetApproval(request, {
+      approvedAt: '2026-10-14T10:30:01.000Z',
+      approver: { kind: 'human', id: 'human-c' },
+      decision: 'APPROVE',
+      rationale: 'A second valid reviewer also confirms recovery.',
+      policy: resetPolicy,
+    });
+    await expect(store.saveApproval(secondApproval)).rejects.toMatchObject({
       code: 'TERMINAL_EXISTS',
     });
     await store.saveAuthorization(auth);
-    await expect(store.saveAuthorization({ ...auth, authorizationId: 'ksrz_' + 'f'.repeat(40) })).rejects.toMatchObject({
+    const secondAuthorization = authorizeKillSwitchReset(
+      source,
+      request,
+      approval,
+      resetPolicy,
+      '2026-10-14T10:30:01.000Z',
+    );
+    await expect(store.saveAuthorization(secondAuthorization)).rejects.toMatchObject({
       code: 'AUTHORIZATION_NOT_ALLOWED',
     });
   });
