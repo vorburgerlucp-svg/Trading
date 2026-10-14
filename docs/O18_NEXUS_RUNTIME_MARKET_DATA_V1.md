@@ -124,7 +124,7 @@ On `SIGINT` or `SIGTERM` the server stops accepting requests, closes open connec
 | unit | `test/runtime/o18-smoke.test.ts` | 1 | Start, health, search, bars, quant, safety, shutdown over the production composition (in-memory stores). |
 | unit | `test/runtime/o18-bootstrap.test.ts` | 4 | Fail-closed start without a database; the start error never contains the connection secret. |
 | pg | `test/pg/o18-runtime.pg.test.ts` | 2 | Against PostgreSQL 17.10: an unmigrated database is refused and not migrated; a migrated one serves the API and reads its state back after a restart. |
-| live | `test/live/twelve-data.live.test.ts` | see report | Real Twelve Data call. Runs only with `TWELVE_DATA_API_KEY` or `NEXUS_TWELVE_DATA_DEMO=1`. Otherwise reported as NOT RUN. |
+| live | `test/live/twelve-data.live.test.ts` | 1 passed | Real Twelve Data call with the public demo key (AAPL daily bars and quote, normalized, validated, stored). Runs only with `TWELVE_DATA_API_KEY` or `NEXUS_TWELVE_DATA_DEMO=1`. Its result is labelled demo and is never usable for trading. The three other live files (SEC EDGAR, Massive) are not part of O18 and were skipped: they need `SEC_USER_AGENT` or `MASSIVE_API_KEY`. |
 
 Run the required check:
 
@@ -147,3 +147,6 @@ npm run test:live
 - The public demo key has provider rate limits and serves split-adjusted prices only. Its data is never usable for trading.
 - Quotes are stored only when a quote is requested. There is no background polling.
 - The server runs compiled output (`dist/`). There is no TypeScript runner in the start path.
+- **Quant on demo data is not valid.** The public demo key serves split-adjusted prices only. The quant service derives split-adjusted series from raw bars (`src/quant/quant-service.ts`, `inputs`), and no raw bars exist in demo mode. A demo quant run therefore stores a run with `missing_bars` (`valid: false`, `usableForTrading: false`). The response still reports `persistence: APPLIED` and `insufficientData: false`. This is a known defect of the demo path. The runtime should refuse quant runs in demo mode, or the production path should be verified first. Not changed in O18.
+- **The production quant path is not verified live.** It requests raw prices and reads them directly, but no production key was available to test it.
+- **No instrument registration route.** Instruments enter the instrument log only through code or a database write. The AAPL example used a one-off local seed (`ins_aapl`, Twelve Data mapping `AAPL`). A registration route or a reviewed seed command is an O19 item.
