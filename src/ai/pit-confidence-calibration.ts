@@ -387,14 +387,15 @@ export function verifyPitConfidenceCalibrationModel(
     bad((error as Error).message);
   }
   if (model.method !== 'histogram_binning') bad('method is not histogram_binning');
-  const fitAsOfMs = canonicalMs(model.fitAsOf);
-  if (fitAsOfMs === null) bad('fitAsOf is not canonical UTC');
-  let policy: HistogramCalibrationPolicy;
-  try {
-    policy = normalizedPolicy(model.policy, 'INVALID_CALIBRATION_MODEL');
-  } catch (error) {
-    bad((error as Error).message);
-  }
+  const parsedFitAsOfMs = canonicalMs(model.fitAsOf);
+  const fitAsOfMs = parsedFitAsOfMs === null ? bad('fitAsOf is not canonical UTC') : parsedFitAsOfMs;
+  const policy = (() => {
+    try {
+      return normalizedPolicy(model.policy, 'INVALID_CALIBRATION_MODEL');
+    } catch (error) {
+      return bad((error as Error).message);
+    }
+  })();
   if (!Number.isSafeInteger(model.excludedFutureSampleCount) || model.excludedFutureSampleCount < 0) bad('excludedFutureSampleCount is invalid');
   if (!Array.isArray(model.fitEvidence) || !Array.isArray(model.fitEvidenceFingerprints)) bad('fit evidence is missing');
 
