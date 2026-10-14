@@ -4,6 +4,7 @@
 import { IndicatorError } from '../quant/indicators/common.js';
 import { MarketDataError } from '../market-data/market-data-provider.js';
 import { MarketDataIntegrityError, MarketDataStoreError } from '../market-data/market-data-store.js';
+import { InstrumentRegistryError, InstrumentRegistryIntegrityError } from '../market-data/instrument-registry.js';
 
 export type RuntimeErrorCode =
   | 'DATA_NOT_CONNECTED'
@@ -76,6 +77,11 @@ export function toRuntimeApiError(error: unknown): RuntimeApiError {
   }
   if (error instanceof MarketDataIntegrityError) return new RuntimeApiError('DATA_QUALITY_ERROR');
   if (error instanceof IndicatorError) return new RuntimeApiError('DATA_QUALITY_ERROR');
+  if (error instanceof InstrumentRegistryIntegrityError) return new RuntimeApiError('DATABASE_ERROR');
+  if (error instanceof InstrumentRegistryError) {
+    if (error.code === 'not_found') return new RuntimeApiError('INSTRUMENT_NOT_FOUND');
+    return new RuntimeApiError('REQUEST_INVALID');
+  }
   if (error instanceof MarketDataStoreError) return new RuntimeApiError('DATABASE_ERROR');
   return new RuntimeApiError('INTERNAL_ERROR');
 }
