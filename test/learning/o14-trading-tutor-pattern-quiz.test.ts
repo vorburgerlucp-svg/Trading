@@ -502,12 +502,12 @@ describe('O14 Pattern Quiz — RED', () => {
 
   it('grades correct and incorrect options deterministically', () => {
     const quiz = buildPatternQuiz(observation(), quizPolicy());
-    const correct = gradePatternQuiz(quiz, quiz.answer.optionId);
+    const correct = gradePatternQuiz(observation(), quiz, quiz.answer.optionId);
     expect(correct.correct).toBe(true);
     expect(correct.correctAnswer).toBe('head_and_shoulders');
 
     const wrongId = quiz.publicView.options.find((o) => o.id !== quiz.answer.optionId)!.id;
-    const wrong = gradePatternQuiz(quiz, wrongId);
+    const wrong = gradePatternQuiz(observation(), quiz, wrongId);
     expect(wrong.correct).toBe(false);
     expect(wrong.selectedAnswer).not.toBe(wrong.correctAnswer);
   });
@@ -564,7 +564,7 @@ describe('O14 Pattern Quiz — RED', () => {
 
   it('refuses invalid submission ids instead of inventing an answer', () => {
     const quiz = buildPatternQuiz(observation(), quizPolicy());
-    expect(errorCode(() => gradePatternQuiz(quiz, 'missing-option'))).toBe('INVALID_SUBMISSION');
+    expect(errorCode(() => gradePatternQuiz(observation(), quiz, 'missing-option'))).toBe('INVALID_SUBMISSION');
   });
 });
 
@@ -741,7 +741,7 @@ describe('O14 review — quiz probes (RED)', () => {
     const forged = structuredClone(quiz);
     forged.answer.optionId = other.id;
     forged.answer.label = other.label as never;
-    expect(errorCode(() => gradePatternQuiz(forged, other.id))).toBe('INVALID_QUIZ');
+    expect(errorCode(() => gradePatternQuiz(observation(), forged, other.id))).toBe('INVALID_QUIZ');
   });
 
   it('Q18 verifier can pin the quiz policy the consumer expects and refuses a quiz re-issued under another policy', () => {
@@ -869,14 +869,14 @@ describe('O14 review — mutation-driven pins', () => {
     const quiz = buildPatternQuiz(observation(), quizPolicy());
     const edited = structuredClone(quiz);
     edited.publicView.visibleEvidence.instrumentId = 'MSFT';
-    expect(errorCode(() => gradePatternQuiz(edited, quiz.answer.optionId))).toBe('INVALID_QUIZ');
+    expect(errorCode(() => gradePatternQuiz(observation(), edited, quiz.answer.optionId))).toBe('INVALID_QUIZ');
   });
 
   it('refuses a quiz whose identity was edited without re-deriving it, on the grading path too', () => {
     const quiz = buildPatternQuiz(observation(), quizPolicy());
     const edited = structuredClone(quiz);
     edited.inputFingerprint = 'f'.repeat(64);
-    expect(errorCode(() => gradePatternQuiz(edited, quiz.answer.optionId))).toBe('INVALID_QUIZ');
+    expect(errorCode(() => gradePatternQuiz(observation(), edited, quiz.answer.optionId))).toBe('INVALID_QUIZ');
   });
 
   it('refuses a quiz whose distractor was swapped for another vocabulary label, on the grading path too', () => {
@@ -885,7 +885,7 @@ describe('O14 review — mutation-driven pins', () => {
     const distractor = edited.publicView.options.find((o) => o.id !== quiz.answer.optionId)!;
     const labels = edited.publicView.options.map((o) => o.label);
     distractor.label = PATTERN_TYPES.find((t) => !labels.includes(t))!;
-    expect(errorCode(() => gradePatternQuiz(edited, quiz.answer.optionId))).toBe('INVALID_QUIZ');
+    expect(errorCode(() => gradePatternQuiz(observation(), edited, quiz.answer.optionId))).toBe('INVALID_QUIZ');
   });
 
   it('distractor selection depends on the input, not on a fixed list for each answer', () => {
@@ -895,6 +895,13 @@ describe('O14 review — mutation-driven pins', () => {
       sets.add(JSON.stringify(quiz.publicView.options.map((o) => o.label).filter((x) => x !== quiz.answer.label).sort()));
     }
     expect(sets.size).toBeGreaterThan(1);
+  });
+
+  it('the grading path refuses an internally consistent quiz when the supplied source observation is different', () => {
+    const source = observation();
+    const quiz = buildPatternQuiz(source, quizPolicy());
+    const otherSource = observation({ patternObservationId: 'po_other_for_grading', confirmedAt: null, resolvedAt: null });
+    expect(errorCode(() => gradePatternQuiz(otherSource, quiz, quiz.answer.optionId))).toBe('INVALID_QUIZ');
   });
 
   it('the verifier refuses a quiz re-issued from a different observation, even when the quiz is internally consistent', () => {
