@@ -112,6 +112,27 @@ function review(overrides: Partial<PostTradeReview> = {}): PostTradeReview {
   };
 }
 
+function cleanProcessDiagnostics(source = review().processDiagnostics): PostTradeReview['processDiagnostics'] {
+  return {
+    ...source,
+    evidenceCount: Math.max(1, source.evidenceCount),
+    evidenceWarningCount: 0,
+    blockingEvidenceImpactCount: 0,
+    independentOpinionShortfall: 0,
+    planStepShortfallCount: 0,
+    criticRequired: false,
+    criticObserved: false,
+    counterAnalysisRequired: false,
+    counterAnalysisObserved: false,
+    quantStatus: 'confirmed',
+    riskPassed: true,
+    blockingFindingCount: 0,
+    majorFindingCount: 0,
+    humanApprovalRequired: false,
+    humanApprovalStatus: 'not_required',
+  };
+}
+
 const tutorPolicy: TradingTutorPolicy = {
   version: TRADING_TUTOR_POLICY_VERSION,
   learnerLevel: 'beginner',
@@ -240,6 +261,7 @@ describe('O14 Trading Tutor — RED', () => {
   it('strong process plus adverse outcome remains process-positive', () => {
     const source = review({
       processClassification: 'PROCESS_STRONG',
+      processDiagnostics: cleanProcessDiagnostics(),
       outcomeClassification: 'OUTCOME_ADVERSE',
       feedback: [feedback('KEEP_PROCESS')],
       outcomeDiagnostics: {
@@ -274,6 +296,10 @@ describe('O14 Trading Tutor — RED', () => {
   it('maps O13 feedback codes to deterministic lesson categories', () => {
     const source = review({
       processClassification: 'PROCESS_ACCEPTABLE',
+      processDiagnostics: {
+        ...cleanProcessDiagnostics(),
+        evidenceCount: 0,
+      },
       feedback: [
         feedback('REVIEW_EVIDENCE_QUALITY'),
         feedback('REVIEW_MODEL_CONFIDENCE', 'both'),
