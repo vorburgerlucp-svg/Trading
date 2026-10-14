@@ -444,13 +444,19 @@ export class NexusBrain {
       prompts: Object.values(PROMPT_TEMPLATES).map((p) => p.id + '@' + p.version),
       allocationPolicy: this.allocationPolicy,
     });
+    const quarantinedEvidenceIds = new Set(quarantined.map((q) => q.evidenceId));
     const record: DecisionRecord = {
       decisionId,
       taskId: task.id,
       createdAt: this.deps.clock().toISOString(),
       asOf,
       inputFingerprint,
-      evidenceRefs: [capitalEvidenceId, ...assessments.filter((a) => a.status !== 'unknown' && a.status !== 'not_yet_available').map((a) => a.id)],
+      evidenceRefs: [
+        capitalEvidenceId,
+        ...assessments
+          .filter((a) => a.status !== 'unknown' && a.status !== 'not_yet_available' && !quarantinedEvidenceIds.has(a.id))
+          .map((a) => a.id),
+      ],
       modelRuns,
       ...(quantResultRef !== undefined ? { quantResultRef } : {}),
       consensusRef,

@@ -268,6 +268,7 @@ describe('Security: externer Text', () => {
       expect(req.question).not.toMatch(/IGNORE RISK ENGINE/);
     }
     expect(r.security.quarantinedEvidence[0]?.rules).toEqual(expect.arrayContaining(['disable_controls', 'shouted_trade_command']));
+    expect(r.record.evidenceRefs).not.toContain('news-1');
     expect(ctx.allocationPolicy).toEqual(policyBefore);
     expect(d.capital?.recommendedChf).toBe(0n);
     expect(d.execution.liveOrderAllowed).toBe(false);
