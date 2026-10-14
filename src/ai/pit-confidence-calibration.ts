@@ -1,6 +1,11 @@
 import { hashOf } from '../persistence/canonical-json.js';
 import type { ModelKey } from './model-types.js';
 
+// Point-in-time confidence calibration (pit-confidence-calibration:v1). The contract is docs/O12_PIT_CONFIDENCE_CALIBRATION_V1.md.
+// A row is classified by its knownAt alone: a row known after the cutoff contributes only to the excluded count, and its outcome, confidence, label and
+// fingerprint are never inspected. Identity-level checks (an object, a valid observationId, the model key and a readable knownAt) still apply to every row,
+// because a row that cannot be identified or placed in time cannot be classified at all.
+
 export const PIT_CONFIDENCE_CALIBRATION_VERSION = 'pit-confidence-calibration:v1' as const;
 
 export type CalibrationOutcomeLabel = 0 | 1;
@@ -36,6 +41,7 @@ export interface HistogramCalibrationBin {
   upper: number;
   sampleSize: number;
   positives: number;
+  /** Empirical probability. Non-null only for a FITTED model and a bin that meets minimumSamplesPerBin. */
   probability: number | null;
 }
 
@@ -46,6 +52,7 @@ export interface CalibrationFitEvidence {
   confidenceScore: number;
   outcomeLabel: CalibrationOutcomeLabel;
   evidenceFingerprint: string;
+  /** The row's content identity (everything but observationId). It binds the row's values. */
   calibrationEvidenceFingerprint: string;
 }
 
@@ -63,10 +70,15 @@ export interface PitConfidenceCalibrationModel {
   fitAsOf: string;
   policy: HistogramCalibrationPolicy;
   eligibleSampleSize: number;
+  /**
+   * Audit metadata: how many rows were known after fitAsOf and were not inspected. It is not part of any identity, because the fit must not depend on
+   * information that was unknown at fitAsOf. The verifier checks only its shape: the excluded rows are not retained, so their count cannot be recomputed.
+   */
   excludedFutureSampleCount: number;
   status: PitCalibrationStatus;
   bins: HistogramCalibrationBin[];
   fitEvidence: CalibrationFitEvidence[];
+  /** The evidence identities of the fit rows (model, target and evidenceFingerprint), in observationId order. */
   fitEvidenceFingerprints: string[];
 }
 
@@ -100,7 +112,8 @@ export interface CalibrationEvaluationResult {
   coveredSampleSize: number;
   excludedFutureSampleCount: number;
   uncoveredSampleCount: number;
-  coverageRate: number;
+  /** Covered over eligible. Null when no row is eligible: an empty evaluation has no coverage, and zero would invent one. */
+  coverageRate: number | null;
   brierScore: number | null;
   meanPredictedProbability: number | null;
   observedPositiveRate: number | null;
@@ -179,7 +192,8 @@ function normalizedPolicy(raw: HistogramCalibrationPolicy, code: 'INVALID_POLICY
   };
 }
 
-function evidenceIdentity(
+/** The content of a row without its observationId: two rows with the same content have the same values. */
+function calibrationEvidenceFingerprintOf(
   modelKey: ModelKey,
   targetId: string,
   targetVersion: string,
@@ -197,33 +211,57 @@ function evidenceIdentity(
   });
 }
 
-interface ValidatedObservation extends CalibrationObservation {
-  calibrationEvidenceFingerprint: string;
+/**
+ * The identity of the underlying evidence: the caller's evidenceFingerprint, scoped to one model and target. A repeated identity is one piece of
+ * evidence, whatever its observationId or knownAt, so it can neither inflate a sample nor be evaluated after it was fitted.
+ */
+function evidenceIdentityOf(modelKey: ModelKey, targetId: string, targetVersion: string, evidenceFingerprint: string): string {
+  return hashOf({ kind: 'calibration-evidence-identity', modelKey, targetId, targetVersion, evidenceFingerprint });
 }
 
-function validateObservations(
+interface ValidatedObservation extends CalibrationObservation {
+  calibrationEvidenceFingerprint: string;
+  evidenceIdentity: string;
+}
+
+/**
+ * Splits the rows into those known at the cutoff and those known after it. A later row contributes only to the excluded count. Rows that cannot be
+ * identified or placed in time are refused whatever their time, because they cannot be classified at all.
+ */
+function partitionObservations(
   raw: readonly CalibrationObservation[],
   modelKey: ModelKey,
   targetId: string,
   targetVersion: string,
-  timeCode: 'INVALID_TIME' | 'INVALID_OBSERVATIONS' = 'INVALID_TIME',
-): ValidatedObservation[] {
+  cutoffMs: number,
+): { eligible: ValidatedObservation[]; excludedFutureSampleCount: number } {
   if (!Array.isArray(raw) || raw.length === 0) fail('INVALID_OBSERVATIONS', 'at least one observation is required');
-  const ids = new Set<string>();
-  const evidence = new Map<string, string>();
-  const out: ValidatedObservation[] = [];
-
+  const knownRows: CalibrationObservation[] = [];
+  let excludedFutureSampleCount = 0;
   for (const one of raw) {
-    if (!one || typeof one.observationId !== 'string' || one.observationId.trim() === '' || one.observationId !== one.observationId.trim()) {
+    if (!one || typeof one !== 'object') fail('INVALID_OBSERVATIONS', 'every observation must be an object');
+    if (typeof one.observationId !== 'string' || one.observationId.trim() === '' || one.observationId !== one.observationId.trim()) {
       fail('INVALID_OBSERVATIONS', 'observationId must be a non-empty trimmed string');
     }
+    if (one.modelKey !== modelKey) fail('INVALID_OBSERVATIONS', one.observationId + ' belongs to another model');
+    const knownAtMs = canonicalMs(one.knownAt);
+    if (knownAtMs === null) fail('INVALID_TIME', one.observationId + ' knownAt must be a canonical UTC instant');
+    if (knownAtMs > cutoffMs) {
+      excludedFutureSampleCount += 1;
+      continue;
+    }
+    knownRows.push(one);
+  }
+
+  const ids = new Set<string>();
+  const identities = new Map<string, string>();
+  const out: ValidatedObservation[] = [];
+  for (const one of knownRows) {
     if (ids.has(one.observationId)) fail('INVALID_OBSERVATIONS', 'duplicate observationId ' + one.observationId);
     ids.add(one.observationId);
-    if (one.modelKey !== modelKey) fail('INVALID_OBSERVATIONS', one.observationId + ' belongs to another model');
     const asOfMs = canonicalMs(one.asOf);
-    const knownAtMs = canonicalMs(one.knownAt);
-    if (asOfMs === null || knownAtMs === null) fail(timeCode, one.observationId + ' times must be canonical UTC instants');
-    if (knownAtMs < asOfMs) fail(timeCode, one.observationId + ' knownAt precedes asOf');
+    if (asOfMs === null) fail('INVALID_TIME', one.observationId + ' asOf must be a canonical UTC instant');
+    if (canonicalMs(one.knownAt)! < asOfMs) fail('INVALID_TIME', one.observationId + ' knownAt precedes asOf');
     if (!Number.isFinite(one.confidenceScore) || one.confidenceScore < 0 || one.confidenceScore > 1) {
       fail('INVALID_OBSERVATIONS', one.observationId + ' confidenceScore must be within 0..1');
     }
@@ -231,15 +269,17 @@ function validateObservations(
     if (typeof one.evidenceFingerprint !== 'string' || !HEX64.test(one.evidenceFingerprint)) {
       fail('INVALID_OBSERVATIONS', one.observationId + ' evidenceFingerprint must be a lowercase 64-character hex hash');
     }
-    const calibrationEvidenceFingerprint = evidenceIdentity(modelKey, targetId, targetVersion, one);
-    const prior = evidence.get(calibrationEvidenceFingerprint);
-    if (prior !== undefined) {
-      fail('INVALID_OBSERVATIONS', 'observations ' + prior + ' and ' + one.observationId + ' carry identical calibration evidence');
-    }
-    evidence.set(calibrationEvidenceFingerprint, one.observationId);
-    out.push({ ...one, calibrationEvidenceFingerprint });
+    const identity = evidenceIdentityOf(modelKey, targetId, targetVersion, one.evidenceFingerprint);
+    const prior = identities.get(identity);
+    if (prior !== undefined) fail('INVALID_OBSERVATIONS', 'observations ' + prior + ' and ' + one.observationId + ' carry the same evidence');
+    identities.set(identity, one.observationId);
+    out.push({
+      ...one,
+      calibrationEvidenceFingerprint: calibrationEvidenceFingerprintOf(modelKey, targetId, targetVersion, one),
+      evidenceIdentity: identity,
+    });
   }
-  return out.sort((a, b) => compareCodeUnit(a.observationId, b.observationId));
+  return { eligible: out.sort((a, b) => compareCodeUnit(a.observationId, b.observationId)), excludedFutureSampleCount };
 }
 
 function binIndexOf(edges: readonly number[], confidence: number): number {
@@ -250,7 +290,12 @@ function binIndexOf(edges: readonly number[], confidence: number): number {
   fail('INVALID_OBSERVATIONS', 'confidenceScore does not fall into a configured bin');
 }
 
-function binsOf(policy: HistogramCalibrationPolicy, evidence: readonly Pick<CalibrationFitEvidence, 'confidenceScore' | 'outcomeLabel'>[]): HistogramCalibrationBin[] {
+/** Bin statistics. A probability exists only for a FITTED model and a bin that meets minimumSamplesPerBin; otherwise it is null. */
+function binsOf(
+  policy: HistogramCalibrationPolicy,
+  evidence: readonly Pick<CalibrationFitEvidence, 'confidenceScore' | 'outcomeLabel'>[],
+  status: PitCalibrationStatus,
+): HistogramCalibrationBin[] {
   const bins: HistogramCalibrationBin[] = [];
   for (let i = 0; i < policy.binEdges.length - 1; i++) {
     bins.push({
@@ -267,7 +312,10 @@ function binsOf(policy: HistogramCalibrationPolicy, evidence: readonly Pick<Cali
     bin.sampleSize += 1;
     bin.positives += one.outcomeLabel;
   }
-  for (const bin of bins) bin.probability = bin.sampleSize === 0 ? null : bin.positives / bin.sampleSize;
+  for (const bin of bins) {
+    const publishable = status === 'FITTED' && bin.sampleSize > 0 && bin.sampleSize >= policy.minimumSamplesPerBin;
+    bin.probability = publishable ? bin.positives / bin.sampleSize : null;
+  }
   return bins;
 }
 
@@ -278,7 +326,6 @@ function inputFingerprintOf(
   fitAsOf: string,
   policy: HistogramCalibrationPolicy,
   fitEvidenceFingerprints: readonly string[],
-  excludedFutureSampleCount: number,
 ): string {
   return hashOf({
     engine: PIT_CONFIDENCE_CALIBRATION_VERSION,
@@ -289,7 +336,6 @@ function inputFingerprintOf(
     fitAsOf,
     policy,
     fitEvidenceFingerprints,
-    excludedFutureSampleCount,
   });
 }
 
@@ -304,7 +350,6 @@ function modelFingerprintOf(model: Omit<PitConfidenceCalibrationModel, 'modelFin
     fitAsOf: model.fitAsOf,
     policy: model.policy,
     eligibleSampleSize: model.eligibleSampleSize,
-    excludedFutureSampleCount: model.excludedFutureSampleCount,
     status: model.status,
     bins: model.bins,
     fitEvidence: model.fitEvidence,
@@ -320,10 +365,14 @@ export function fitPitConfidenceCalibration(
   const fitAsOfMs = canonicalMs(request.fitAsOf);
   if (fitAsOfMs === null) fail('INVALID_TIME', 'fitAsOf must be a canonical UTC instant');
   const policy = normalizedPolicy(request.policy);
-  const observations = validateObservations(request.observations, request.modelKey, request.targetId, request.targetVersion);
+  const { eligible, excludedFutureSampleCount } = partitionObservations(
+    request.observations,
+    request.modelKey,
+    request.targetId,
+    request.targetVersion,
+    fitAsOfMs,
+  );
 
-  const eligible = observations.filter((one) => Date.parse(one.knownAt) <= fitAsOfMs);
-  const excludedFutureSampleCount = observations.length - eligible.length;
   const fitEvidence: CalibrationFitEvidence[] = eligible.map((one) => ({
     observationId: one.observationId,
     asOf: one.asOf,
@@ -333,10 +382,10 @@ export function fitPitConfidenceCalibration(
     evidenceFingerprint: one.evidenceFingerprint,
     calibrationEvidenceFingerprint: one.calibrationEvidenceFingerprint,
   }));
-  const fitEvidenceFingerprints = fitEvidence.map((one) => one.calibrationEvidenceFingerprint);
-  const bins = binsOf(policy, fitEvidence);
+  const fitEvidenceFingerprints = eligible.map((one) => one.evidenceIdentity);
   const status: PitCalibrationStatus =
     fitEvidence.length >= policy.minimumFitSamples ? 'FITTED' : 'INSUFFICIENT_SAMPLES';
+  const bins = binsOf(policy, fitEvidence, status);
   const inputFingerprint = inputFingerprintOf(
     request.modelKey,
     request.targetId,
@@ -344,7 +393,6 @@ export function fitPitConfidenceCalibration(
     request.fitAsOf,
     policy,
     fitEvidenceFingerprints,
-    excludedFutureSampleCount,
   );
   const partial: Omit<PitConfidenceCalibrationModel, 'modelFingerprint' | 'calibrationRunId'> = {
     engineVersion: PIT_CONFIDENCE_CALIBRATION_VERSION,
@@ -372,6 +420,11 @@ export function fitPitConfidenceCalibration(
   return result;
 }
 
+/**
+ * Recomputes the model from its own fit evidence. A model that passes is internally consistent: every bin, status, identity and fingerprint follows from
+ * its evidence. A forger who re-issues every hash still produces a consistent model, so the verifier proves consistency, not provenance (see the design
+ * doc). excludedFutureSampleCount is audit metadata and is checked for shape only.
+ */
 export function verifyPitConfidenceCalibrationModel(
   model: PitConfidenceCalibrationModel,
 ): void {
@@ -388,8 +441,8 @@ export function verifyPitConfidenceCalibrationModel(
     bad((error as Error).message);
   }
   if (model.method !== 'histogram_binning') bad('method is not histogram_binning');
-  const parsedFitAsOfMs = canonicalMs(model.fitAsOf);
-  const fitAsOfMs = parsedFitAsOfMs === null ? bad('fitAsOf is not canonical UTC') : parsedFitAsOfMs;
+  const fitAsOfMs = canonicalMs(model.fitAsOf);
+  if (fitAsOfMs === null) bad('fitAsOf is not canonical UTC');
   const policy = (() => {
     try {
       return normalizedPolicy(model.policy, 'INVALID_CALIBRATION_MODEL');
@@ -401,9 +454,10 @@ export function verifyPitConfidenceCalibrationModel(
   if (!Array.isArray(model.fitEvidence) || !Array.isArray(model.fitEvidenceFingerprints)) bad('fit evidence is missing');
 
   const ids = new Set<string>();
-  const evidenceIds = new Set<string>();
+  const identities = new Set<string>();
   let previousId: string | null = null;
   const evidence: CalibrationFitEvidence[] = [];
+  const expectedIdentities: string[] = [];
   for (const one of model.fitEvidence) {
     if (!one || typeof one.observationId !== 'string' || one.observationId.trim() === '') bad('fit evidence observationId is invalid');
     if (previousId !== null && compareCodeUnit(one.observationId, previousId) <= 0) bad('fit evidence is not in canonical observationId order');
@@ -412,39 +466,39 @@ export function verifyPitConfidenceCalibrationModel(
     ids.add(one.observationId);
     const asOfMs = canonicalMs(one.asOf);
     const knownAtMs = canonicalMs(one.knownAt);
-    if (asOfMs === null || knownAtMs === null || knownAtMs < asOfMs || knownAtMs > fitAsOfMs) bad(one.observationId + ' fit evidence time is invalid');
+    if (asOfMs === null || knownAtMs === null || knownAtMs < asOfMs || knownAtMs > fitAsOfMs!) bad(one.observationId + ' fit evidence time is invalid');
     if (!Number.isFinite(one.confidenceScore) || one.confidenceScore < 0 || one.confidenceScore > 1) bad(one.observationId + ' confidenceScore is invalid');
     if (one.outcomeLabel !== 0 && one.outcomeLabel !== 1) bad(one.observationId + ' outcomeLabel is invalid');
     if (typeof one.evidenceFingerprint !== 'string' || !HEX64.test(one.evidenceFingerprint)) bad(one.observationId + ' evidenceFingerprint is invalid');
-    const expected = evidenceIdentity(model.modelKey, model.targetId, model.targetVersion, {
+    const contentFingerprint = calibrationEvidenceFingerprintOf(model.modelKey, model.targetId, model.targetVersion, {
       asOf: one.asOf,
       knownAt: one.knownAt,
       confidenceScore: one.confidenceScore,
       outcomeLabel: one.outcomeLabel,
       evidenceFingerprint: one.evidenceFingerprint,
     });
-    if (one.calibrationEvidenceFingerprint !== expected) bad(one.observationId + ' calibrationEvidenceFingerprint does not bind the evidence');
-    if (evidenceIds.has(expected)) bad('duplicate fit calibration evidence');
-    evidenceIds.add(expected);
+    if (one.calibrationEvidenceFingerprint !== contentFingerprint) bad(one.observationId + ' calibrationEvidenceFingerprint does not bind the evidence');
+    const identity = evidenceIdentityOf(model.modelKey, model.targetId, model.targetVersion, one.evidenceFingerprint);
+    if (identities.has(identity)) bad('duplicate fit evidence: the same evidence appears twice');
+    identities.add(identity);
+    expectedIdentities.push(identity);
     evidence.push(one);
   }
 
-  const fingerprints = evidence.map((one) => one.calibrationEvidenceFingerprint);
-  if (JSON.stringify(model.fitEvidenceFingerprints) !== JSON.stringify(fingerprints)) bad('fitEvidenceFingerprints do not match fit evidence');
+  if (hashOf(model.fitEvidenceFingerprints) !== hashOf(expectedIdentities)) bad('fitEvidenceFingerprints do not match fit evidence');
   if (model.eligibleSampleSize !== evidence.length) bad('eligibleSampleSize does not match fit evidence');
   const expectedStatus: PitCalibrationStatus = evidence.length >= policy.minimumFitSamples ? 'FITTED' : 'INSUFFICIENT_SAMPLES';
   if (model.status !== expectedStatus) bad('status does not match eligible sample size');
 
-  const bins = binsOf(policy, evidence);
-  if (JSON.stringify(model.bins) !== JSON.stringify(bins)) bad('bin statistics do not match fit evidence');
+  const bins = binsOf(policy, evidence, expectedStatus);
+  if (hashOf(model.bins) !== hashOf(bins)) bad('bin statistics do not match fit evidence');
   const inputFingerprint = inputFingerprintOf(
     model.modelKey,
     model.targetId,
     model.targetVersion,
     model.fitAsOf,
     policy,
-    fingerprints,
-    model.excludedFutureSampleCount,
+    expectedIdentities,
   );
   if (model.inputFingerprint !== inputFingerprint) bad('inputFingerprint does not match calibration inputs');
 
@@ -491,7 +545,7 @@ export function applyFittedCalibration(
   }
   const index = binIndexOf(model.policy.binEdges, confidenceScore);
   const bin = model.bins[index]!;
-  if (bin.sampleSize === 0 || bin.probability === null) {
+  if (bin.sampleSize === 0) {
     return {
       modelKey,
       confidenceScore,
@@ -513,6 +567,7 @@ export function applyFittedCalibration(
       reason: 'INSUFFICIENT_BIN_SAMPLES',
     };
   }
+  if (bin.probability === null) fail('INVALID_CALIBRATION_MODEL', 'a populated bin of a fitted model carries no probability');
   return {
     modelKey,
     confidenceScore,
@@ -524,39 +579,32 @@ export function applyFittedCalibration(
   };
 }
 
-/** Recomputes an evaluation from its request and compares it with the stored result (O12 review; not implemented yet). */
-export function verifyPitCalibrationEvaluation(
-  _request: CalibrationEvaluationRequest,
-  _result: CalibrationEvaluationResult,
-): void {
-  throw new Error('not implemented');
-}
-
 export function evaluatePitConfidenceCalibration(
   request: CalibrationEvaluationRequest,
 ): CalibrationEvaluationResult {
   verifyPitConfidenceCalibrationModel(request.model);
   const evaluationAsOfMs = canonicalMs(request.asOf);
   if (evaluationAsOfMs === null) fail('INVALID_TIME', 'evaluation asOf must be a canonical UTC instant');
+  if (evaluationAsOfMs < canonicalMs(request.model.fitAsOf)!) {
+    fail('INVALID_TIME', 'evaluation asOf precedes the model fitAsOf: the model did not exist yet');
+  }
 
-  const observations = validateObservations(
+  const { eligible, excludedFutureSampleCount } = partitionObservations(
     request.observations,
     request.model.modelKey,
     request.model.targetId,
     request.model.targetVersion,
+    evaluationAsOfMs,
   );
-  const fitEvidence = new Set(request.model.fitEvidenceFingerprints);
-  for (const one of observations) {
-    if (fitEvidence.has(one.calibrationEvidenceFingerprint)) {
+  const fitIdentities = new Set(request.model.fitEvidenceFingerprints);
+  for (const one of eligible) {
+    if (fitIdentities.has(one.evidenceIdentity)) {
       fail('FIT_EVIDENCE_REUSE', one.observationId + ' reuses evidence that fitted this calibration model');
     }
   }
 
-  const eligible = observations.filter((one) => Date.parse(one.knownAt) <= evaluationAsOfMs);
-  const excludedFutureSampleCount = observations.length - eligible.length;
   const covered: Array<{ probability: number; label: CalibrationOutcomeLabel; binIndex: number }> = [];
   let uncoveredSampleCount = 0;
-
   for (const one of eligible) {
     const applied = applyFittedCalibration(request.model, request.model.modelKey, one.confidenceScore);
     if (applied.calibratedProbability === null || applied.binIndex === null) {
@@ -572,7 +620,7 @@ export function evaluatePitConfidenceCalibration(
 
   const coveredSampleSize = covered.length;
   const eligibleSampleSize = eligible.length;
-  const coverageRate = eligibleSampleSize === 0 ? 0 : coveredSampleSize / eligibleSampleSize;
+  const coverageRate = eligibleSampleSize === 0 ? null : coveredSampleSize / eligibleSampleSize;
   const brierScore =
     coveredSampleSize === 0
       ? null
@@ -599,7 +647,7 @@ export function evaluatePitConfidenceCalibration(
   }
 
   const finiteMetrics = [
-    coverageRate,
+    ...(coverageRate === null ? [] : [coverageRate]),
     ...(brierScore === null ? [] : [brierScore]),
     ...(meanPredictedProbability === null ? [] : [meanPredictedProbability]),
     ...(observedPositiveRate === null ? [] : [observedPositiveRate]),
@@ -620,4 +668,15 @@ export function evaluatePitConfidenceCalibration(
     observedPositiveRate,
     bins,
   };
+}
+
+/** Recomputes an evaluation from its request and refuses a stored result that does not match it. Evaluation is pure, so the recomputation is exact. */
+export function verifyPitCalibrationEvaluation(
+  request: CalibrationEvaluationRequest,
+  result: CalibrationEvaluationResult,
+): void {
+  const recomputed = evaluatePitConfidenceCalibration(request);
+  if (hashOf(recomputed) !== hashOf(result)) {
+    fail('INVALID_CALIBRATION_MODEL', 'evaluation result does not match its request (it was altered or belongs to another request)');
+  }
 }

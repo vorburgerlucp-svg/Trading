@@ -700,3 +700,180 @@ describe('O12 review — boundaries, numerics and time inclusion (guards)', () =
     expect(codeOf(() => evaluatePitConfidenceCalibration({ model: fit, asOf: '2026-03-02', observations: [] }))).toBe('INVALID_TIME');
   });
 });
+
+/**
+ * A forger who re-issues every hash a model states, with the public formulas, and leaves the rest as it was. Bins are deliberately not recomputed,
+ * so a test can change one and see whether the verifier notices.
+ */
+function identityOfEvidence(model: PitConfidenceCalibrationModel, evidenceFingerprint: string): string {
+  return hashOf({ kind: 'calibration-evidence-identity', modelKey: model.modelKey, targetId: model.targetId, targetVersion: model.targetVersion, evidenceFingerprint });
+}
+
+function contentOfEvidence(model: PitConfidenceCalibrationModel, row: PitConfidenceCalibrationModel['fitEvidence'][number]): string {
+  return hashOf({
+    modelKey: model.modelKey,
+    targetId: model.targetId,
+    targetVersion: model.targetVersion,
+    asOf: row.asOf,
+    knownAt: row.knownAt,
+    confidenceScore: row.confidenceScore,
+    outcomeLabel: row.outcomeLabel,
+    evidenceFingerprint: row.evidenceFingerprint,
+  });
+}
+
+function reissue(model: PitConfidenceCalibrationModel): PitConfidenceCalibrationModel {
+  const fitEvidence = model.fitEvidence.map((row) => ({ ...row, calibrationEvidenceFingerprint: contentOfEvidence(model, row) }));
+  const fitEvidenceFingerprints = fitEvidence.map((row) => identityOfEvidence(model, row.evidenceFingerprint));
+  const inputFingerprint = hashOf({
+    engine: PIT_CONFIDENCE_CALIBRATION_VERSION,
+    method: 'histogram_binning',
+    modelKey: model.modelKey,
+    targetId: model.targetId,
+    targetVersion: model.targetVersion,
+    fitAsOf: model.fitAsOf,
+    policy: model.policy,
+    fitEvidenceFingerprints,
+  });
+  const modelFingerprint = hashOf({
+    engineVersion: model.engineVersion,
+    inputFingerprint,
+    modelKey: model.modelKey,
+    targetId: model.targetId,
+    targetVersion: model.targetVersion,
+    method: model.method,
+    fitAsOf: model.fitAsOf,
+    policy: model.policy,
+    eligibleSampleSize: model.eligibleSampleSize,
+    status: model.status,
+    bins: model.bins,
+    fitEvidence,
+    fitEvidenceFingerprints,
+  });
+  return { ...model, fitEvidence, fitEvidenceFingerprints, inputFingerprint, calibrationRunId: 'pcc_' + inputFingerprint.slice(0, 40), modelFingerprint };
+}
+
+describe('O12 review — re-issued hashes do not make impossible states verifiable (guards)', () => {
+  it('T1 re-issued bin counts are refused: bins must follow from the fit evidence', () => {
+    const forged = structuredClone(fitPitConfidenceCalibration(request()));
+    forged.bins[0]!.sampleSize += 1;
+    expect(codeOf(() => verifyPitConfidenceCalibrationModel(reissue(forged)))).toBe('INVALID_CALIBRATION_MODEL');
+  });
+
+  it('T2 a re-issued probability is refused: probabilities must follow from the bin counts', () => {
+    const forged = structuredClone(fitPitConfidenceCalibration(request()));
+    forged.bins[0]!.probability = 0.123;
+    expect(codeOf(() => verifyPitConfidenceCalibrationModel(reissue(forged)))).toBe('INVALID_CALIBRATION_MODEL');
+  });
+
+  it('T3 a re-issued status flip is refused: an INSUFFICIENT_SAMPLES model cannot be presented as fitted', () => {
+    const forged = structuredClone(fitPitConfidenceCalibration(request({ observations: [observation('one', 0.8, 1)], policy: { ...policy, minimumFitSamples: 2 } })));
+    forged.status = 'FITTED';
+    expect(codeOf(() => verifyPitConfidenceCalibrationModel(reissue(forged)))).toBe('INVALID_CALIBRATION_MODEL');
+  });
+
+  it('T4 re-issued fit evidence known after fitAsOf is refused', () => {
+    const forged = structuredClone(fitPitConfidenceCalibration(request()));
+    forged.fitEvidence[0]!.knownAt = '2026-03-01T00:00:00.000Z';
+    expect(codeOf(() => verifyPitConfidenceCalibrationModel(reissue(forged)))).toBe('INVALID_CALIBRATION_MODEL');
+  });
+
+  it('T5 a re-issued eligible sample size is refused', () => {
+    const forged = structuredClone(fitPitConfidenceCalibration(request()));
+    forged.eligibleSampleSize += 1;
+    expect(codeOf(() => verifyPitConfidenceCalibrationModel(reissue(forged)))).toBe('INVALID_CALIBRATION_MODEL');
+  });
+
+  it('T6 a model fitted on other evidence verifies as itself: consistency is not provenance (limit pinned, see the design doc)', () => {
+    const changed = request().observations.map((one, index) => (index === 0 ? { ...one, outcomeLabel: 1 as const, evidenceFingerprint: evidenceFingerprint('changed') } : one));
+    expect(() => verifyPitConfidenceCalibrationModel(fitPitConfidenceCalibration(request({ observations: changed })))).not.toThrow();
+  });
+
+  it('T7 a re-issued excluded-future count changes no identity: it is audit metadata, not fit evidence (limit pinned)', () => {
+    const model = fitPitConfidenceCalibration(request());
+    const forged = reissue({ ...structuredClone(model), excludedFutureSampleCount: 99 });
+    expect(forged.inputFingerprint).toBe(model.inputFingerprint);
+    expect(() => verifyPitConfidenceCalibrationModel(forged)).not.toThrow();
+  });
+});
+
+describe('O12 review — evidence identity boundaries (guards)', () => {
+  it('E2 rows with identical content but distinct evidence fingerprints are distinct evidence: the caller owns the identity', () => {
+    const fit = fitPitConfidenceCalibration(
+      request({
+        observations: [
+          observation('a', 0.1, 0, { evidenceFingerprint: evidenceFingerprint('one') }),
+          observation('b', 0.1, 0, { evidenceFingerprint: evidenceFingerprint('two') }),
+        ],
+      }),
+    );
+    expect(fit.eligibleSampleSize).toBe(2);
+  });
+
+  it('E4 equivalent numeric values with the same evidence fingerprint are one piece of evidence (-0 is 0)', () => {
+    const fp = evidenceFingerprint('same');
+    expect(codeOf(() => fitPitConfidenceCalibration(request({ observations: [observation('a', -0, 0, { evidenceFingerprint: fp }), observation('b', 0, 0, { evidenceFingerprint: fp })] })))).toBe('INVALID_OBSERVATIONS');
+  });
+
+  it('V6 an evaluation row with identical content but a distinct evidence fingerprint is new evidence, not reuse', () => {
+    const fit = fitPitConfidenceCalibration(request());
+    const twin = observation('twin', 0.1, 0, { asOf: '2026-01-01T12:00:00.000Z', knownAt: '2026-01-02T12:00:00.000Z', evidenceFingerprint: evidenceFingerprint('twin') });
+    const evaluation = evaluatePitConfidenceCalibration({ model: fit, asOf: '2026-03-01T00:00:00.000Z', observations: [twin] });
+    expect(evaluation.eligibleSampleSize).toBe(1);
+  });
+
+  it('V7 a duplicate evidence fingerprint inside one evaluation is refused, and the sample is not inflated', () => {
+    const fit = fitPitConfidenceCalibration(request());
+    const fp = evaluationFingerprint();
+    const rows = [
+      observation('e1', 0.8, 1, { asOf: '2026-03-01T00:00:00.000Z', knownAt: '2026-03-02T00:00:00.000Z', evidenceFingerprint: fp }),
+      observation('e2', 0.8, 1, { asOf: '2026-03-01T00:00:00.000Z', knownAt: '2026-03-03T00:00:00.000Z', evidenceFingerprint: fp }),
+    ];
+    expect(codeOf(() => evaluatePitConfidenceCalibration({ model: fit, asOf: '2026-04-01T00:00:00.000Z', observations: rows }))).toBe('INVALID_OBSERVATIONS');
+  });
+});
+
+function evaluationFingerprint(): string {
+  return evidenceFingerprint('evaluation-shared');
+}
+
+describe('O12 review — evaluation time and mixed rows (guards)', () => {
+  it('V2 an evaluation row decided and known after the evaluation instant is excluded', () => {
+    const fit = fitPitConfidenceCalibration(request());
+    const evaluation = evaluatePitConfidenceCalibration({
+      model: fit,
+      asOf: '2026-04-01T00:00:00.000Z',
+      observations: [observation('later', 0.8, 1, { asOf: '2026-04-05T00:00:00.000Z', knownAt: '2026-04-06T00:00:00.000Z', evidenceFingerprint: evidenceFingerprint('later') })],
+    });
+    expect(evaluation).toMatchObject({ eligibleSampleSize: 0, excludedFutureSampleCount: 1, coverageRate: null });
+  });
+
+  it('V4 mixed covered, uncovered and future rows are counted exactly', () => {
+    const fit = fitPitConfidenceCalibration(
+      request({
+        observations: [observation('fit-a', 0.1, 0), observation('fit-b', 0.2, 1), observation('fit-c', 0.8, 1)],
+        policy: { ...policy, minimumFitSamples: 3, minimumSamplesPerBin: 2 },
+      }),
+    );
+    const known = { asOf: '2026-03-01T00:00:00.000Z', knownAt: '2026-03-02T00:00:00.000Z' };
+    const evaluation = evaluatePitConfidenceCalibration({
+      model: fit,
+      asOf: '2026-04-01T00:00:00.000Z',
+      observations: [
+        observation('covered', 0.2, 1, { ...known, evidenceFingerprint: evidenceFingerprint('covered') }),
+        observation('uncovered', 0.8, 0, { ...known, evidenceFingerprint: evidenceFingerprint('uncovered') }),
+        observation('future', 0.2, 0, { asOf: '2026-03-01T00:00:00.000Z', knownAt: '2026-05-01T00:00:00.000Z', evidenceFingerprint: evidenceFingerprint('future') }),
+      ],
+    });
+    expect(evaluation).toMatchObject({ eligibleSampleSize: 2, coveredSampleSize: 1, uncoveredSampleCount: 1, excludedFutureSampleCount: 1, coverageRate: 0.5 });
+  });
+
+  it('A3 future rows in any order leave the fit identity unchanged', () => {
+    const futureA = observation('future-a', 0.3, 1, { knownAt: '2026-03-01T00:00:00.000Z', evidenceFingerprint: evidenceFingerprint('future-a') });
+    const futureB = observation('future-b', 0.6, 0, { knownAt: '2026-03-02T00:00:00.000Z', evidenceFingerprint: evidenceFingerprint('future-b') });
+    const forward = fitPitConfidenceCalibration(request({ observations: [...request().observations, futureA, futureB] }));
+    const backward = fitPitConfidenceCalibration(request({ observations: [...request().observations, futureB, futureA] }));
+    expect(backward.inputFingerprint).toBe(forward.inputFingerprint);
+    expect(backward.excludedFutureSampleCount).toBe(2);
+  });
+});
