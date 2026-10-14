@@ -34,7 +34,8 @@ function validateTrip(state: KillSwitchState): void {
     typeof state.tripId !== 'string' ||
     !/^trip_[0-9a-f]{40}$/.test(state.tripId) ||
     typeof state.trippedAt !== 'string' ||
-    new Date(state.trippedAt).toISOString() !== state.trippedAt ||
+    !Number.isFinite(Date.parse(state.trippedAt)) ||
+    new Date(Date.parse(state.trippedAt)).toISOString() !== state.trippedAt ||
     !Array.isArray(state.reasons) ||
     state.reasons.length === 0 ||
     new Set(state.reasons).size !== state.reasons.length ||
