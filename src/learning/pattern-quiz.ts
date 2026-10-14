@@ -532,11 +532,17 @@ export function buildPatternQuiz(
   return quiz;
 }
 
+/**
+ * Grades only after recomputing the quiz from its source observation. Provenance verification is therefore mandatory on the
+ * public grading path; self-consistency alone is never treated as source authenticity.
+ */
 export function gradePatternQuiz(
+  observation: PatternObservation,
   quiz: PatternQuiz,
   submittedOptionId: string,
+  expectedPolicy?: PatternQuizPolicy,
 ): PatternQuizGrade {
-  validateQuizStructure(quiz);
+  verifyPatternQuiz(observation, quiz, expectedPolicy);
   if (typeof submittedOptionId !== 'string' || submittedOptionId.trim() === '') {
     fail('INVALID_SUBMISSION', 'submitted option id is required');
   }
