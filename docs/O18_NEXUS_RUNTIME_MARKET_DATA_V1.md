@@ -49,7 +49,7 @@ The server listens on `http://127.0.0.1:3000` by default. Stop it with Ctrl+C. `
 | Variable | Default | Meaning |
 |---|---|---|
 | `DATABASE_URL` | none (required) | `postgres://` or `postgresql://` URL. Never logged, never returned. |
-| `HOST` | `127.0.0.1` | Listen address. Loopback by default. The API has no authentication, so a non-loopback host exposes it to the network. |
+| `HOST` | `127.0.0.1` | Listen address. O18 accepts only `127.0.0.1`, `localhost` or `::1`. Non-loopback binding is refused until API authentication exists. |
 | `PORT` | `3000` | 1 to 65535. |
 | `TWELVE_DATA_API_KEY` | unset | Production key. Sent only in the `Authorization` header. Never in a URL. |
 | `NEXUS_TWELVE_DATA_DEMO` | `0` | `1` uses Twelve Data's public demo key. Data is labelled `demo` and is never usable for trading. Ignored while a production key is set. |
@@ -64,7 +64,7 @@ Build locks (`liveTrading`, `brokerOrders`, `physicalPurchase`) are constants in
 2. **Validation.** `MarketDataService` validates each bar and computes the data-quality verdict. The verdict travels with every read, and a verdict that is not usable is returned as such.
 3. **Storage.** Bars are stored in `market_bars` with source, retrieval time and revision knowledge (migrations 004 to 009). Quotes go to `market_quotes`. Instruments and their provider mappings are an append-only log (`instrument_events`).
 4. **Read.** `readSeries` reads point in time and returns the quality verdict with the bars.
-5. **Quant.** `POST /api/quant/run` backfills a lookback window of 300 bars, runs `QuantService` and stores the run in `quant_runs`. The quant run ID is `qr_` plus the input fingerprint.
+5. **Quant.** `POST /api/quant/run` is enabled only for production/raw market data. It backfills a lookback window of 300 bars, runs `QuantService` and stores the run in `quant_runs`. Demo quant is refused with `DATA_QUALITY_ERROR` before a quant run is persisted because Twelve Data demo provides provider-adjusted bars while NEXUS derives adjusted series from canonical raw bars.
 6. **Safety.** `GET /api/safety/status` reads the kill-switch log (`portfolio-kill-switch`) read only. No portfolio snapshot is connected, so risk increase is blocked.
 
 ## 6. Routes
@@ -75,6 +75,7 @@ Routes are a fixed table in `src/runtime/app.ts`. Unknown paths return `NOT_FOUN
 |---|---|---|
 | GET | `/health`, `/api/health` | Status, database, market data mode, provider state, trading mode, locks. |
 | GET | `/api/instruments/search?q=` | Validated candidates only. Injected text is sanitized. `instrumentId` is `null` when the symbol is not registered. |
+| POST | `/api/instruments/register` | Explicit local onboarding. Body: `providerSymbol`, canonical `validFrom`, optional `mic`/`exchange`. Provider metadata is re-fetched and validated; registration is idempotent for an existing mapping. |
 | GET | `/api/market/bars?instrumentId=&interval=&from=&to=` | Intervals `1m 5m 15m 1h 4h 1d`. Canonical UTC times, `from` before `to`, at most 366 days. |
 | GET | `/api/market/quote?instrumentId=` | Freshness and `usableForTrading`. A quote is usable only when it is fresh (15 minutes) and from production. |
 | POST | `/api/quant/run` | JSON body with exactly `instrumentId`, `interval`, `asOf`. Other keys are refused. Body limit 16 KB. |
@@ -143,10 +144,10 @@ npm run test:live
 - The scanner is not exposed by the runtime.
 - `/api/paper/intents` is reserved until the O17 paper execution gate is in `main`.
 - No portfolio snapshot is connected. Risk increase is blocked until one is.
-- No authentication on the local API. Keep `HOST` on loopback.
+- No authentication on the local API. O18 therefore refuses every non-loopback `HOST`.
 - The public demo key has provider rate limits and serves split-adjusted prices only. Its data is never usable for trading.
 - Quotes are stored only when a quote is requested. There is no background polling.
 - The server runs compiled output (`dist/`). There is no TypeScript runner in the start path.
-- **Quant on demo data is not valid.** The public demo key serves split-adjusted prices only. The quant service derives split-adjusted series from raw bars (`src/quant/quant-service.ts`, `inputs`), and no raw bars exist in demo mode. A demo quant run therefore stores a run with `missing_bars` (`valid: false`, `usableForTrading: false`). The response still reports `persistence: APPLIED` and `insufficientData: false`. This is a known defect of the demo path. The runtime should refuse quant runs in demo mode, or the production path should be verified first. Not changed in O18.
+- **Demo quant is deliberately blocked.** The public demo key serves split-adjusted prices only, while the quant service derives split-adjusted series from raw bars. O18 now returns `DATA_QUALITY_ERROR` before provider fetch/persistence instead of creating a misleading run.
 - **The production quant path is not verified live.** It requests raw prices and reads them directly, but no production key was available to test it.
-- **No instrument registration route.** Instruments enter the instrument log only through code or a database write. The AAPL example used a one-off local seed (`ins_aapl`, Twelve Data mapping `AAPL`). A registration route or a reviewed seed command is an O19 item.
+- **Instrument onboarding is explicit.** `POST /api/instruments/register` requires a provider symbol and a canonical `validFrom` supplied by the caller. NEXUS does not invent symbol-history start dates; incorrect history remains a human data-governance risk.
