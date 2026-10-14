@@ -566,3 +566,227 @@ describe('O14 Pattern Quiz — RED', () => {
     expect(errorCode(() => gradePatternQuiz(quiz, 'missing-option'))).toBe('INVALID_SUBMISSION');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Independent review probes (RED). Each probe names one attack from the O14 review. Probes that fail today expect a refusal or
+// a non-leaking view; the pins below them already hold and keep the guarantee from regressing.
+// ---------------------------------------------------------------------------
+
+describe('O14 review — tutor probes (RED)', () => {
+  it('T1 refuses an outcome classification that contradicts the embedded return', () => {
+    const r = review({ outcomeClassification: 'OUTCOME_ADVERSE' });
+    expect(errorCode(() => buildTradingTutorLesson(r, tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
+  it('T2 refuses an unknown feedback code instead of silently dropping it', () => {
+    const r = review({ feedback: [{ ...feedback('KEEP_PROCESS'), code: 'REVIEW_MADE_UP' as never }] });
+    expect(errorCode(() => buildTradingTutorLesson(r, tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
+  it('T3 refuses malformed feedback severity or basis at runtime', () => {
+    const badSeverity = review({ feedback: [{ ...feedback('REVIEW_PROVIDER_DIVERSITY'), severity: 'critical' as never }] });
+    const badBasis = review({ feedback: [{ ...feedback('REVIEW_PROVIDER_DIVERSITY'), basis: 'luck' as never }] });
+    expect(errorCode(() => buildTradingTutorLesson(badSeverity, tutorPolicy))).toBe('INVALID_REVIEW');
+    expect(errorCode(() => buildTradingTutorLesson(badBasis, tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
+  it('T4 refuses a Brier contribution that is not (probability minus label) squared', () => {
+    const r = review({
+      calibrationDiagnostics: [{
+        stepId: 'analysts', modelKey: 'anthropic/test', targetId: 'recommendation_direction_correct:v1',
+        calibratedProbability: 0.75, outcomeLabel: 1, brierContribution: 0.5,
+      }],
+    });
+    expect(errorCode(() => buildTradingTutorLesson(r, tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
+  it('T5 refuses a calibration diagnostic for an unsupported binary target', () => {
+    const r = review({
+      calibrationDiagnostics: [{
+        stepId: 'analysts', modelKey: 'anthropic/test', targetId: 'something_else' as never,
+        calibratedProbability: 0.75, outcomeLabel: 1, brierContribution: 0.0625,
+      }],
+    });
+    expect(errorCode(() => buildTradingTutorLesson(r, tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
+  it('T6 refuses non-finite or malformed O13 process diagnostics', () => {
+    const r = review({
+      processClassification: 'PROCESS_ACCEPTABLE',
+      processDiagnostics: { ...cleanProcessDiagnostics(), evidenceCount: Number.NaN },
+    });
+    expect(errorCode(() => buildTradingTutorLesson(r, tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
+  it('T7 refuses KEEP_PROCESS on a weak or blocked review', () => {
+    const r = review({ feedback: [feedback('KEEP_PROCESS')] });
+    expect(errorCode(() => buildTradingTutorLesson(r, tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
+  it('T8 refuses a review without feedback instead of inventing a process lesson', () => {
+    const r = review({ feedback: [] });
+    expect(errorCode(() => buildTradingTutorLesson(r, tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
+  it('T9 refuses a policy with unknown fields instead of hashing them into lesson identity', () => {
+    const p = { ...tutorPolicy, sneakyField: 'x' } as TradingTutorPolicy;
+    expect(errorCode(() => buildTradingTutorLesson(review(), p))).toBe('INVALID_POLICY');
+  });
+
+  it('T10 verifier can pin the policy the consumer expects and refuses a lesson re-issued under another policy', () => {
+    const reissued = buildTradingTutorLesson(review(), { ...tutorPolicy, learnerLevel: 'advanced' });
+    const verifyPinned = verifyTradingTutorLesson as unknown as (r: PostTradeReview, l: unknown, expected: TradingTutorPolicy) => void;
+    expect(errorCode(() => verifyPinned(review(), reissued, tutorPolicy))).toBe('INVALID_LESSON');
+  });
+});
+
+describe('O14 review — quiz probes (RED)', () => {
+  it('Q1 lifecycle refuses forming status when a confirmation time is already known by asOf', () => {
+    const src = observation({ status: 'forming', confirmedAt: '2026-01-09T00:00:00.000Z', resolvedAt: null });
+    expect(errorCode(() => buildPatternQuiz(src, quizPolicy({ mode: 'lifecycle' })))).toBe('INVALID_OBSERVATION');
+  });
+
+  it('Q2 lifecycle refuses confirmed status without a confirmation time', () => {
+    const src = observation({ status: 'confirmed', confirmedAt: null, resolvedAt: null });
+    expect(errorCode(() => buildPatternQuiz(src, quizPolicy({ mode: 'lifecycle' })))).toBe('INVALID_OBSERVATION');
+  });
+
+  it('Q3 lifecycle refuses completed status without a resolution time', () => {
+    const src = observation({ status: 'completed', confirmedAt: '2026-01-09T00:00:00.000Z', resolvedAt: null });
+    expect(errorCode(() => buildPatternQuiz(src, quizPolicy({ mode: 'lifecycle' })))).toBe('INVALID_OBSERVATION');
+  });
+
+  it('Q4 lifecycle refuses invalidated status without an invalidation time', () => {
+    const src = observation({ status: 'invalidated', confirmedAt: null, invalidatedAt: null, resolvedAt: null });
+    expect(errorCode(() => buildPatternQuiz(src, quizPolicy({ mode: 'lifecycle' })))).toBe('INVALID_OBSERVATION');
+  });
+
+  it('Q5 refuses invalidation and resolution as mutually exclusive terminal times in every mode', () => {
+    const src = observation({ confirmedAt: null, invalidatedAt: '2026-01-09T00:00:00.000Z', resolvedAt: '2026-01-11T00:00:00.000Z' });
+    expect(errorCode(() => buildPatternQuiz(src, quizPolicy({ mode: 'pattern_identification' })))).toBe('INVALID_OBSERVATION');
+  });
+
+  it('Q6 refuses resolution before confirmation in every mode', () => {
+    const src = observation({ confirmedAt: '2026-01-08T00:00:00.000Z', resolvedAt: '2026-01-07T00:00:00.000Z', invalidatedAt: null });
+    expect(errorCode(() => buildPatternQuiz(src, quizPolicy({ mode: 'pattern_identification' })))).toBe('INVALID_OBSERVATION');
+  });
+
+  it('Q7 refuses confirmation before the pattern was first seen in every mode', () => {
+    const src = observation({ firstSeenAt: '2026-01-05T00:00:00.000Z', confirmedAt: '2026-01-04T00:00:00.000Z', resolvedAt: null });
+    expect(errorCode(() => buildPatternQuiz(src, quizPolicy({ mode: 'pattern_identification' })))).toBe('INVALID_OBSERVATION');
+  });
+
+  it('Q8 refuses duplicate anchor roles', () => {
+    const base = observation();
+    const src = observation({ anchors: [base.anchors[0]!, base.anchors[0]!] });
+    expect(errorCode(() => buildPatternQuiz(src, quizPolicy()))).toBe('INVALID_OBSERVATION');
+  });
+
+  it('Q9 refuses non-decimal prices and boundary values', () => {
+    const base = observation();
+    const badPrice = observation({ anchors: [{ ...base.anchors[0]!, price: 'high' }] });
+    const badBoundary = observation({ boundaries: { neckline: { intercept: 'abc', slope: '0' } } });
+    expect(errorCode(() => buildPatternQuiz(badPrice, quizPolicy()))).toBe('INVALID_OBSERVATION');
+    expect(errorCode(() => buildPatternQuiz(badBoundary, quizPolicy()))).toBe('INVALID_OBSERVATION');
+  });
+
+  it('Q10 refuses a malformed boundaries container with a classified error', () => {
+    const src = observation({ boundaries: null as never });
+    expect(errorCode(() => buildPatternQuiz(src, quizPolicy()))).toBe('INVALID_OBSERVATION');
+  });
+
+  it('Q11 identification does not show the confirmation direction, which discriminates breakout families', () => {
+    const src = observation({ status: 'confirmed', confirmedAt: '2026-01-09T00:00:00.000Z', resolvedAt: null });
+    const quiz = buildPatternQuiz(src, quizPolicy({ mode: 'pattern_identification' }));
+    expect(quiz.publicView.visibleEvidence.confirmation.direction).toBeNull();
+  });
+
+  it('Q12 public view carries no pattern-role names in identification mode', () => {
+    const visible = JSON.stringify(buildPatternQuiz(observation(), quizPolicy({ mode: 'pattern_identification' })).publicView);
+    expect(visible).not.toContain('left_shoulder');
+    expect(visible).not.toContain('"head"');
+  });
+
+  it('Q13 public view carries no boundary names in identification or direction mode', () => {
+    for (const mode of ['pattern_identification', 'direction'] as const) {
+      const visible = JSON.stringify(buildPatternQuiz(observation(), quizPolicy({ mode, optionCount: 3 })).publicView);
+      expect(visible).not.toContain('neckline');
+    }
+  });
+
+  it('Q14 public view carries no invalidation rule name', () => {
+    const visible = JSON.stringify(buildPatternQuiz(observation(), quizPolicy()).publicView);
+    expect(visible).not.toContain('close_above_head');
+  });
+
+  it('Q15 public view carries no geometry metric names', () => {
+    const visible = JSON.stringify(buildPatternQuiz(observation(), quizPolicy({ revealGeometryMetrics: true })).publicView);
+    expect(visible).not.toContain('"symmetry"');
+  });
+
+  it('Q16 public view shares no mutable state with the source observation', () => {
+    const src = observation();
+    const quiz = buildPatternQuiz(src, quizPolicy({ revealChartContext: true }));
+    quiz.publicView.visibleEvidence.boundaries.neckline!.intercept = 'tampered';
+    quiz.publicView.visibleEvidence.chartContext!.currentPhase = 'tampered';
+    expect(src.boundaries.neckline!.intercept).toBe('100');
+    expect(src.chartContext!.currentPhase).toBe('distribution');
+  });
+
+  it('Q17 grading refuses a quiz whose answer was rewritten without re-deriving its fingerprints', () => {
+    const quiz = buildPatternQuiz(observation(), quizPolicy());
+    const other = quiz.publicView.options.find((o) => o.id !== quiz.answer.optionId)!;
+    const forged = structuredClone(quiz);
+    forged.answer.optionId = other.id;
+    forged.answer.label = other.label as never;
+    expect(errorCode(() => gradePatternQuiz(forged, other.id))).toBe('INVALID_QUIZ');
+  });
+
+  it('Q18 verifier can pin the quiz policy the consumer expects and refuses a quiz re-issued under another policy', () => {
+    const reissued = buildPatternQuiz(observation(), quizPolicy({ optionCount: 2 }));
+    const verifyPinned = verifyPatternQuiz as unknown as (o: PatternObservation, q: unknown, expected: PatternQuizPolicy) => void;
+    expect(errorCode(() => verifyPinned(observation(), reissued, quizPolicy()))).toBe('INVALID_QUIZ');
+  });
+});
+
+describe('O14 review — pins that already hold', () => {
+  it('the tutor and quiz modules import no memory, registry, champion, risk, capital, broker, audit, provider or network module at runtime', async () => {
+    const { readFileSync } = await import('node:fs');
+    const forbidden = /nexus-memory|model-performance|model-registry|champion|risk|capital|broker|audit|postgres|append-only|provider|http|adapter/i;
+    for (const file of ['src/learning/trading-tutor.ts', 'src/learning/pattern-quiz.ts']) {
+      const source = readFileSync(new URL('../../' + file, import.meta.url), 'utf8');
+      const runtimeImports = [...source.matchAll(/^import (?!type )[^;]*from '([^']+)';/gm)].map((match) => match[1]!);
+      expect(runtimeImports.filter((spec) => forbidden.test(spec)), file).toEqual([]);
+    }
+  });
+
+  it('confirmation exactly at asOf is known, and one millisecond later is a lifecycle refusal and a hidden fact otherwise', () => {
+    const atAsOf = observation({ status: 'confirmed', confirmedAt: '2026-01-10T00:00:00.000Z', resolvedAt: null });
+    expect(errorCode(() => buildPatternQuiz(atAsOf, quizPolicy({ mode: 'lifecycle' })))).toBe('NO_ERROR');
+
+    const afterAsOf = observation({ status: 'forming', confirmedAt: '2026-01-10T00:00:00.001Z', resolvedAt: null });
+    expect(errorCode(() => buildPatternQuiz(afterAsOf, quizPolicy({ mode: 'lifecycle' })))).toBe('INVALID_OBSERVATION');
+    const identification = buildPatternQuiz(afterAsOf, quizPolicy({ mode: 'pattern_identification' }));
+    expect(identification.publicView.visibleEvidence.confirmation.level).toBeNull();
+  });
+
+  it('the option count is bounded by the vocabulary of the mode', () => {
+    expect(errorCode(() => buildPatternQuiz(observation(), quizPolicy({ mode: 'direction', optionCount: 4 })))).toBe('INVALID_POLICY');
+    const three = buildPatternQuiz(observation(), quizPolicy({ mode: 'direction', optionCount: 3 }));
+    expect(three.publicView.options.map((o) => o.label).sort()).toEqual(['bearish', 'bullish', 'neutral']);
+  });
+
+  it('future-only confirmation, invalidation and anchor values do not alter the visible quiz or its identity', () => {
+    const base = observation();
+    const a = buildPatternQuiz(observation({
+      invalidatedAt: '2026-02-01T00:00:00.000Z',
+      anchors: [...base.anchors, { ...base.anchors[0]!, role: 'future_point', time: '2026-03-01T00:00:00.000Z', confirmedAt: '2026-03-02T00:00:00.000Z' }],
+    }), quizPolicy());
+    const b = buildPatternQuiz(observation({
+      invalidatedAt: '2026-04-01T00:00:00.000Z',
+      anchors: [...base.anchors, { ...base.anchors[0]!, role: 'future_point', time: '2026-05-01T00:00:00.000Z', confirmedAt: '2026-05-02T00:00:00.000Z' }],
+    }), quizPolicy());
+    expect(b.publicView).toEqual(a.publicView);
+    expect(b.quizId).toBe(a.quizId);
+  });
+});
