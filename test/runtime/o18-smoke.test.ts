@@ -23,7 +23,8 @@ describe('O18 runtime smoke: start, health, search, bars, quant, safety, shutdow
       quantRuns: new InMemoryQuantRunStore(),
       killSwitch: new InMemoryAppendOnlyStore<KillSwitchState>(),
       provider: fixtureProvider(),
-      marketDataMode: 'demo',
+      // Fixture provider is injected only in tests. Production mode exercises the canonical raw-bar quant path.
+      marketDataMode: 'production',
       ping: async () => true,
       version: 'smoke',
       clock: () => new Date(RUNTIME_TEST_NOW),
@@ -32,7 +33,7 @@ describe('O18 runtime smoke: start, health, search, bars, quant, safety, shutdow
     try {
       const health = await fetch(server.url + '/health');
       expect(health.status).toBe(200);
-      expect(await health.json()).toMatchObject({ status: 'ok', tradingMode: 'paper', liveTrading: 'locked', marketData: 'demo' });
+      expect(await health.json()).toMatchObject({ status: 'ok', tradingMode: 'paper', liveTrading: 'locked', marketData: 'configured' });
 
       const search = await (await fetch(server.url + '/api/instruments/search?q=AAPL')).json() as { instruments: Array<{ providerSymbol: string; instrumentId: string | null }> };
       expect(search.instruments[0]).toMatchObject({ providerSymbol: 'AAPL', instrumentId: AAPL.instrumentId });
@@ -42,7 +43,7 @@ describe('O18 runtime smoke: start, health, search, bars, quant, safety, shutdow
       const bars = await barsResponse.json() as { bars: Array<{ isFinal: boolean; source: string }>; usableForTrading: boolean; dataMode: string };
       expect(bars.bars.length).toBeGreaterThan(0);
       expect(bars.bars.every((bar) => bar.isFinal && bar.source === FIXTURE_SOURCE.sourceId)).toBe(true);
-      expect(bars.dataMode).toBe('demo');
+      expect(bars.dataMode).toBe('production');
       expect(bars.usableForTrading).toBe(false);
 
       const quant = await fetch(server.url + '/api/quant/run', {
