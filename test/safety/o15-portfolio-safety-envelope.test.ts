@@ -498,3 +498,291 @@ describe('O15 portfolio safety envelope — RED', () => {
     expect(codeOf(() => verifyPortfolioSafetyDecision(req, trip))).toBe('INVALID_DECISION');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Independent review probes (RED). Each probe names one attack from the O15 review. A probe that fails today expects a refusal
+// or a state the current code does not produce; the pins below already hold and keep their guarantee from regressing.
+// ---------------------------------------------------------------------------
+
+describe('O15 review — RED probes', () => {
+  it('A1 a deposit with a trading loss still shows the loss and trips exactly at the CHF limit', () => {
+    // start 1000, deposit 500, current 1400 => adjusted 900 => loss 100 => exactly the 100 CHF limit
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(1400)) }),
+      day: day({ netExternalFlowsTodayChf: chf(500), peakAdjustedNetWorthChf: chf(1000) }),
+      policy: policy({ maxAdjustedDailyLossChf: chf(100), maxAdjustedDailyLossBp: 9999 }),
+    }));
+    expect(result.metrics.adjustedDailyLossChf).toBe(chf(100));
+    expect(result.state).toBe('TRIPPED');
+  });
+
+  it('A2 a withdrawal with a trading gain shows the gain, not a loss', () => {
+    // start 1000, withdrawal 300 (flow -300), current 900 => adjusted 1200 => gain 200
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(900)) }),
+      day: day({ netExternalFlowsTodayChf: chf(-300), peakAdjustedNetWorthChf: chf(1200) }),
+    }));
+    expect(result.metrics.adjustedDailyPnlChf).toBe(chf(200));
+    expect(result.metrics.adjustedDailyLossChf).toBe(chf(0));
+    expect(result.state).toBe('NORMAL');
+  });
+
+  it('A3 flows larger than the current net worth produce a large adjusted loss that trips', () => {
+    // start 1000, deposit 500, current 300 => adjusted -200 => loss 1200
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(300)) }),
+      day: day({ netExternalFlowsTodayChf: chf(500), peakAdjustedNetWorthChf: chf(1000) }),
+    }));
+    expect(result.metrics.adjustedCurrentNetWorthChf).toBe(chf(-200));
+    expect(result.state).toBe('TRIPPED');
+    expect(result.hardBreachReasons).toContain('adjusted daily loss reached CHF limit');
+  });
+
+  it('A4 a zero CHF loss, realized-loss or drawdown limit is refused at policy time, not latched on a flat day', () => {
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ policy: policy({ maxAdjustedDailyLossChf: chf(0) }) })))).toBe('INVALID_POLICY');
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ policy: policy({ maxRealizedTradingLossChf: chf(0) }) })))).toBe('INVALID_POLICY');
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ policy: policy({ maxIntradayDrawdownChf: chf(0) }) })))).toBe('INVALID_POLICY');
+  });
+
+  it('D1 an open position with a market value but no quote is a data hold, not a healthy position', () => {
+    const noQuote = position('AAPL', chf(200), { lastQuote: null });
+    const result = evaluatePortfolioSafetyEnvelope(request({ portfolio: portfolio({ positions: [noQuote] }) }));
+    expect(result.state).toBe('DATA_HOLD');
+    expect(result.metrics.grossExposureChf).toBeNull();
+  });
+
+  it('D2 a quote timestamped after the portfolio asOf, or not in canonical UTC, is refused', () => {
+    const future = position('AAPL', chf(200), {
+      lastQuote: { instrumentId: 'AAPL', price: Decimal.from('200'), currency: 'CHF', asOf: '2026-10-14T12:00:01.000Z', source: 'fixture' },
+    });
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ portfolio: portfolio({ positions: [future] }) })))).toBe('INVALID_PORTFOLIO');
+
+    const nonCanonical = position('AAPL', chf(200), {
+      lastQuote: { instrumentId: 'AAPL', price: Decimal.from('200'), currency: 'CHF', asOf: '2026-10-14T12:00:00Z', source: 'fixture' },
+    });
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ portfolio: portfolio({ positions: [nonCanonical] }) })))).toBe('INVALID_PORTFOLIO');
+  });
+
+  it('D3 isOpen must agree with the quantity: a closed flag on a held position, or a zero quantity on an open one, is refused', () => {
+    const hiddenHolding = position('AAPL', chf(200), { isOpen: false });
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ portfolio: portfolio({ positions: [hiddenHolding] }) })))).toBe('INVALID_PORTFOLIO');
+
+    const zeroQuantityOpen = position('AAPL', chf(200), { quantity: Decimal.from('0') });
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ portfolio: portfolio({ positions: [zeroQuantityOpen] }) })))).toBe('INVALID_PORTFOLIO');
+
+    const shortPosition = position('AAPL', chf(200), { quantity: Decimal.from('-1') });
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ portfolio: portfolio({ positions: [shortPosition] }) })))).toBe('INVALID_PORTFOLIO');
+  });
+
+  it('D4 a previously tripped kill switch must carry a trip id derived from its triggering fingerprint', () => {
+    const inconsistent = tripped();
+    inconsistent.tripId = 'trip_' + 'c'.repeat(40);
+    inconsistent.triggeringDecisionFingerprint = 'd'.repeat(64);
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ previousKillSwitch: inconsistent })))).toBe('INVALID_KILL_SWITCH');
+  });
+
+  it('H1 a portfolio without an inventory array is refused with a classified error', () => {
+    const malformed = { ...portfolio(), inventory: undefined as never };
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({ portfolio: malformed })))).toBe('INVALID_PORTFOLIO');
+  });
+
+  it('K1 a risk day that started on the prior UTC day cannot carry the current dayId', () => {
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({
+      day: day({ dayStartedAt: '2026-10-13T23:00:00.000Z' }),
+    })))).toBe('INVALID_DAY');
+  });
+
+  it('K2 a risk day whose asOf falls on the next UTC day cannot carry the current dayId', () => {
+    const nextDay = '2026-10-15T00:30:00.000Z';
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(1000), { timestamp: nextDay }) }),
+      day: day({ asOf: nextDay }),
+    })))).toBe('INVALID_DAY');
+  });
+});
+
+describe('O15 review — pins that already hold', () => {
+  it('a loss one basis point below the bp limit does not trip; exactly at it does; a fraction above it trips conservatively', () => {
+    const at = (total: string) => evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(total)) }),
+      policy: policy({ maxAdjustedDailyLossChf: chf(100), maxAdjustedDailyLossBp: 100 }),
+    }));
+    expect(at('990.10').metrics.adjustedDailyLossBp).toBe(99);
+    expect(at('990.10').hardBreachReasons).not.toContain('adjusted daily loss reached bp limit');
+    expect(at('990.00').hardBreachReasons).toContain('adjusted daily loss reached bp limit');
+    expect(at('990.01').metrics.adjustedDailyLossBp).toBe(100);
+    expect(at('990.01').hardBreachReasons).toContain('adjusted daily loss reached bp limit');
+  });
+
+  it('peak equal to start and to current means zero drawdown', () => {
+    const result = evaluatePortfolioSafetyEnvelope(request());
+    expect(result.metrics.intradayDrawdownChf).toBe(chf(0));
+    expect(result.metrics.intradayDrawdownBp).toBe(0);
+  });
+
+  it('a peak below the current adjusted net worth is refused', () => {
+    expect(codeOf(() => evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(1200)) }),
+      day: day({ peakAdjustedNetWorthChf: chf(1000) }),
+    })))).toBe('INVALID_DAY');
+  });
+
+  it('a negative adjusted current net worth yields a finite drawdown basis point', () => {
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(100)) }),
+      day: day({ netExternalFlowsTodayChf: chf(500), peakAdjustedNetWorthChf: chf(1000) }),
+    }));
+    expect(Number.isFinite(result.metrics.intradayDrawdownBp)).toBe(true);
+    // peak 1000 minus adjusted current -400 (100 - 500) => drawdown 1400
+    expect(result.metrics.intradayDrawdownChf).toBe(chf(1400));
+  });
+
+  it('complete coverage with a null market value or a non-live open position is a data hold', () => {
+    expect(evaluatePortfolioSafetyEnvelope(request({ portfolio: portfolio({ positions: [position('AAPL', chf(200), { marketValueChf: null })] }) })).state).toBe('DATA_HOLD');
+    expect(evaluatePortfolioSafetyEnvelope(request({ portfolio: portfolio({ positions: [position('AAPL', chf(200), { priceStatus: 'stale' })] }) })).state).toBe('DATA_HOLD');
+  });
+
+  it('an unpriced id that matches no position still holds, and a closed stale position holds', () => {
+    const ghost = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(1000), { dataStatus: { financialMarketData: 'complete', inventoryMarketData: 'not_required', unpricedPositions: ['paper:GHOST'], stalePositions: [] } }) }),
+    }));
+    expect(ghost.state).toBe('DATA_HOLD');
+
+    const closedStale = position('OLD', chf(0), { isOpen: false, quantity: Decimal.from('0'), priceStatus: 'stale', marketValueChf: null, lastQuote: null, averageCostChf: null });
+    const held = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({
+        capital: capital(chf(1000), { dataStatus: { financialMarketData: 'complete', inventoryMarketData: 'not_required', unpricedPositions: [], stalePositions: ['paper:OLD'] } }),
+        positions: [closedStale],
+      }),
+    }));
+    expect(held.state).toBe('DATA_HOLD');
+  });
+
+  it('partial coverage with no open position is not a data hold', () => {
+    const closed = position('OLD', chf(0), { isOpen: false, quantity: Decimal.from('0'), priceStatus: 'not_connected', marketValueChf: null, lastQuote: null, averageCostChf: null });
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(1000), { dataStatus: { financialMarketData: 'partial', inventoryMarketData: 'not_required', unpricedPositions: [], stalePositions: [] } }), positions: [closed] }),
+    }));
+    expect(result.state).toBe('NORMAL');
+  });
+
+  it('zero net worth trips and leaves the exposure ratios null', () => {
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf(0)) }),
+      day: day({ startNetWorthChf: chf(1000), peakAdjustedNetWorthChf: chf(1000) }),
+      policy: policy({ maxAdjustedDailyLossChf: chf(9999), maxAdjustedDailyLossBp: 9999 }),
+    }));
+    expect(result.state).toBe('TRIPPED');
+    expect(result.metrics.grossExposureBp).toBeNull();
+    expect(result.metrics.maximumPositionExposureBp).toBeNull();
+  });
+
+  it('the same instrument at two brokers counts as two open positions, and closed positions do not count', () => {
+    const second = position('AAPL', chf(200), { brokerId: 'other' });
+    const closed = position('OLD', chf(0), { isOpen: false, quantity: Decimal.from('0'), priceStatus: 'not_connected', marketValueChf: null, lastQuote: null, averageCostChf: null });
+    const result = evaluatePortfolioSafetyEnvelope(request({ portfolio: portfolio({ positions: [position('AAPL'), second, closed] }) }));
+    expect(result.metrics.openPositionCount).toBe(2);
+  });
+
+  it('gross exposure exactly one basis point over the cap is conservative: the ceiling trips it', () => {
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ positions: [position('AAPL', chf('800.03'))] }),
+      policy: policy({ maxGrossExposureBp: 8000, maxSinglePositionExposureBp: 9999 }),
+    }));
+    expect(result.metrics.grossExposureBp).toBe(8001);
+    expect(result.hardBreachReasons).toContain('gross exposure exceeds limit');
+  });
+
+  it('gross exposure at the cap while a single position is over its cap keeps the capacity reason and trips', () => {
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      policy: policy({ maxGrossExposureBp: 2000, maxSinglePositionExposureBp: 1000 }),
+    }));
+    expect(result.state).toBe('TRIPPED');
+    expect(result.capacityBlockReasons).toContain('gross exposure is at limit');
+    expect(result.hardBreachReasons).toContain('single position exposure exceeds limit');
+  });
+
+  it('under a data hold the open-position capacity reason is still reported and risk increase stays blocked', () => {
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ positions: [position('AAPL', chf(200), { marketValueChf: null, priceStatus: 'not_connected' })] }),
+      policy: policy({ maxOpenPositions: 1 }),
+    }));
+    expect(result.state).toBe('DATA_HOLD');
+    expect(result.capacityBlockReasons).toContain('open position count is at limit');
+    expect(result.canIncreaseRisk).toBe(false);
+  });
+
+  it('a previously tripped switch keeps its original trip id and reasons when a later breach differs', () => {
+    const previous = tripped();
+    previous.tripId = 'trip_' + 'd'.repeat(40);
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      previousKillSwitch: previous,
+      portfolio: portfolio({ capital: capital(chf(100)) }),
+    }));
+    expect(result.killSwitch).toEqual(previous);
+    expect(result.state).toBe('TRIPPED');
+  });
+
+  it('a tripped switch stays tripped under a data hold', () => {
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      previousKillSwitch: tripped(),
+      portfolio: portfolio({ positions: [position('AAPL', chf(200), { marketValueChf: null, priceStatus: 'stale' })] }),
+    }));
+    expect(result.state).toBe('TRIPPED');
+    expect(result.dataHoldReasons.length).toBeGreaterThan(0);
+  });
+
+  it('the same breach produces the same trip id; reordered previous reasons do not change the decision identity', async () => {
+    const breach = request({ portfolio: portfolio({ capital: capital(chf(850)) }) });
+    expect(evaluatePortfolioSafetyEnvelope(breach).killSwitch.tripId).toBe(evaluatePortfolioSafetyEnvelope(breach).killSwitch.tripId);
+
+    const a = { ...tripped(), reasons: ['alpha breach', 'beta breach'] };
+    const b = { ...tripped(), reasons: ['beta breach', 'alpha breach'] };
+    expect(evaluatePortfolioSafetyEnvelope(request({ previousKillSwitch: b })).decisionId).toBe(evaluatePortfolioSafetyEnvelope(request({ previousKillSwitch: a })).decisionId);
+  });
+
+  it('the module exposes no reset, clear, arm or unlatch function', async () => {
+    const mod = await import('../../src/safety/portfolio-safety-envelope.js');
+    expect(Object.keys(mod).filter((name) => /reset|clear|arm|unlatch|untrip|enable/i.test(name))).toEqual([]);
+  });
+
+  it('a semantic change to policy, source hashes, data hold or a hard breach changes the decision identity', () => {
+    const base = evaluatePortfolioSafetyEnvelope(request());
+    expect(evaluatePortfolioSafetyEnvelope(request({ policy: policy({ maxOpenPositions: 4 }) })).decisionId).not.toBe(base.decisionId);
+    expect(evaluatePortfolioSafetyEnvelope(request({ day: day({ sourceLedgerHeadHash: 'e'.repeat(64) }) })).decisionId).not.toBe(base.decisionId);
+    expect(evaluatePortfolioSafetyEnvelope(request({ portfolio: portfolio({ positions: [position('AAPL', chf(200), { marketValueChf: null, priceStatus: 'stale' })] }) })).decisionId).not.toBe(base.decisionId);
+    expect(evaluatePortfolioSafetyEnvelope(request({ portfolio: portfolio({ capital: capital(chf(850)) }) })).decisionId).not.toBe(base.decisionId);
+  });
+
+  it('the verifier rejects a reissued decision with tampered flags, alerts, source fingerprints or identity', () => {
+    const req = request({ portfolio: portfolio({ capital: capital(chf(850)) }) });
+    const result = evaluatePortfolioSafetyEnvelope(req);
+    const flag = structuredClone(result) as { canIncreaseRisk: boolean };
+    flag.canIncreaseRisk = true;
+    expect(codeOf(() => verifyPortfolioSafetyDecision(req, flag as never))).toBe('INVALID_DECISION');
+
+    const live = structuredClone(result) as { liveOrderAllowed: boolean };
+    live.liveOrderAllowed = true;
+    expect(codeOf(() => verifyPortfolioSafetyDecision(req, live as never))).toBe('INVALID_DECISION');
+
+    const alerts = structuredClone(result);
+    alerts.alerts = [];
+    expect(codeOf(() => verifyPortfolioSafetyDecision(req, alerts))).toBe('INVALID_DECISION');
+
+    const fingerprint = structuredClone(result);
+    fingerprint.sourceFingerprints.portfolio = 'f'.repeat(64);
+    expect(codeOf(() => verifyPortfolioSafetyDecision(req, fingerprint))).toBe('INVALID_DECISION');
+
+    const identity = structuredClone(result);
+    identity.decisionId = 'pse_' + 'e'.repeat(40);
+    expect(codeOf(() => verifyPortfolioSafetyDecision(req, identity))).toBe('INVALID_DECISION');
+  });
+
+  it('the review module imports no broker, ledger, registry, champion, capital, audit or network module at runtime', async () => {
+    const { readFileSync } = await import('node:fs');
+    const forbidden = /broker|ledger|registry|champion|capital|audit|network|http|provider|adapter/i;
+    const source = readFileSync(new URL('../../src/safety/portfolio-safety-envelope.ts', import.meta.url), 'utf8');
+    const runtimeImports = [...source.matchAll(/^import (?!type )[^;]*from '([^']+)';/gm)].map((match) => match[1]!);
+    expect(runtimeImports.filter((spec) => forbidden.test(spec))).toEqual([]);
+  });
+});
