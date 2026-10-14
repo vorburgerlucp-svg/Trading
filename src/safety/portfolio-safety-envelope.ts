@@ -379,6 +379,7 @@ export function evaluatePortfolioSafetyEnvelope(
       : ratioBp(intradayDrawdownChf, request.day.peakAdjustedNetWorthChf, 'ceil');
 
   const openPositions = request.portfolio.positions.filter((position) => position.isOpen);
+  const asOfMs = canonicalMs(request.day.asOf)!;
   const dataHoldReasons: string[] = [];
   const capitalData = request.portfolio.capital.dataStatus;
   if (
