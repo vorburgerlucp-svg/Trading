@@ -189,7 +189,8 @@ export class OutcomeEvaluator {
   }
 }
 
-function scoreAttempt(attempt: AttemptRecord, returnBp: number): number {
+/** The performance score OutcomeEvaluator gives one successful attempt. Exported so that a review can verify a stored score against the same rule. */
+export function scoreAttempt(attempt: AttemptRecord, returnBp: number): number {
   const opinion = attempt.opinion;
   if (!opinion) return 0;
   if (attempt.role === 'analyst') return scoreRecommendation(opinion.recommendation, returnBp);
