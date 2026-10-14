@@ -331,17 +331,30 @@ function validateOutcome(trace: DecisionTrace, outcome: TradeOutcome): void {
   if (knownAtMs === null || knownAtMs <= decisionMs) {
     fail('INVALID_OUTCOME', 'outcome knownAt must be canonical UTC and later than the decision');
   }
-  for (const [label, instant] of [
-    ['openedAt', outcome.openedAt],
-    ['closedAt', outcome.closedAt],
-  ] as const) {
-    if (canonicalMs(instant) === null) fail('INVALID_OUTCOME', label + ' must be a canonical UTC instant');
-  }
+  const openedAtMs = canonicalMs(outcome.openedAt);
+  const closedAtMs = canonicalMs(outcome.closedAt);
+  if (openedAtMs === null) fail('INVALID_OUTCOME', 'openedAt must be a canonical UTC instant');
+  if (closedAtMs === null) fail('INVALID_OUTCOME', 'closedAt must be a canonical UTC instant');
+  if (closedAtMs < openedAtMs) fail('INVALID_OUTCOME', 'closedAt cannot precede openedAt');
+  if (knownAtMs < closedAtMs) fail('INVALID_OUTCOME', 'knownAt cannot precede closedAt');
+
   if (!(outcome.entryPrice instanceof Decimal) || !outcome.entryPrice.isPositive()) fail('INVALID_OUTCOME', 'entryPrice must be a positive Decimal');
   if (!(outcome.exitPrice instanceof Decimal) || !outcome.exitPrice.isPositive()) fail('INVALID_OUTCOME', 'exitPrice must be a positive Decimal');
   if (!(outcome.highestPrice instanceof Decimal) || !outcome.highestPrice.isPositive()) fail('INVALID_OUTCOME', 'highestPrice must be a positive Decimal');
   if (!(outcome.lowestPrice instanceof Decimal) || !outcome.lowestPrice.isPositive()) fail('INVALID_OUTCOME', 'lowestPrice must be a positive Decimal');
   if (outcome.highestPrice.lt(outcome.lowestPrice)) fail('INVALID_OUTCOME', 'highestPrice cannot be below lowestPrice');
+  if (outcome.highestPrice.lt(outcome.entryPrice) || outcome.highestPrice.lt(outcome.exitPrice)) {
+    fail('INVALID_OUTCOME', 'highestPrice must cover entryPrice and exitPrice');
+  }
+  if (outcome.lowestPrice.gt(outcome.entryPrice) || outcome.lowestPrice.gt(outcome.exitPrice)) {
+    fail('INVALID_OUTCOME', 'lowestPrice must cover entryPrice and exitPrice');
+  }
+  if (outcome.stopLoss !== undefined && (!(outcome.stopLoss instanceof Decimal) || !outcome.stopLoss.isPositive())) {
+    fail('INVALID_OUTCOME', 'stopLoss must be a positive Decimal when set');
+  }
+  if (outcome.takeProfit !== undefined && (!(outcome.takeProfit instanceof Decimal) || !outcome.takeProfit.isPositive())) {
+    fail('INVALID_OUTCOME', 'takeProfit must be a positive Decimal when set');
+  }
 }
 
 function validateEvaluation(trace: DecisionTrace, outcome: TradeOutcome, evaluation: TradeEvaluation): void {
