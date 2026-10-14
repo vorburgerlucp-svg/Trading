@@ -10,7 +10,6 @@ import {
   type CalibrationObservation,
   type HistogramCalibrationPolicy,
   type PitCalibrationRequest,
-  type PitConfidenceCalibrationModel,
 } from '../../src/ai/pit-confidence-calibration.js';
 import { modelKey } from '../../src/ai/model-types.js';
 import { hashOf } from '../../src/persistence/canonical-json.js';
@@ -120,7 +119,6 @@ describe('O12 point-in-time confidence calibration — RED', () => {
   });
 
   it('rejects malformed times and look-ahead where knownAt precedes asOf', () => {
-    expect(() => fitPitConfidenceCalibration(request({ fitAsOf: '2026-02-01' }))).toMatchObject;
     expect(() => fitPitConfidenceCalibration(request({ fitAsOf: '2026-02-01' }))).toThrow(PitConfidenceCalibrationError);
 
     const nonCanonical = observation('x', 0.5, 1, { knownAt: 'Jan 2 2026' });
@@ -130,7 +128,6 @@ describe('O12 point-in-time confidence calibration — RED', () => {
       asOf: '2026-01-03T00:00:00.000Z',
       knownAt: '2026-01-02T00:00:00.000Z',
     });
-    expect(() => fitPitConfidenceCalibration(request({ observations: [backwards] }))).toMatchObject;
     expect(() => fitPitConfidenceCalibration(request({ observations: [backwards] }))).toThrow(PitConfidenceCalibrationError);
   });
 
