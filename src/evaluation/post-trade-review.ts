@@ -1,7 +1,9 @@
 import type { PerformanceObservation } from '../ai/model-performance.js';
 import type { ModelKey, Recommendation } from '../ai/model-types.js';
-import type { TradeEvaluation, TradeOutcome } from './outcome-evaluator.js';
-import type { DecisionTrace } from '../nexus/nexus-types.js';
+import { Decimal } from '../money/decimal.js';
+import { hashOf } from '../persistence/canonical-json.js';
+import type { AttemptRecord, DecisionTrace } from '../nexus/nexus-types.js';
+import { evaluateTrade, FLAT_BAND_BP, type TradeEvaluation, type TradeOutcome } from './outcome-evaluator.js';
 
 export const POST_TRADE_REVIEW_VERSION = 'post-trade-review:v1' as const;
 export const POST_TRADE_REVIEW_POLICY_VERSION = 'post-trade-review-policy:v1' as const;
@@ -156,14 +158,587 @@ export class PostTradeReviewError extends Error {
   }
 }
 
-/** O13 RED API surface. Implementation follows after behavior tests pin the contract. */
-export function buildPostTradeReview(_request: PostTradeReviewRequest): PostTradeReview {
-  throw new Error('O13 post-trade review not implemented');
+const compareCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+function fail(code: PostTradeReviewError['code'], message: string): never {
+  throw new PostTradeReviewError(code, message);
+}
+
+function canonicalMs(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) && new Date(ms).toISOString() === value ? ms : null;
+}
+
+function sortedUnique(values: readonly string[]): string[] {
+  return [...new Set(values)].sort(compareCodeUnit);
+}
+
+function normalizeTraceIdentity(trace: DecisionTrace): unknown {
+  return {
+    ...trace,
+    record: {
+      ...trace.record,
+      evidenceRefs: sortedUnique(trace.record.evidenceRefs),
+      reasonCodes: sortedUnique(trace.record.reasonCodes),
+    },
+    task: {
+      ...trace.task,
+      requiredCapabilities: sortedUnique(trace.task.requiredCapabilities),
+      contextRefs: sortedUnique(trace.task.contextRefs),
+    },
+    plan: {
+      ...trace.plan,
+      reasons: sortedUnique(trace.plan.reasons),
+    },
+    inputs: {
+      ...trace.inputs,
+      evidence: [...trace.inputs.evidence].sort((a, b) => compareCodeUnit(a.id, b.id)),
+      excludedLookAhead: sortedUnique(trace.inputs.excludedLookAhead),
+      quant:
+        trace.inputs.quant === null
+          ? null
+          : {
+              ...trace.inputs.quant,
+              backtestRunIds: sortedUnique(trace.inputs.quant.backtestRunIds ?? []),
+            },
+    },
+    routing: trace.routing.map((one) => ({
+      ...one,
+      primaries: sortedUnique(one.primaries),
+      fallbacks: sortedUnique(one.fallbacks),
+      shadow: sortedUnique(one.shadow),
+      rejected: [...one.rejected]
+        .map((r) => ({ ...r, reasons: sortedUnique(r.reasons) }))
+        .sort((a, b) => compareCodeUnit(a.modelKey, b.modelKey)),
+    })),
+    decision: {
+      ...trace.decision,
+      reasonCodes: sortedUnique(trace.decision.reasonCodes),
+      humanApprovalReasons: sortedUnique(trace.decision.humanApprovalReasons),
+      capital:
+        trace.decision.capital === null
+          ? null
+          : {
+              ...trace.decision.capital,
+              cappedBy: sortedUnique(trace.decision.capital.cappedBy),
+              allocationSkipReasons: sortedUnique(trace.decision.capital.allocationSkipReasons),
+            },
+      evidence: {
+        ...trace.decision.evidence,
+        warnings: [...trace.decision.evidence.warnings].sort((a, b) =>
+          compareCodeUnit(a.code + '|' + a.ref, b.code + '|' + b.ref),
+        ),
+        impact: sortedUnique(trace.decision.evidence.impact),
+      },
+    },
+    risk: { ...trace.risk, reasons: sortedUnique(trace.risk.reasons) },
+    humanApproval: { ...trace.humanApproval, reasons: sortedUnique(trace.humanApproval.reasons) },
+  };
+}
+
+function validatePolicy(raw: PostTradeReviewPolicy | undefined): PostTradeReviewPolicy {
+  const policy = raw ?? DEFAULT_POST_TRADE_REVIEW_POLICY;
+  if (
+    policy.version !== POST_TRADE_REVIEW_POLICY_VERSION ||
+    !Number.isSafeInteger(policy.minimumEvidenceCountForStrong) ||
+    policy.minimumEvidenceCountForStrong < 0
+  ) {
+    fail('INVALID_POLICY', 'post-trade review policy is invalid');
+  }
+  return {
+    version: POST_TRADE_REVIEW_POLICY_VERSION,
+    minimumEvidenceCountForStrong: policy.minimumEvidenceCountForStrong,
+  };
+}
+
+function validateTrace(trace: DecisionTrace): void {
+  if (!trace || typeof trace !== 'object') fail('INVALID_TRACE', 'decision trace is required');
+  const decisionMs = canonicalMs(trace.decision?.asOf);
+  if (decisionMs === null) fail('INVALID_TRACE', 'decision asOf must be a canonical UTC instant');
+  if (
+    trace.decision.decisionId !== trace.record.decisionId ||
+    trace.decision.taskId !== trace.record.taskId ||
+    trace.decision.taskId !== trace.task.id ||
+    trace.plan.taskId !== trace.task.id ||
+    trace.record.asOf !== trace.decision.asOf
+  ) {
+    fail('INVALID_TRACE', 'decision, record, task and plan identities do not align');
+  }
+  if (
+    trace.decision.execution.liveOrderAllowed !== false ||
+    trace.decision.execution.physicalPurchaseAllowed !== false
+  ) {
+    fail('INVALID_TRACE', 'execution locks must remain false');
+  }
+
+  const steps = new Map(trace.plan.steps.map((step) => [step.id, step]));
+  const attributable = new Set<string>();
+  for (const attempt of trace.attempts) {
+    const step = steps.get(attempt.stepId);
+    if (!step) fail('INVALID_TRACE', 'attempt references unknown plan step ' + attempt.stepId);
+    if (attempt.role !== step.role) fail('INVALID_TRACE', 'attempt role does not match plan step ' + attempt.stepId);
+    if (attempt.status === 'ok') {
+      if (!attempt.opinion) fail('INVALID_TRACE', 'successful attempt has no opinion');
+      if (attempt.provider + '/' + attempt.model !== attempt.modelKey) {
+        fail('INVALID_TRACE', 'attempt modelKey does not match provider/model');
+      }
+      const key = attributionKey(
+        attempt.modelKey,
+        attempt.role,
+        trace.task.domain,
+        step.subtask ?? trace.task.subtask,
+      );
+      if (attributable.has(key)) {
+        fail('INVALID_TRACE', 'multiple successful attempts are ambiguous for performance attribution: ' + key);
+      }
+      attributable.add(key);
+      validateProbabilityFields(attempt);
+    }
+  }
+}
+
+function validateProbabilityFields(attempt: AttemptRecord): void {
+  if (
+    attempt.confidenceScore !== undefined &&
+    attempt.confidenceScore !== null &&
+    (!Number.isFinite(attempt.confidenceScore) || attempt.confidenceScore < 0 || attempt.confidenceScore > 1)
+  ) {
+    fail('INVALID_TRACE', 'attempt confidenceScore must be within 0..1');
+  }
+  if (
+    attempt.calibratedProbability !== undefined &&
+    attempt.calibratedProbability !== null
+  ) {
+    if (
+      !Number.isFinite(attempt.calibratedProbability) ||
+      attempt.calibratedProbability < 0 ||
+      attempt.calibratedProbability > 1
+    ) {
+      fail('INVALID_TRACE', 'attempt calibratedProbability must be within 0..1');
+    }
+    if (typeof attempt.calibrationMethod !== 'string' || attempt.calibrationMethod.trim() === '') {
+      fail('INVALID_TRACE', 'calibrated probability requires a calibration method');
+    }
+  }
+}
+
+function validateOutcome(trace: DecisionTrace, outcome: TradeOutcome): void {
+  if (!outcome || outcome.kind !== 'trade') fail('INVALID_OUTCOME', 'O13 V1 accepts trade outcomes only');
+  if (outcome.decisionId !== trace.decision.decisionId) fail('INVALID_OUTCOME', 'outcome belongs to another decision');
+  const decisionMs = canonicalMs(trace.decision.asOf)!;
+  const knownAtMs = canonicalMs(outcome.knownAt);
+  if (knownAtMs === null || knownAtMs <= decisionMs) {
+    fail('INVALID_OUTCOME', 'outcome knownAt must be canonical UTC and later than the decision');
+  }
+  for (const [label, instant] of [
+    ['openedAt', outcome.openedAt],
+    ['closedAt', outcome.closedAt],
+  ] as const) {
+    if (canonicalMs(instant) === null) fail('INVALID_OUTCOME', label + ' must be a canonical UTC instant');
+  }
+  if (!(outcome.entryPrice instanceof Decimal) || !outcome.entryPrice.isPositive()) fail('INVALID_OUTCOME', 'entryPrice must be a positive Decimal');
+  if (!(outcome.exitPrice instanceof Decimal) || !outcome.exitPrice.isPositive()) fail('INVALID_OUTCOME', 'exitPrice must be a positive Decimal');
+  if (!(outcome.highestPrice instanceof Decimal) || !outcome.highestPrice.isPositive()) fail('INVALID_OUTCOME', 'highestPrice must be a positive Decimal');
+  if (!(outcome.lowestPrice instanceof Decimal) || !outcome.lowestPrice.isPositive()) fail('INVALID_OUTCOME', 'lowestPrice must be a positive Decimal');
+  if (outcome.highestPrice.lt(outcome.lowestPrice)) fail('INVALID_OUTCOME', 'highestPrice cannot be below lowestPrice');
+}
+
+function validateEvaluation(trace: DecisionTrace, outcome: TradeOutcome, evaluation: TradeEvaluation): void {
+  let recomputed: TradeEvaluation;
+  try {
+    recomputed = evaluateTrade(outcome, trace.decision.direction);
+  } catch (error) {
+    fail('INVALID_EVALUATION', 'could not re-evaluate trade outcome: ' + String(error));
+  }
+  if (hashOf(recomputed) !== hashOf(evaluation)) {
+    fail('INVALID_EVALUATION', 'trade evaluation does not correspond to the supplied outcome');
+  }
+}
+
+function attributionKey(modelKey: ModelKey, role: string, domain: string, subtask: string): string {
+  return modelKey + '|' + role + '|' + domain + '|' + subtask;
+}
+
+function observationFingerprint(observation: PerformanceObservation): string {
+  return hashOf({
+    modelKey: observation.modelKey,
+    domain: observation.domain,
+    subtask: observation.subtask,
+    role: observation.role,
+    decisionId: observation.decisionId,
+    score: observation.score,
+    shadow: observation.shadow,
+    occurredAt: observation.occurredAt,
+    availableAt: observation.availableAt,
+  });
+}
+
+function validateAndIndexPerformance(
+  trace: DecisionTrace,
+  outcome: TradeOutcome,
+  observations: readonly PerformanceObservation[],
+): Map<string, PerformanceObservation> {
+  if (!Array.isArray(observations)) fail('INVALID_PERFORMANCE', 'performanceObservations must be an array');
+  const byKey = new Map<string, PerformanceObservation>();
+  const fingerprints = new Set<string>();
+  for (const observation of observations) {
+    if (observation.decisionId !== trace.decision.decisionId) {
+      fail('INVALID_PERFORMANCE', 'performance observation belongs to another decision');
+    }
+    if (!Number.isFinite(observation.score) || observation.score < 0 || observation.score > 1) {
+      fail('INVALID_PERFORMANCE', 'performance score must be within 0..1');
+    }
+    if (
+      observation.occurredAt !== trace.decision.asOf ||
+      observation.availableAt !== outcome.knownAt
+    ) {
+      fail('INVALID_PERFORMANCE', 'performance observation time does not match decision/outcome');
+    }
+    const fp = observationFingerprint(observation);
+    if (fingerprints.has(fp)) fail('INVALID_PERFORMANCE', 'duplicate performance observation');
+    fingerprints.add(fp);
+    const key = attributionKey(
+      observation.modelKey,
+      observation.role,
+      observation.domain,
+      observation.subtask,
+    );
+    if (byKey.has(key)) fail('INVALID_PERFORMANCE', 'multiple observations map to the same attempt');
+    byKey.set(key, observation);
+  }
+
+  const planSteps = new Map(trace.plan.steps.map((step) => [step.id, step]));
+  const expected = new Set<string>();
+  for (const attempt of trace.attempts) {
+    if (attempt.status !== 'ok' || !attempt.opinion) continue;
+    const step = planSteps.get(attempt.stepId)!;
+    const key = attributionKey(attempt.modelKey, attempt.role, trace.task.domain, step.subtask ?? trace.task.subtask);
+    expected.add(key);
+    const observation = byKey.get(key);
+    if (!observation) fail('INVALID_PERFORMANCE', 'missing performance observation for successful attempt ' + key);
+    if (observation.shadow !== attempt.shadow) fail('INVALID_PERFORMANCE', 'performance shadow flag does not match attempt');
+  }
+  for (const key of byKey.keys()) {
+    if (!expected.has(key)) fail('INVALID_PERFORMANCE', 'performance observation does not map to a successful trace attempt');
+  }
+  return byKey;
+}
+
+function processDiagnosticsOf(trace: DecisionTrace): ProcessDiagnostics {
+  const successfulNonShadowAnalysts = trace.attempts.filter(
+    (attempt) => attempt.status === 'ok' && attempt.opinion && attempt.role === 'analyst' && !attempt.shadow,
+  );
+  const criticObserved = trace.attempts.some(
+    (attempt) => attempt.status === 'ok' && !!attempt.opinion && attempt.role === 'critic' && !attempt.shadow,
+  );
+  const counterAnalysisObserved = trace.attempts.some(
+    (attempt) => attempt.status === 'ok' && !!attempt.opinion && attempt.role === 'counter_analyst' && !attempt.shadow,
+  );
+  const quant = trace.inputs.quant;
+  const requiredIndependentOpinions = trace.plan.minIndependentOpinions;
+  return {
+    evidenceCount: trace.inputs.evidence.length,
+    excludedLookAheadCount: trace.inputs.excludedLookAhead.length,
+    evidenceWarningCount: trace.decision.evidence.warnings.length,
+    blockingEvidenceImpactCount: trace.decision.evidence.impact.length,
+    successfulNonShadowAnalysts: successfulNonShadowAnalysts.length,
+    distinctAnalystProviders: new Set(successfulNonShadowAnalysts.map((attempt) => attempt.provider)).size,
+    requiredIndependentOpinions,
+    independentOpinionShortfall: Math.max(0, requiredIndependentOpinions - successfulNonShadowAnalysts.length),
+    criticRequired: trace.plan.requiresCritic,
+    criticObserved,
+    counterAnalysisRequired: trace.plan.requiresCounterAnalysis,
+    counterAnalysisObserved,
+    quantStatus: quant?.status ?? 'not_available',
+    quantRunId: quant?.quantRunId ?? null,
+    scannerRunId: quant?.scannerRunId ?? null,
+    backtestRunIds: sortedUnique(quant?.backtestRunIds ?? []),
+    riskPassed: trace.risk.passed,
+    blockingFindingCount: trace.decision.consensus.findings.blocking.length,
+    majorFindingCount: trace.decision.consensus.findings.major.length,
+    humanApprovalRequired: trace.humanApproval.required,
+    humanApprovalStatus: trace.humanApproval.status,
+    paperIntentAllowed: trace.decision.execution.paperIntentAllowed,
+    liveOrderAllowed: false,
+    physicalPurchaseAllowed: false,
+    capitalStateRefPresent:
+      typeof trace.decision.capitalStateRef === 'string' && trace.decision.capitalStateRef.trim() !== '',
+    allocationSkipReasons: sortedUnique(trace.decision.capital?.allocationSkipReasons ?? []),
+  };
+}
+
+function classifyProcess(diagnostics: ProcessDiagnostics, policy: PostTradeReviewPolicy): ProcessClassification {
+  if (!diagnostics.riskPassed || diagnostics.blockingFindingCount > 0) return 'PROCESS_BLOCKED';
+  if (
+    diagnostics.independentOpinionShortfall > 0 ||
+    (diagnostics.criticRequired && !diagnostics.criticObserved) ||
+    (diagnostics.counterAnalysisRequired && !diagnostics.counterAnalysisObserved) ||
+    diagnostics.majorFindingCount > 0
+  ) {
+    return 'PROCESS_WEAK';
+  }
+  if (
+    diagnostics.evidenceCount >= policy.minimumEvidenceCountForStrong &&
+    diagnostics.evidenceWarningCount === 0 &&
+    diagnostics.blockingEvidenceImpactCount === 0
+  ) {
+    return 'PROCESS_STRONG';
+  }
+  return 'PROCESS_ACCEPTABLE';
+}
+
+function classifyOutcome(evaluation: TradeEvaluation): OutcomeClassification {
+  if (evaluation.returnBp > FLAT_BAND_BP) return 'OUTCOME_FAVORABLE';
+  if (evaluation.returnBp < -FLAT_BAND_BP) return 'OUTCOME_ADVERSE';
+  return 'OUTCOME_FLAT';
+}
+
+function directionalCorrect(recommendation: Recommendation, returnBp: number): boolean | null {
+  if (recommendation === 'buy') return returnBp > FLAT_BAND_BP;
+  if (recommendation === 'sell') return returnBp < -FLAT_BAND_BP;
+  return null;
+}
+
+function attributionsOf(
+  trace: DecisionTrace,
+  evaluation: TradeEvaluation,
+  byPerformanceKey: Map<string, PerformanceObservation>,
+): { attributions: AttemptAttribution[]; calibration: CalibrationDiagnostic[] } {
+  const steps = new Map(trace.plan.steps.map((step) => [step.id, step]));
+  const attributions: AttemptAttribution[] = [];
+  const calibration: CalibrationDiagnostic[] = [];
+
+  for (const attempt of trace.attempts) {
+    if (attempt.status !== 'ok' || !attempt.opinion) continue;
+    const step = steps.get(attempt.stepId)!;
+    const key = attributionKey(attempt.modelKey, attempt.role, trace.task.domain, step.subtask ?? trace.task.subtask);
+    const observation = byPerformanceKey.get(key)!;
+    const calibratedProbability = attempt.calibratedProbability ?? null;
+    const calibrationMethod = attempt.calibrationMethod ?? null;
+    const correct =
+      attempt.role === 'analyst'
+        ? directionalCorrect(attempt.opinion.recommendation, evaluation.returnBp)
+        : null;
+
+    attributions.push({
+      stepId: attempt.stepId,
+      modelKey: attempt.modelKey,
+      role: attempt.role,
+      shadow: attempt.shadow,
+      recommendation: attempt.opinion.recommendation,
+      confidenceScore: attempt.confidenceScore ?? null,
+      calibratedProbability,
+      calibrationMethod,
+      performanceScore: observation.score,
+      directionCorrect: correct,
+    });
+
+    if (
+      attempt.role === 'analyst' &&
+      (attempt.opinion.recommendation === 'buy' || attempt.opinion.recommendation === 'sell') &&
+      calibratedProbability !== null
+    ) {
+      const label: 0 | 1 = correct ? 1 : 0;
+      calibration.push({
+        stepId: attempt.stepId,
+        modelKey: attempt.modelKey,
+        targetId: 'recommendation_direction_correct:v1',
+        calibratedProbability,
+        outcomeLabel: label,
+        brierContribution: (calibratedProbability - label) ** 2,
+      });
+    }
+  }
+  return { attributions, calibration };
+}
+
+function feedbackOf(
+  process: ProcessClassification,
+  diagnostics: ProcessDiagnostics,
+  evaluation: TradeEvaluation,
+  executed: boolean,
+  calibration: readonly CalibrationDiagnostic[],
+): PostTradeFeedbackItem[] {
+  const feedback: PostTradeFeedbackItem[] = [];
+
+  if (process === 'PROCESS_BLOCKED') {
+    feedback.push({
+      code: 'REVIEW_RISK_DISCIPLINE',
+      severity: 'major',
+      basis: 'process',
+      references: ['risk'],
+      explanation: 'The pre-trade process was blocked by risk or unresolved blocking findings.',
+    });
+  }
+  if (diagnostics.evidenceWarningCount > 0 || diagnostics.blockingEvidenceImpactCount > 0) {
+    feedback.push({
+      code: 'REVIEW_EVIDENCE_QUALITY',
+      severity: diagnostics.blockingEvidenceImpactCount > 0 ? 'major' : 'minor',
+      basis: 'process',
+      references: ['evidence'],
+      explanation: 'Review the evidence warnings or decision impacts present before the outcome was known.',
+    });
+  }
+  if (
+    diagnostics.independentOpinionShortfall > 0 ||
+    (diagnostics.criticRequired && !diagnostics.criticObserved) ||
+    (diagnostics.counterAnalysisRequired && !diagnostics.counterAnalysisObserved)
+  ) {
+    feedback.push({
+      code: 'REVIEW_PROVIDER_DIVERSITY',
+      severity: 'major',
+      basis: 'process',
+      references: ['plan', 'attempts'],
+      explanation: 'The observed independent review did not satisfy the pre-declared review requirements.',
+    });
+  }
+  if (diagnostics.quantStatus !== 'confirmed') {
+    feedback.push({
+      code: 'REVIEW_QUANT_SUPPORT',
+      severity: 'minor',
+      basis: 'process',
+      references: ['quant'],
+      explanation: 'The decision did not carry confirmed quantitative support.',
+    });
+  }
+  if (evaluation.stop === 'hit_then_recovered') {
+    feedback.push({
+      code: 'REVIEW_STOP_PLACEMENT',
+      severity: 'minor',
+      basis: 'outcome',
+      references: ['trade-evaluation'],
+      explanation: 'The stop was touched before the trade later recovered; review stop placement without changing the original process grade.',
+    });
+  }
+  if (evaluation.target === 'not_reached' && evaluation.returnBp > FLAT_BAND_BP) {
+    feedback.push({
+      code: 'REVIEW_TARGET_PLACEMENT',
+      severity: 'info',
+      basis: 'outcome',
+      references: ['trade-evaluation'],
+      explanation: 'The trade moved favorably without reaching the declared target; review target placement.',
+    });
+  }
+  if (!executed) {
+    feedback.push({
+      code: 'REVIEW_EXECUTION_VS_THESIS',
+      severity: 'info',
+      basis: 'both',
+      references: ['decision', 'outcome'],
+      explanation: 'This was a counterfactual outcome; separate thesis quality from actual execution results.',
+    });
+  }
+  if (calibration.some((one) => one.brierContribution >= 0.25)) {
+    feedback.push({
+      code: 'REVIEW_MODEL_CONFIDENCE',
+      severity: 'minor',
+      basis: 'both',
+      references: sortedUnique(calibration.filter((one) => one.brierContribution >= 0.25).map((one) => one.modelKey)),
+      explanation: 'At least one calibrated probability had a large binary forecast error on this outcome.',
+    });
+  }
+
+  if (feedback.length === 0) {
+    feedback.push({
+      code: 'KEEP_PROCESS',
+      severity: 'info',
+      basis: 'process',
+      references: ['decision'],
+      explanation: 'No deterministic process-review trigger fired for this decision.',
+    });
+  }
+
+  return feedback;
+}
+
+function performanceFingerprint(observations: readonly PerformanceObservation[]): string {
+  return hashOf(
+    observations
+      .map((observation) => ({
+        fingerprint: observationFingerprint(observation),
+        observation,
+      }))
+      .sort((a, b) => compareCodeUnit(a.fingerprint, b.fingerprint))
+      .map((one) => one.observation),
+  );
+}
+
+export function buildPostTradeReview(request: PostTradeReviewRequest): PostTradeReview {
+  const policy = validatePolicy(request.policy);
+  validateTrace(request.trace);
+  validateOutcome(request.trace, request.outcome);
+  validateEvaluation(request.trace, request.outcome, request.evaluation);
+  const performance = validateAndIndexPerformance(
+    request.trace,
+    request.outcome,
+    request.performanceObservations,
+  );
+
+  const processDiagnostics = processDiagnosticsOf(request.trace);
+  const processClassification = classifyProcess(processDiagnostics, policy);
+  const outcomeClassification = classifyOutcome(request.evaluation);
+  const { attributions, calibration } = attributionsOf(request.trace, request.evaluation, performance);
+
+  const sourceFingerprints = {
+    trace: hashOf(normalizeTraceIdentity(request.trace)),
+    outcome: hashOf(request.outcome),
+    evaluation: hashOf(request.evaluation),
+    performanceObservations: performanceFingerprint(request.performanceObservations),
+  };
+  const identity = {
+    engineVersion: POST_TRADE_REVIEW_VERSION,
+    policy,
+    decisionId: request.trace.decision.decisionId,
+    decisionAsOf: request.trace.decision.asOf,
+    outcomeKnownAt: request.outcome.knownAt,
+    sourceFingerprints,
+  };
+  const inputFingerprint = hashOf(identity);
+
+  const review: PostTradeReview = {
+    reviewId: 'ptr_' + inputFingerprint.slice(0, 40),
+    engineVersion: POST_TRADE_REVIEW_VERSION,
+    inputFingerprint,
+    policy,
+    decisionId: request.trace.decision.decisionId,
+    decisionAsOf: request.trace.decision.asOf,
+    outcomeKnownAt: request.outcome.knownAt,
+    instrumentId: request.outcome.instrumentId,
+    executed: request.outcome.executed,
+    processClassification,
+    outcomeClassification,
+    processDiagnostics,
+    outcomeDiagnostics: {
+      returnBp: request.evaluation.returnBp,
+      maxAdverseExcursionBp: request.evaluation.maxAdverseExcursionBp,
+      maxFavorableExcursionBp: request.evaluation.maxFavorableExcursionBp,
+      stop: request.evaluation.stop,
+      target: request.evaluation.target,
+      directionCorrect: request.evaluation.directionCorrect,
+      netResultChf: request.evaluation.netResultChf,
+      feesChf: request.evaluation.feesChf,
+    },
+    attemptAttribution: attributions,
+    calibrationDiagnostics: calibration,
+    feedback: feedbackOf(
+      processClassification,
+      processDiagnostics,
+      request.evaluation,
+      request.outcome.executed,
+      calibration,
+    ),
+    sourceFingerprints,
+  };
+  return review;
 }
 
 export function verifyPostTradeReview(
-  _request: PostTradeReviewRequest,
-  _review: PostTradeReview,
+  request: PostTradeReviewRequest,
+  review: PostTradeReview,
 ): void {
-  throw new Error('O13 post-trade review verifier not implemented');
+  const recomputed = buildPostTradeReview(request);
+  if (hashOf(recomputed) !== hashOf(review)) {
+    fail('INVALID_EVALUATION', 'post-trade review does not match its source request');
+  }
 }
