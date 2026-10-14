@@ -29,7 +29,10 @@ function provider(searchResult: InstrumentCandidate[] = [VALID, INJECTION, BAD_S
   return {
     providerId: 'twelvedata',
     searchInstruments: async () => searchResult,
-    getInstrument: async () => null,
+    getInstrument: async (symbol, hint = {}) => searchResult.find((candidate) =>
+      candidate.providerSymbol.toUpperCase() === symbol.toUpperCase()
+      && (!hint.mic || candidate.mic === hint.mic)
+      && (!hint.exchange || candidate.exchange === hint.exchange)) ?? null,
     getHistoricalBars: async () => { throw new MarketDataError('provider_unavailable', 'twelvedata', 'offline in test'); },
     getQuote: async () => { throw new MarketDataError('provider_unavailable', 'twelvedata', 'offline in test'); },
     health: () => ({ provider: 'twelvedata', state: 'closed', consecutiveFailures: 0 }),
@@ -88,6 +91,24 @@ describe('O18 runtime services (composition over the existing NEXUS services)', 
     const { services } = await build({ registerAapl: false });
     const [first] = await services.searchInstruments('AAPL');
     expect(first!.instrumentId).toBeNull();
+  });
+
+  it('registers an explicitly selected provider instrument and mapping idempotently without a seed script', async () => {
+    const { services, registry } = await build({ registerAapl: false });
+    const request = { providerSymbol: 'AAPL', validFrom: '1980-12-12T00:00:00.000Z', mic: 'XNAS', exchange: 'NASDAQ' };
+    const first = await services.registerInstrument(request);
+    const second = await services.registerInstrument(request);
+    expect(first.instrumentId).toMatch(/^ins_/);
+    expect(second.instrumentId).toBe(first.instrumentId);
+    expect(registry.list()).toHaveLength(1);
+    expect(registry.mappings()).toHaveLength(1);
+    expect(registry.mappings()[0]).toMatchObject({ provider: 'twelvedata', providerSymbol: 'AAPL', validFrom: '1980-12-12T00:00:00.000Z' });
+  });
+
+  it('demo quant fails closed before provider fetch or quant-run persistence', async () => {
+    const { services } = await build({ mode: 'demo' });
+    await expect(services.runQuant({ instrumentId: AAPL.instrumentId, interval: '1d', asOf: '2026-10-14T12:00:00.000Z' }))
+      .rejects.toMatchObject({ code: 'DATA_QUALITY_ERROR' });
   });
 
   it('without a configured provider every market call is DATA NOT CONNECTED, with no substitute data', async () => {
