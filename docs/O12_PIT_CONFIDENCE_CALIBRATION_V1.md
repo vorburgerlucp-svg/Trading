@@ -347,3 +347,23 @@ It does not:
 - unlock live trading
 
 Live Trading, Broker Orders and Physical Purchase remain LOCKED.
+
+## 22. Review amendments
+
+An independent review (`docs/HAIKU_O12_REVIEW_TASK.md`) found the following and changed the implementation. This section supersedes earlier wording where they differ.
+
+- Future rows are classified by `knownAt` alone. A row known after `fitAsOf` (or after the evaluation `asOf`) contributes only to `excludedFutureSampleCount`. Its outcome, confidence, label, fingerprint and observation id are not inspected, so such a row can neither refuse a fit nor change one (§5, §16). Every row must still be an object with a valid `observationId`, belong to the model, and carry a readable canonical `knownAt`. A row that cannot be placed in time cannot be classified, so it refuses the request whatever its time. This is the one deliberate exception to the future-row rule.
+- The fitted identity (`inputFingerprint`, `modelFingerprint`, `calibrationRunId`) does not include `excludedFutureSampleCount`. Adding a row known after `fitAsOf` therefore changes no identity (§16). The count is audit metadata. The verifier checks only that it is a non-negative integer. The excluded rows are not retained, so neither their number nor the completeness of the eligible set can be recomputed.
+- Evidence identity is the caller's `evidenceFingerprint`, scoped to model and target. Two rows with the same identity are one piece of evidence, whatever their `observationId` or `knownAt`. A repeat is refused in a fit and in an evaluation. Evaluation refuses fit evidence by that identity (§7, §13). Rows with identical content but distinct fingerprints are distinct evidence: the caller owns the identity.
+- An evaluation `asOf` before the model `fitAsOf` is refused, because the model did not exist yet (§14).
+- A probability is published only for a FITTED model, and only in a bin whose sample size meets `minimumSamplesPerBin`. Other bins report their counts with a null probability (§9, §10).
+- Coverage over zero eligible rows is null, not zero. Brier, mean-prediction and observed-rate metrics are null whenever no row is covered, and the mean and observed rates cover covered rows only (§12, review item 21).
+- Verification compares bins and identity lists by canonical hash, not by JSON key order. A store that reorders keys does not refuse a valid artifact.
+- `verifyPitCalibrationEvaluation(request, result)` recomputes an evaluation from its request. An evaluation result is therefore verifiable, given its request.
+
+Self-verification limits:
+
+- The verifier proves internal consistency. A forger who changes evidence and re-issues every hash produces a consistent model, and the verifier accepts it. Provenance needs an external anchor such as a seal (§20). This limit is pinned by a test.
+- `excludedFutureSampleCount` and the completeness of the eligible set cannot be verified (see above).
+- Probabilities are empirical frequencies of the fit evidence. They are not a guarantee of calibration out of sample.
+- Sample counts are bounded by the input length. Overflow is not a practical concern for V1 and is not separately guarded.
