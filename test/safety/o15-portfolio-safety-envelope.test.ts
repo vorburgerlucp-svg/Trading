@@ -679,6 +679,17 @@ describe('O15 review — pins that already hold', () => {
     expect(at('990.01').hardBreachReasons).toContain('adjusted daily loss reached bp limit');
   });
 
+  it('a drawdown half a basis point below the bp limit trips, because the drawdown basis point is rounded up', () => {
+    // peak 1000, current 985.05 => drawdown 14.95 CHF = 149.5 bp; the CHF limit is far away, so only the bp limit can trip
+    const result = evaluatePortfolioSafetyEnvelope(request({
+      portfolio: portfolio({ capital: capital(chf('985.05')) }),
+      policy: policy({ maxIntradayDrawdownChf: chf(1000), maxIntradayDrawdownBp: 150 }),
+    }));
+    expect(result.metrics.intradayDrawdownBp).toBe(150);
+    expect(result.state).toBe('TRIPPED');
+    expect(result.hardBreachReasons).toContain('intraday drawdown reached bp limit');
+  });
+
   it('peak equal to start and to current means zero drawdown', () => {
     const result = evaluatePortfolioSafetyEnvelope(request());
     expect(result.metrics.intradayDrawdownChf).toBe(chf(0));
