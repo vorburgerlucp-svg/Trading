@@ -727,7 +727,8 @@ describe('O14 review — quiz probes (RED)', () => {
   it('Q16 public view shares no mutable state with the source observation', () => {
     const src = observation();
     const quiz = buildPatternQuiz(src, quizPolicy({ revealChartContext: true }));
-    quiz.publicView.visibleEvidence.boundaries.neckline!.intercept = 'tampered';
+    // The public boundary key is positional now (line_1), so the shared-state check reads it under that key.
+    quiz.publicView.visibleEvidence.boundaries.line_1!.intercept = 'tampered';
     quiz.publicView.visibleEvidence.chartContext!.currentPhase = 'tampered';
     expect(src.boundaries.neckline!.intercept).toBe('100');
     expect(src.chartContext!.currentPhase).toBe('distribution');
@@ -778,12 +779,15 @@ describe('O14 review — pins that already hold', () => {
 
   it('future-only confirmation, invalidation and anchor values do not alter the visible quiz or its identity', () => {
     const base = observation();
+    // resolvedAt is null here: invalidation and resolution are mutually exclusive, so the future invalidation is the only terminal time.
     const a = buildPatternQuiz(observation({
       invalidatedAt: '2026-02-01T00:00:00.000Z',
+      resolvedAt: null,
       anchors: [...base.anchors, { ...base.anchors[0]!, role: 'future_point', time: '2026-03-01T00:00:00.000Z', confirmedAt: '2026-03-02T00:00:00.000Z' }],
     }), quizPolicy());
     const b = buildPatternQuiz(observation({
       invalidatedAt: '2026-04-01T00:00:00.000Z',
+      resolvedAt: null,
       anchors: [...base.anchors, { ...base.anchors[0]!, role: 'future_point', time: '2026-05-01T00:00:00.000Z', confirmedAt: '2026-05-02T00:00:00.000Z' }],
     }), quizPolicy());
     expect(b.publicView).toEqual(a.publicView);

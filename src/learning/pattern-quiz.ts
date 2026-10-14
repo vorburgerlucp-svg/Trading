@@ -125,9 +125,55 @@ function canonicalMs(value: unknown): number | null {
   return Number.isFinite(ms) && new Date(ms).toISOString() === value ? ms : null;
 }
 
+/** Exact decimal text as the Pattern Engine writes it (Decimal.toString, which may use an exponent for very small values). */
+const DECIMAL_TEXT = /^-?\d+(\.\d+)?(e[+-]?\d+)?$/i;
+
+function isDecimalText(value: unknown): boolean {
+  return typeof value === 'string' && DECIMAL_TEXT.test(value);
+}
+
+function isObject(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/**
+ * Lifecycle status against the timestamps it implies, as Pattern Engine lifecycle.ts and price-action.ts set them:
+ * c = confirmedAt is set, i = invalidatedAt is set, r = resolvedAt is set.
+ * Only applied to lifecycle quizzes, where the status is the answer.
+ */
+const LIFECYCLE_SHAPE: Partial<Record<PatternStatus, (c: boolean, i: boolean, r: boolean) => boolean>> = {
+  forming: (c, i, r) => !c && !i && !r,
+  retest_pending: (c, i, r) => !c && !i && !r,
+  confirmed: (c, i, r) => c && !i && !r,
+  target_active: (c, i, r) => c && !i && !r,
+  retest_confirmed: (c, i, r) => c && !i && !r,
+  completed: (c, i, r) => c && !i && r,
+  outcome_ambiguous: (c, i, r) => c && !i && r,
+  failed_breakout: (_c, i, r) => !i && r,
+  invalidated: (c, i, r) => !c && i && !r,
+  expired: (c, i, r) => !i && (!r || c),
+};
+
+/** The exact policy keys. An unknown key would otherwise be part of the quiz identity without being validated. */
+const QUIZ_POLICY_KEYS = [
+  'learnerLevel',
+  'mode',
+  'optionCount',
+  'revealChartContext',
+  'revealGeometryMetrics',
+  'revealLifecycleTimestampsAvailableByAsOfOnly',
+  'version',
+];
+
 function validatePolicy(raw: PatternQuizPolicy): PatternQuizPolicy {
   if (
     !raw ||
+    typeof raw !== 'object' ||
+    Object.keys(raw).sort().join('|') !== QUIZ_POLICY_KEYS.join('|') ||
     raw.version !== PATTERN_QUIZ_POLICY_VERSION ||
     !MODES.includes(raw.mode) ||
     !LEVELS.includes(raw.learnerLevel) ||
@@ -178,13 +224,48 @@ function validateObservation(observation: PatternObservation, mode: PatternQuizM
     if (timeMs === null || confirmedMs === null || confirmedMs < timeMs) {
       fail('INVALID_OBSERVATION', 'anchor timestamps are invalid');
     }
+    if (!isDecimalText(anchor.price)) fail('INVALID_OBSERVATION', 'anchor price must be exact decimal text');
   }
+  const roles = observation.anchors.map((anchor) => anchor.role);
+  if (new Set(roles).size !== roles.length) fail('INVALID_OBSERVATION', 'anchor roles must be unique');
+
+  // Values the quiz publishes must be the exact decimal text the engine writes, not arbitrary strings or objects.
+  if (!isObject(observation.boundaries) || Object.values(observation.boundaries).some((line) => !isObject(line) || !isDecimalText(line.intercept) || !isDecimalText(line.slope))) {
+    fail('INVALID_OBSERVATION', 'boundary lines must carry exact decimal intercept and slope');
+  }
+  if (!isObject(observation.geometryMetrics) || Object.values(observation.geometryMetrics).some((value) => !isDecimalText(value))) {
+    fail('INVALID_OBSERVATION', 'geometry metrics must be exact decimal text');
+  }
+  if (observation.confirmation.level !== null && !isDecimalText(observation.confirmation.level)) {
+    fail('INVALID_OBSERVATION', 'confirmation level must be exact decimal text or null');
+  }
+  if (!isDecimalText(observation.confirmation.buffer)) fail('INVALID_OBSERVATION', 'confirmation buffer must be exact decimal text');
+  if (observation.invalidation.level !== null && !isDecimalText(observation.invalidation.level)) {
+    fail('INVALID_OBSERVATION', 'invalidation level must be exact decimal text or null');
+  }
+
+  // Ordering and exclusivity that hold for every mode: nothing happens before the pattern is first seen, and the
+  // terminal states do not overlap.
+  const confirmedMs = observation.confirmedAt === null ? null : canonicalMs(observation.confirmedAt);
+  const invalidatedMs = observation.invalidatedAt === null ? null : canonicalMs(observation.invalidatedAt);
+  const resolvedMs = observation.resolvedAt === null ? null : canonicalMs(observation.resolvedAt);
+  if (confirmedMs !== null && confirmedMs < firstSeenMs) fail('INVALID_OBSERVATION', 'confirmation cannot precede the first sighting');
+  if (invalidatedMs !== null && invalidatedMs < firstSeenMs) fail('INVALID_OBSERVATION', 'invalidation cannot precede the first sighting');
+  if (observation.invalidatedAt !== null && observation.resolvedAt !== null) {
+    fail('INVALID_OBSERVATION', 'invalidation and resolution are mutually exclusive terminal times');
+  }
+  if (confirmedMs !== null && resolvedMs !== null && resolvedMs < confirmedMs) fail('INVALID_OBSERVATION', 'resolution cannot precede confirmation');
 
   if (mode === 'lifecycle') {
     for (const value of [observation.confirmedAt, observation.invalidatedAt, observation.resolvedAt]) {
       if (value !== null && Date.parse(value) > asOfMs) {
         fail('INVALID_OBSERVATION', 'lifecycle quiz cannot use a lifecycle fact known after asOf');
       }
+    }
+    // The status is the answer, so it must be the one the lifecycle timestamps at asOf imply.
+    const shape = LIFECYCLE_SHAPE[observation.status];
+    if (!shape || !shape(confirmedMs !== null, invalidatedMs !== null, resolvedMs !== null)) {
+      fail('INVALID_OBSERVATION', 'status ' + observation.status + ' contradicts the lifecycle timestamps at asOf');
     }
   }
   return asOfMs;
@@ -202,12 +283,16 @@ function visibleEvidenceOf(
 ): PatternQuizVisibleEvidence {
   const confirmationKnown =
     observation.confirmedAt !== null && Date.parse(observation.confirmedAt) <= asOfMs;
-  const hideDirection = policy.mode === 'direction';
+  // The breakout direction discriminates pattern families (resistance vs support breakout), so it is shown only where it
+  // is itself the question: the lifecycle mode. Pattern identification and direction hide it.
+  const showDirection = policy.mode === 'lifecycle';
 
+  // Role, boundary and metric names encode the answer (a "neckline" or "head" names a pattern), so the view uses positional
+  // labels. The numbers that carry the geometry (prices, times, slopes, metric values) stay.
   const anchors = observation.anchors
     .filter((anchor) => Date.parse(anchor.time) <= asOfMs && Date.parse(anchor.confirmedAt) <= asOfMs)
-    .map((anchor) => ({
-      role: anchor.role,
+    .map((anchor, index) => ({
+      role: 'point_' + (index + 1),
       kind: anchor.kind,
       price: anchor.price,
       time: anchor.time,
@@ -223,7 +308,7 @@ function visibleEvidenceOf(
     firstSeenAt: observation.firstSeenAt,
     anchors,
     confirmation: {
-      direction: confirmationKnown && !hideDirection ? observation.confirmation.direction : null,
+      direction: confirmationKnown && showDirection ? observation.confirmation.direction : null,
       level: confirmationKnown ? observation.confirmation.level : null,
       buffer: observation.confirmation.buffer,
       confirmedByBarTime:
@@ -232,16 +317,21 @@ function visibleEvidenceOf(
           ? observation.confirmation.confirmedByBarTime
           : null,
     },
-    invalidation: { ...observation.invalidation },
+    // The invalidation rule is a named answer clue ("close_above_head"); the invalidation level is the geometry and stays.
+    invalidation: { rule: 'withheld', level: observation.invalidation.level },
     boundaries: Object.fromEntries(
-      Object.entries(observation.boundaries).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+      Object.entries(observation.boundaries)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([, line], index) => ['line_' + (index + 1), { intercept: line.intercept, slope: line.slope }]),
     ),
     geometryMetrics: policy.revealGeometryMetrics
       ? Object.fromEntries(
-          Object.entries(observation.geometryMetrics).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+          Object.entries(observation.geometryMetrics)
+            .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+            .map(([, value], index) => ['metric_' + (index + 1), value]),
         )
       : null,
-    chartContext: policy.revealChartContext ? observation.chartContext : null,
+    chartContext: policy.revealChartContext && observation.chartContext !== null ? cloneJson(observation.chartContext) : null,
     lifecycleTimestamps: policy.revealLifecycleTimestampsAvailableByAsOfOnly
       ? {
           confirmedAt: knownAtOrNull(observation.confirmedAt, asOfMs),
@@ -289,18 +379,68 @@ function promptOf(mode: PatternQuizMode, level: LearnerLevel): string {
   return prefix + ' the lifecycle status known at the observation asOf.';
 }
 
-function explanationOf(mode: PatternQuizMode, answer: string, observation: PatternObservation): string {
+function explanationOf(mode: PatternQuizMode, answer: string, observationId: string, asOf: string): string {
   if (mode === 'pattern_identification') {
-    return 'The point-in-time geometry in observation ' + observation.patternObservationId + ' is classified as ' + answer + '.';
+    return 'The point-in-time geometry in observation ' + observationId + ' is classified as ' + answer + '.';
   }
   if (mode === 'direction') {
     return 'The observation records the point-in-time pattern direction as ' + answer + '.';
   }
-  return 'At ' + observation.asOf + ', the observation lifecycle status is ' + answer + '.';
+  return 'At ' + asOf + ', the observation lifecycle status is ' + answer + '.';
+}
+
+interface DerivedQuiz {
+  answerFingerprint: string;
+  inputFingerprint: string;
+  quizId: string;
+  options: PatternQuizOption[];
+  prompt: string;
+  explanation: string;
+}
+
+/**
+ * Every deterministic field of a quiz, from its source identity, policy, visible-evidence fingerprint and correct label.
+ * The builder and the verifier both use it, so a quiz whose fields were rewritten without re-deriving them does not match.
+ */
+function derivedOf(input: {
+  sourceObservationId: string;
+  sourceInstanceId: string;
+  sourceAsOf: string;
+  policy: PatternQuizPolicy;
+  visibleEvidenceFingerprint: string;
+  label: string;
+}): DerivedQuiz {
+  const { policy, label } = input;
+  const answerFingerprint = hashOf({
+    patternObservationId: input.sourceObservationId,
+    patternInstanceId: input.sourceInstanceId,
+    asOf: input.sourceAsOf,
+    mode: policy.mode,
+    label,
+  });
+  const inputFingerprint = hashOf({
+    engineVersion: PATTERN_QUIZ_VERSION,
+    sourceObservationId: input.sourceObservationId,
+    sourceInstanceId: input.sourceInstanceId,
+    sourceAsOf: input.sourceAsOf,
+    mode: policy.mode,
+    policy,
+    visibleEvidenceFingerprint: input.visibleEvidenceFingerprint,
+    answerFingerprint,
+  });
+  return {
+    answerFingerprint,
+    inputFingerprint,
+    quizId: 'pq_' + inputFingerprint.slice(0, 40),
+    options: optionsOf(label, policy.optionCount, inputFingerprint, policy.mode),
+    prompt: promptOf(policy.mode, policy.learnerLevel),
+    explanation: explanationOf(policy.mode, label, input.sourceObservationId, input.sourceAsOf),
+  };
 }
 
 function validateQuizStructure(quiz: PatternQuiz): void {
-  if (!quiz || quiz.engineVersion !== PATTERN_QUIZ_VERSION) fail('INVALID_QUIZ', 'quiz version is invalid');
+  if (!quiz || typeof quiz !== 'object' || !quiz.publicView || !quiz.answer || !quiz.policy) fail('INVALID_QUIZ', 'quiz is incomplete');
+  if (quiz.engineVersion !== PATTERN_QUIZ_VERSION) fail('INVALID_QUIZ', 'quiz version is invalid');
   if (quiz.publicView.quizId !== quiz.quizId) fail('INVALID_QUIZ', 'public view quiz id mismatch');
   if (quiz.publicView.engineVersion !== PATTERN_QUIZ_VERSION) fail('INVALID_QUIZ', 'public view version mismatch');
   const ids = quiz.publicView.options.map((o) => o.id);
@@ -309,6 +449,38 @@ function validateQuizStructure(quiz: PatternQuiz): void {
   if (quiz.publicView.options.filter((o) => o.id === quiz.answer.optionId && o.label === quiz.answer.label).length !== 1) {
     fail('INVALID_QUIZ', 'correct answer must appear exactly once in options');
   }
+
+  // Self-consistency: every deterministic field must re-derive from the quiz's own identity fields. This needs no source
+  // observation, so a rewrite of the answer, the options, the prompt or the evidence without re-deriving the fingerprints fails
+  // here. Reissuing every fingerprint is caught by verifyPatternQuiz, which recomputes from the source.
+  let policy: PatternQuizPolicy;
+  try {
+    policy = validatePolicy(quiz.policy);
+  } catch {
+    fail('INVALID_QUIZ', 'stored quiz policy is invalid');
+  }
+  if (quiz.publicView.mode !== policy.mode || quiz.publicView.learnerLevel !== policy.learnerLevel) {
+    fail('INVALID_QUIZ', 'public view mode or level does not match the policy');
+  }
+  if (hashOf(quiz.publicView.visibleEvidence) !== quiz.visibleEvidenceFingerprint) {
+    fail('INVALID_QUIZ', 'visible evidence does not match its fingerprint');
+  }
+  if (!vocabulary(policy.mode).includes(quiz.answer.label)) fail('INVALID_QUIZ', 'correct answer is outside the mode vocabulary');
+  const derived = derivedOf({
+    sourceObservationId: quiz.sourceObservationId,
+    sourceInstanceId: quiz.sourceInstanceId,
+    sourceAsOf: quiz.sourceAsOf,
+    policy,
+    visibleEvidenceFingerprint: quiz.visibleEvidenceFingerprint,
+    label: quiz.answer.label,
+  });
+  if (derived.quizId !== quiz.quizId || derived.inputFingerprint !== quiz.inputFingerprint) {
+    fail('INVALID_QUIZ', 'quiz identity does not re-derive from its fields');
+  }
+  if (derived.answerFingerprint !== quiz.answer.answerFingerprint) fail('INVALID_QUIZ', 'answer fingerprint does not re-derive from the answer');
+  if (hashOf(derived.options) !== hashOf(quiz.publicView.options)) fail('INVALID_QUIZ', 'options are not the deterministic option set');
+  if (derived.prompt !== quiz.publicView.prompt) fail('INVALID_QUIZ', 'prompt does not match its mode and level');
+  if (derived.explanation !== quiz.answer.explanation) fail('INVALID_QUIZ', 'explanation does not match the answer');
 }
 
 export function buildPatternQuiz(
@@ -320,51 +492,40 @@ export function buildPatternQuiz(
   const visibleEvidence = visibleEvidenceOf(observation, policy, asOfMs);
   const visibleEvidenceFingerprint = hashOf(visibleEvidence);
   const label = answerLabel(observation, policy.mode);
-  const answerFingerprint = hashOf({
-    patternObservationId: observation.patternObservationId,
-    patternInstanceId: observation.patternInstanceId,
-    asOf: observation.asOf,
-    mode: policy.mode,
-    label,
-  });
-  const inputFingerprint = hashOf({
-    engineVersion: PATTERN_QUIZ_VERSION,
+  const derived = derivedOf({
     sourceObservationId: observation.patternObservationId,
     sourceInstanceId: observation.patternInstanceId,
     sourceAsOf: observation.asOf,
-    mode: policy.mode,
     policy,
     visibleEvidenceFingerprint,
-    answerFingerprint,
+    label,
   });
-  const quizId = 'pq_' + inputFingerprint.slice(0, 40);
-  const options = optionsOf(label, policy.optionCount, inputFingerprint, policy.mode);
-  const correct = options.find((option) => option.label === label);
+  const correct = derived.options.find((option) => option.label === label);
   if (!correct) fail('INVALID_QUIZ', 'correct answer is missing from generated options');
 
   const quiz: PatternQuiz = {
-    quizId,
+    quizId: derived.quizId,
     engineVersion: PATTERN_QUIZ_VERSION,
-    inputFingerprint,
+    inputFingerprint: derived.inputFingerprint,
     policy,
     sourceObservationId: observation.patternObservationId,
     sourceInstanceId: observation.patternInstanceId,
     sourceAsOf: observation.asOf,
     visibleEvidenceFingerprint,
     publicView: {
-      quizId,
+      quizId: derived.quizId,
       engineVersion: PATTERN_QUIZ_VERSION,
       mode: policy.mode,
       learnerLevel: policy.learnerLevel,
-      prompt: promptOf(policy.mode, policy.learnerLevel),
-      options,
+      prompt: derived.prompt,
+      options: derived.options,
       visibleEvidence,
     },
     answer: {
       optionId: correct.id,
       label,
-      explanation: explanationOf(policy.mode, label, observation),
-      answerFingerprint,
+      explanation: derived.explanation,
+      answerFingerprint: derived.answerFingerprint,
     },
   };
   validateQuizStructure(quiz);
@@ -392,11 +553,19 @@ export function gradePatternQuiz(
   };
 }
 
+/**
+ * Recomputes the quiz from its source observation. A quiz carries its own policy, so a consumer that expects a specific policy
+ * passes it in: a quiz re-issued under another policy is then refused instead of verifying against its stored policy.
+ */
 export function verifyPatternQuiz(
   observation: PatternObservation,
   quiz: PatternQuiz,
+  expectedPolicy?: PatternQuizPolicy,
 ): void {
   validateQuizStructure(quiz);
+  if (expectedPolicy !== undefined && hashOf(quiz.policy) !== hashOf(validatePolicy(expectedPolicy))) {
+    fail('INVALID_QUIZ', 'quiz was built under a different policy than the expected one');
+  }
   let expected: PatternQuiz;
   try {
     expected = buildPatternQuiz(observation, quiz.policy);
