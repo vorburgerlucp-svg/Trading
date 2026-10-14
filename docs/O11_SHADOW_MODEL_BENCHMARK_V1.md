@@ -203,7 +203,7 @@ O11 refuses:
 - future outcome exposed before model output
 - inconsistent model/version evidence
 - tampered case evidence
-- non-deterministic evaluator output for identical case request
+- inconsistent evaluator/scorer identities or malformed fingerprints within a run
 
 ## 14. Comparison
 
@@ -279,7 +279,7 @@ O11 is measurement only.
 
 Live Trading, Broker Orders and Physical Purchase remain LOCKED.
 
-## 16. Review amendments
+## 20. Review amendments
 
 An independent review (`docs/HAIKU_O11_REVIEW_TASK.md`) found the following and changed the implementation. The behaviour below supersedes earlier wording in this document.
 
@@ -298,3 +298,4 @@ Known limits, unchanged on purpose:
 - Equal shrunk scores are ordered by model key. The order is deterministic but carries no evidence of superiority.
 - The registry accepts model names containing `/`, while the benchmark refuses such keys (fail-closed). Those models cannot be benchmarked.
 - Realized values placed inside `modelInput` cannot be detected structurally. Only the `outcome` field is isolated.
+- Evaluator nondeterminism across separate benchmark runs cannot be detected inside V1 because each historical case is evaluated exactly once per run. If the evaluator returns a different self-consistent output on a later run, the benchmark identity changes. Detecting a conflicting result for the same pre-output request requires an append-only benchmark store/request fingerprint and is deferred to persistence hardening.
