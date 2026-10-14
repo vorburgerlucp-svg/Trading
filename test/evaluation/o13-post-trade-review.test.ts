@@ -693,6 +693,153 @@ describe('O13 review — performance scores and classification (RED)', () => {
   });
 });
 
+// Isolated tests for the rules the mutation campaign found untested. Each one fails only through the rule it names: the trace
+// is otherwise consistent, so a mutation of that rule cannot be masked by another check.
+describe('O13 review — isolated rule tests (from the mutation campaign)', () => {
+  it('refuses a net result that is not a Rappen amount', async () => {
+    const base = await fixture();
+    const outcome = tradeOutcome(base.trace.decision.decisionId, { netResultChf: 78.5 as never });
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { outcome })))).toBe('INVALID_OUTCOME');
+  });
+
+  it('refuses an executed flag that is not a boolean', async () => {
+    const base = await fixture();
+    const outcome = tradeOutcome(base.trace.decision.decisionId, { executed: 'yes' as never });
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { outcome })))).toBe('INVALID_OUTCOME');
+  });
+
+  it('refuses a bullish stop that sits exactly at entry', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.decision.direction = 'bullish';
+    const outcome = tradeOutcome(base.trace.decision.decisionId, { stopLoss: Decimal.from('100') });
+    const evaluation = evaluateTrade(outcome, 'bullish');
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace, outcome, evaluation })))).toBe('INVALID_OUTCOME');
+  });
+
+  it('refuses a bullish target that sits exactly at entry', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.decision.direction = 'bullish';
+    const outcome = tradeOutcome(base.trace.decision.decisionId, { takeProfit: Decimal.from('100') });
+    const evaluation = evaluateTrade(outcome, 'bullish');
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace, outcome, evaluation })))).toBe('INVALID_OUTCOME');
+  });
+
+  it('refuses a record reasonCodes list that disagrees with the decision', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.record.reasonCodes = [...trace.record.reasonCodes, 'EXTRA_UNRECORDED_CODE'];
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('refuses decision and humanApproval that disagree on whether approval is required', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.decision.requiresHumanApproval = true;
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('refuses an approval that is required but not pending', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.decision.requiresHumanApproval = true;
+    trace.humanApproval = { required: true, status: 'not_required', reasons: ['test approval'] };
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('accepts evidence that becomes available exactly at asOf', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    const asOf = trace.decision.asOf;
+    trace.inputs.evidence = trace.inputs.evidence.map((item) =>
+      item.id === 'price-aapl' ? { ...item, observedAt: asOf, availableAt: asOf } : item,
+    );
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('NO_ERROR');
+  });
+
+  it('refuses a look-ahead item that is not listed as excluded', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.inputs.evidence = [...trace.inputs.evidence, lookAheadItem('future-unlisted')];
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('refuses evidence whose availability precedes observation even when the record cites it', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.inputs.evidence = [...trace.inputs.evidence, {
+      id: 'impossible-cited', type: 'news', source: 'test',
+      observedAt: '2026-10-01T07:59:00.000Z', availableAt: '2026-10-01T07:58:00.000Z', status: 'fresh', version: null,
+    }];
+    trace.record.evidenceRefs = [...trace.record.evidenceRefs, 'impossible-cited'];
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('refuses a usable evidence item that the record does not cite', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.inputs.evidence = [...trace.inputs.evidence, {
+      id: 'uncited-fresh', type: 'news', source: 'test',
+      observedAt: '2026-10-01T07:00:00.000Z', availableAt: '2026-10-01T07:00:00.000Z', status: 'fresh', version: null,
+    }];
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('counts a strong process at the policy minimum, inclusive', async () => {
+    const base = await fixture();
+    const trace = strongTrace(base.trace);
+    const count = buildPostTradeReview(requestOf(base, { trace })).processDiagnostics.evidenceCount;
+    const review = buildPostTradeReview(requestOf(base, {
+      trace,
+      policy: { version: POST_TRADE_REVIEW_POLICY_VERSION, minimumEvidenceCountForStrong: count },
+    }));
+    expect(review.processClassification).toBe('PROCESS_STRONG');
+  });
+
+  it('refuses a plan step whose provider diversity is unmet even when its model count is met', async () => {
+    const base = await fixture();
+    const trace = strongTrace(base.trace);
+    trace.plan.steps = trace.plan.steps.map((step) => (step.id === 'analysts' ? { ...step, minDistinctProviders: 2 } : step));
+    expect(buildPostTradeReview(requestOf(base, { trace })).processClassification).toBe('PROCESS_WEAK');
+  });
+
+  it('refuses a second successful attempt for the same step and model as ambiguous attribution', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.attempts.push({ ...trace.attempts[0]!, runId: 'duplicate-run' });
+    trace.record.modelRuns = [...trace.record.modelRuns, 'duplicate-run'];
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('reports REVIEW_MODEL_CONFIDENCE when a calibrated probability has a large binary error', async () => {
+    const base = await fixture({ recommendation: 'buy' });
+    const trace = structuredClone(base.trace);
+    trace.attempts[0]!.calibratedProbability = 0.1;
+    trace.attempts[0]!.calibrationMethod = 'histogram_binning@test';
+    const review = buildPostTradeReview(requestOf(base, { trace }));
+    expect(review.feedback.map((item) => item.code)).toContain('REVIEW_MODEL_CONFIDENCE');
+  });
+
+  it('reports only KEEP_PROCESS when no process-review trigger fires', async () => {
+    const base = await fixture();
+    const review = buildPostTradeReview(requestOf(base, { trace: strongTrace(base.trace) }));
+    expect(review.feedback.map((item) => item.code)).toEqual(['KEEP_PROCESS']);
+  });
+
+  it('treats a bullish move of exactly the flat band as not directionally correct', async () => {
+    const base = await fixture();
+    const flat = tradeOutcome(base.trace.decision.decisionId, { exitPrice: Decimal.from('100.5') });
+    expect(evaluateTrade(flat, 'bullish').directionCorrect).toBe(false);
+  });
+
+  it('treats a low equal to the stop as a stop hit', async () => {
+    const base = await fixture();
+    const touched = tradeOutcome(base.trace.decision.decisionId, { lowestPrice: Decimal.from('95'), stopLoss: Decimal.from('95') });
+    expect(evaluateTrade(touched, 'bullish').stop).toBe('hit_then_recovered');
+  });
+});
+
 describe('O13 review — the pure core has no side effects (guard)', () => {
   it('the review module imports no memory, registry, champion, risk, capital, broker or audit module at runtime', async () => {
     const { readFileSync } = await import('node:fs');
