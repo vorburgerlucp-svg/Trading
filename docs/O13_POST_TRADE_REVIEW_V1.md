@@ -372,3 +372,73 @@ Append-only sealed persistence is a follow-up before reviews drive automated lea
 O13 is analysis and learning feedback only.
 
 Live Trading, Broker Orders and Physical Purchase remain LOCKED.
+
+## 24. Independent review amendment (Haiku, branch `feature/o13-haiku-review-hardening-v1`)
+
+This section records what the independent review enforced on top of §19, how classification and calibration changed, and which trust limits remain. It is the authoritative description of V1 behaviour where it differs from the sections above.
+
+### 24.1 Additional refusals
+
+Trace:
+- evidence available after `asOf` is refused unless it is an excluded `not_yet_available` item; availability never precedes observation;
+- evidence ids are unique; a look-ahead id in `excludedLookAhead` must be `not_yet_available` evidence in the trace;
+- the record cites only usable evidence that resolves to the trace inputs, never quarantined evidence, and cites every usable item;
+- record and decision agree on `finalAction`, `reasonCodes` and the capital state reference; the capital state is read at or before `asOf`;
+- decision and `humanApproval` agree on whether approval is required, and the approval status matches it;
+- the record's model runs are exactly the runs of the recorded attempts;
+- a calibration method requires a probability and a probability requires a method; both must be within range.
+
+Outcome:
+- a trade cannot open before its decision;
+- a bullish stop sits below entry and a bullish target above it;
+- a bearish trade cannot carry a stop or target, because stop and target semantics are long-only;
+- fees are non-negative Rappen, net result is Rappen, `executed` is a boolean.
+
+Performance:
+- a stored score must equal the OutcomeEvaluator rule (`scoreAttempt`) for its attempt. Any other value in range is refused.
+
+Policy:
+- `minimumEvidenceCountForStrong` is at least 1.
+
+### 24.2 Process classification
+
+- Evidence impact on the decision makes the process `PROCESS_WEAK`, not merely not strong.
+- A quant assessment that contradicts the decision makes it `PROCESS_WEAK`.
+- A required human approval that is still pending caps the grade at `PROCESS_ACCEPTABLE`.
+- A plan step whose own model count or provider diversity is unmet by successful, non-shadow answers makes it `PROCESS_WEAK`.
+- `evidenceCount` counts usable evidence only. Look-ahead items are not counted.
+
+All process gates read the trace only. The realized outcome never enters process grading (§4).
+
+### 24.3 Calibration and attribution
+
+- A flat move (`|returnBp| <= FLAT_BAND_BP`) carries no direction label. It produces no Brier diagnostic and `directionCorrect` is `null`.
+- A calibrated probability is attributed, and enters `calibrationDiagnostics`, only for an analyst buy or sell on a non-flat move (`recommendation_direction_correct:v1`). For hold/no_trade, critic, counter-analyst and flat moves, the attribution's probability and method are `null`.
+- Raw confidence is never a probability (unchanged).
+
+### 24.4 Identity
+
+- Set-like lists are canonicalized by sorting and are not deduplicated. A duplicated entry changes the trace, so it changes the identity.
+- Routing fallbacks keep their order. The fallback chain decides which model is tried next, so reordering it is a different decision. Primaries and shadow models are set-like.
+- Plan steps and pipeline order, attempt order, model-run order and blackboard entry ids keep their order.
+
+### 24.5 Trust limits that remain
+
+1. **Quarantined evidence in the Brain.** The Brain lists quarantined external text in `record.evidenceRefs`. O13 refuses such traces (fail-closed). The fix belongs in the Brain, which this review did not change.
+2. **Executed outcome versus execution gate.** The real fixture trace is a `NO_ACTION` decision with `paperIntentAllowed: false`, and it carries an executed trade. §19's "inconsistent execution gate state" is not enforced yet, because enforcing it breaks the fixture-based tests. Until it is enforced, `executed` is reported, not verified against the trace.
+3. **Counterfactual net result.** For `executed: false`, `netResultChf` is supplied by the caller and is not reconciled with fees or prices. It is reported as given and must not be read as realized profit.
+4. **Trace authenticity.** The review binds the trace it was built from through fingerprints, and `verifyPostTradeReview` recomputes from the supplied source. Nothing seals or signs the trace. A consistent but fabricated trace is accepted; a reissued review without its source cannot be verified against the truth.
+5. **Reference timing.** Quant, scanner and backtest run ids carry no timestamps in the trace, so their point-in-time validity is not checked here.
+6. **Instrument binding.** The outcome's `instrumentId` is not bound to the decision's opportunity, because the trace holds no instrument id.
+7. **Directional scope.** Stop and target envelopes are checked for bullish and bearish decisions. Neutral and contested decisions pass without an envelope check.
+8. **Shared scoring rule.** The review reuses the evaluator's scoring rule, so an error in that rule is invisible to the review's own checks. It is covered by the evaluator's tests only.
+9. **Requirement without step.** A plan that requires a critic or counter-analysis but has no such step is graded `PROCESS_WEAK` through the observed-participation check, not through a plan-step shortfall.
+
+### 24.6 Test changes in the review
+
+No assertion was weakened or removed. Three existing tests and one shared helper were corrected, each because the setup violated an invariant the Brain itself keeps:
+- two look-ahead tests listed excluded ids that were not part of `inputs.evidence`; those items are now present as `not_yet_available` evidence;
+- the test with the arbitrary performance score `0.123` asserted that the score was copied through. It now asserts the evaluator's own score, and P7 refuses any other value;
+- `strongTrace` removes the critic and counter-analyst steps together with their requirements, and sets the analyst step to one model and one provider. The base fixture is a committee plan with two analysts of which one answered, so it is `PROCESS_WEAK` under the new shortfall rule.
+
+One regression test was added: routing fallback order changes the review id.
