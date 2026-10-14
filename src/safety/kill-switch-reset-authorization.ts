@@ -251,6 +251,66 @@ function validateApprovalArtifact(approval: KillSwitchResetApproval): void {
   }
 }
 
+export function verifyKillSwitchResetRequestArtifact(request: KillSwitchResetRequest): void {
+  validateRequestArtifact(request);
+}
+
+export function verifyKillSwitchResetApprovalArtifact(approval: KillSwitchResetApproval): void {
+  validateApprovalArtifact(approval);
+}
+
+export function verifyKillSwitchResetAuthorizationArtifact(authorization: KillSwitchResetAuthorization): void {
+  if (!authorization || authorization.version !== KILL_SWITCH_RESET_AUTHORIZATION_VERSION) {
+    fail('INVALID_AUTHORIZATION', 'authorization version is invalid');
+  }
+  if (
+    !/^ksrz_[0-9a-f]{40}$/.test(authorization.authorizationId) ||
+    !/^[0-9a-f]{64}$/.test(authorization.authorizationFingerprint) ||
+    !/^ksrr_[0-9a-f]{40}$/.test(authorization.requestId) ||
+    !/^ksra_[0-9a-f]{40}$/.test(authorization.approvalId) ||
+    !/^trip_[0-9a-f]{40}$/.test(authorization.tripId)
+  ) {
+    fail('INVALID_AUTHORIZATION', 'authorization identity fields are malformed');
+  }
+  canonicalMs(authorization.authorizedAt, 'INVALID_AUTHORIZATION', 'authorizedAt');
+  const expiresMs = canonicalMs(authorization.expiresAt, 'INVALID_AUTHORIZATION', 'expiresAt');
+  if (expiresMs < Date.parse(authorization.authorizedAt)) fail('INVALID_AUTHORIZATION', 'authorization expires before it exists');
+  validateActor(authorization.requester, 'INVALID_AUTHORIZATION', 'requester');
+  validateActor(authorization.approver, 'INVALID_AUTHORIZATION', 'approver');
+  if (authorization.requester.id === authorization.approver.id) fail('INVALID_AUTHORIZATION', 'authorization violates two-person rule');
+  if (
+    !/^pse_[0-9a-f]{40}$/.test(authorization.recoveryDecisionId) ||
+    !/^[0-9a-f]{64}$/.test(authorization.recoveryDecisionFingerprint) ||
+    authorization.applyAllowed !== false ||
+    authorization.liveOrderAllowed !== false ||
+    authorization.physicalPurchaseAllowed !== false
+  ) {
+    fail('INVALID_AUTHORIZATION', 'authorization safety fields are invalid');
+  }
+  const base = {
+    version: authorization.version,
+    requestId: authorization.requestId,
+    approvalId: authorization.approvalId,
+    tripId: authorization.tripId,
+    authorizedAt: authorization.authorizedAt,
+    expiresAt: authorization.expiresAt,
+    requester: authorization.requester,
+    approver: authorization.approver,
+    recoveryDecisionId: authorization.recoveryDecisionId,
+    recoveryDecisionFingerprint: authorization.recoveryDecisionFingerprint,
+    applyAllowed: authorization.applyAllowed,
+    liveOrderAllowed: authorization.liveOrderAllowed,
+    physicalPurchaseAllowed: authorization.physicalPurchaseAllowed,
+  };
+  const fingerprint = hashOf(base);
+  if (
+    authorization.authorizationFingerprint !== fingerprint ||
+    authorization.authorizationId !== 'ksrz_' + fingerprint.slice(0, 40)
+  ) {
+    fail('INVALID_AUTHORIZATION', 'authorization identity does not match its content');
+  }
+}
+
 export function buildKillSwitchResetRequest(
   sourceRequest: PortfolioSafetyRequest,
   input: {
