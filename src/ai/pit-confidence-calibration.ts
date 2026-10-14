@@ -326,6 +326,7 @@ function inputFingerprintOf(
   fitAsOf: string,
   policy: HistogramCalibrationPolicy,
   fitEvidenceFingerprints: readonly string[],
+  fitContentFingerprints: readonly string[],
 ): string {
   return hashOf({
     engine: PIT_CONFIDENCE_CALIBRATION_VERSION,
@@ -336,6 +337,7 @@ function inputFingerprintOf(
     fitAsOf,
     policy,
     fitEvidenceFingerprints,
+    fitContentFingerprints,
   });
 }
 
@@ -383,6 +385,7 @@ export function fitPitConfidenceCalibration(
     calibrationEvidenceFingerprint: one.calibrationEvidenceFingerprint,
   }));
   const fitEvidenceFingerprints = eligible.map((one) => one.evidenceIdentity);
+  const fitContentFingerprints = fitEvidence.map((one) => one.calibrationEvidenceFingerprint);
   const status: PitCalibrationStatus =
     fitEvidence.length >= policy.minimumFitSamples ? 'FITTED' : 'INSUFFICIENT_SAMPLES';
   const bins = binsOf(policy, fitEvidence, status);
@@ -393,6 +396,7 @@ export function fitPitConfidenceCalibration(
     request.fitAsOf,
     policy,
     fitEvidenceFingerprints,
+    fitContentFingerprints,
   );
   const partial: Omit<PitConfidenceCalibrationModel, 'modelFingerprint' | 'calibrationRunId'> = {
     engineVersion: PIT_CONFIDENCE_CALIBRATION_VERSION,
@@ -458,6 +462,7 @@ export function verifyPitConfidenceCalibrationModel(
   let previousId: string | null = null;
   const evidence: CalibrationFitEvidence[] = [];
   const expectedIdentities: string[] = [];
+  const expectedContentFingerprints: string[] = [];
   for (const one of model.fitEvidence) {
     if (!one || typeof one.observationId !== 'string' || one.observationId.trim() === '') bad('fit evidence observationId is invalid');
     if (previousId !== null && compareCodeUnit(one.observationId, previousId) <= 0) bad('fit evidence is not in canonical observationId order');
@@ -482,6 +487,7 @@ export function verifyPitConfidenceCalibrationModel(
     if (identities.has(identity)) bad('duplicate fit evidence: the same evidence appears twice');
     identities.add(identity);
     expectedIdentities.push(identity);
+    expectedContentFingerprints.push(contentFingerprint);
     evidence.push(one);
   }
 
@@ -499,6 +505,7 @@ export function verifyPitConfidenceCalibrationModel(
     model.fitAsOf,
     policy,
     expectedIdentities,
+    expectedContentFingerprints,
   );
   if (model.inputFingerprint !== inputFingerprint) bad('inputFingerprint does not match calibration inputs');
 
