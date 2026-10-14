@@ -335,6 +335,36 @@ describe('O14 Trading Tutor — RED', () => {
     expect(errorCode(() => buildTradingTutorLesson(source, tutorPolicy))).toBe('INVALID_REVIEW');
   });
 
+  it('refuses an internally inconsistent O13 process classification', () => {
+    const impossibleStrong = review({
+      processClassification: 'PROCESS_STRONG',
+      processDiagnostics: {
+        ...review().processDiagnostics,
+        riskPassed: false,
+        blockingFindingCount: 0,
+      },
+    });
+    expect(errorCode(() => buildTradingTutorLesson(impossibleStrong, tutorPolicy))).toBe('INVALID_REVIEW');
+
+    const impossibleWeak = review({
+      processClassification: 'PROCESS_WEAK',
+      processDiagnostics: {
+        ...review().processDiagnostics,
+        independentOpinionShortfall: 0,
+        planStepShortfallCount: 0,
+        majorFindingCount: 0,
+        blockingEvidenceImpactCount: 0,
+        criticRequired: false,
+        criticObserved: false,
+        counterAnalysisRequired: false,
+        counterAnalysisObserved: false,
+        quantStatus: 'confirmed',
+      },
+      feedback: [feedback('KEEP_PROCESS')],
+    });
+    expect(errorCode(() => buildTradingTutorLesson(impossibleWeak, tutorPolicy))).toBe('INVALID_REVIEW');
+  });
+
   it('lesson verifier detects tampering and lesson has no execution-command field', () => {
     const source = review();
     const lesson = buildTradingTutorLesson(source, tutorPolicy);
@@ -395,6 +425,35 @@ describe('O14 Pattern Quiz — RED', () => {
     });
     expect(JSON.stringify(quiz.publicView)).not.toContain('2026-01-12T00:00:00.000Z');
     expect(JSON.stringify(quiz.publicView)).not.toContain('2026-01-20T00:00:00.000Z');
+  });
+
+  it('future-only lifecycle changes do not alter the visible quiz or its identity', () => {
+    const a = observation({
+      confirmedAt: '2026-01-12T00:00:00.000Z',
+      resolvedAt: '2026-01-20T00:00:00.000Z',
+      confirmation: {
+        direction: 'down',
+        level: '100',
+        buffer: '0.5',
+        confirmedByBarTime: '2026-01-12T00:00:00.000Z',
+      },
+    });
+    const b = observation({
+      confirmedAt: '2026-02-12T00:00:00.000Z',
+      resolvedAt: '2026-03-20T00:00:00.000Z',
+      confirmation: {
+        direction: 'up',
+        level: '999',
+        buffer: '0.5',
+        confirmedByBarTime: '2026-02-12T00:00:00.000Z',
+      },
+    });
+    const qa = buildPatternQuiz(a, quizPolicy({ mode: 'pattern_identification' }));
+    const qb = buildPatternQuiz(b, quizPolicy({ mode: 'pattern_identification' }));
+
+    expect(qb.publicView).toEqual(qa.publicView);
+    expect(qb.quizId).toBe(qa.quizId);
+    expect(qb.inputFingerprint).toBe(qa.inputFingerprint);
   });
 
   it('visible payload never serializes target outcome or the complete source observation', () => {
