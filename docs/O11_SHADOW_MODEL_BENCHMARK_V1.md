@@ -278,3 +278,23 @@ Independent review should specifically attack:
 O11 is measurement only.
 
 Live Trading, Broker Orders and Physical Purchase remain LOCKED.
+
+## 16. Review amendments
+
+An independent review (`docs/HAIKU_O11_REVIEW_TASK.md`) found the following and changed the implementation. The behaviour below supersedes earlier wording in this document.
+
+- Results are verified. `verifyShadowModelBenchmarkResult` recomputes every fingerprint a result states (case, output, score, case set and identity), the sample size, the mean and shrunk scores, the gate and `gateAsOf` from the case evidence alone. A benchmark verifies its own output before returning it, and `compareShadowBenchmarks` verifies every input before comparing. A result that fails verification is refused with `INVALID_RESULT`.
+- Each case result carries the fields its `caseFingerprint` binds: `asOf`, `domain`, `subtask`, `modelInputFingerprint`, `outcomeFingerprint` and `knownAt`.
+- Availability is point-in-time. An observation becomes available at `max(asOf, knownAt)`, where `knownAt` is the outcome's `knownAt` (a canonical UTC instant that every outcome must carry). The gate is evaluated at the latest availability, recorded as `gateAsOf`. The shrinkage formula and `shadowExitGate` are unchanged. The statistics run over the benchmark's own in-process evidence store, not `NexusMemory`, so a benchmark writes no performance record to shared memory.
+- Payloads must be exactly what their fingerprints bind. `modelInput` and `outcome` may contain only plain JSON objects and dense arrays of finite numbers, strings, booleans and null, with enumerable data properties. Other values (dates, bigints, `undefined`, functions, getters, class instances, proxies, cycles, symbols, NaN and infinities) are refused with `INVALID_CASES`.
+- Identical evidence counts once. Two cases with the same `asOf`, `domain`, `subtask`, input fingerprint and outcome fingerprint are refused, whatever their case ids.
+- Times are canonical. `asOf` and `knownAt` must be ISO UTC instants with milliseconds and a `Z`. Other spellings of the same instant are refused.
+- Model keys may not contain whitespace or control characters. Policy errors use the code `INVALID_POLICY`.
+
+Known limits, unchanged on purpose:
+
+- Fingerprints bind consistency; they do not authenticate. A scorer or evaluator that returns self-consistent output is accepted, so the scores are only as trustworthy as the scorer.
+- The result has no registry reference, so the registry entry that was measured cannot be proven from the result (section 9 asks for one).
+- Equal shrunk scores are ordered by model key. The order is deterministic but carries no evidence of superiority.
+- The registry accepts model names containing `/`, while the benchmark refuses such keys (fail-closed). Those models cannot be benchmarked.
+- Realized values placed inside `modelInput` cannot be detected structurally. Only the `outcome` field is isolated.
