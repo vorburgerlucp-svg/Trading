@@ -6,10 +6,12 @@ import {
   applyFittedCalibration,
   evaluatePitConfidenceCalibration,
   fitPitConfidenceCalibration,
+  verifyPitCalibrationEvaluation,
   verifyPitConfidenceCalibrationModel,
   type CalibrationObservation,
   type HistogramCalibrationPolicy,
   type PitCalibrationRequest,
+  type PitConfidenceCalibrationModel,
 } from '../../src/ai/pit-confidence-calibration.js';
 import { modelKey } from '../../src/ai/model-types.js';
 import { hashOf } from '../../src/persistence/canonical-json.js';
@@ -482,5 +484,219 @@ describe('O12 point-in-time confidence calibration — RED', () => {
       calibratedProbability: null,
       calibrationMethod: null,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Independent review probes (RED). Each probe names the review item it attacks. Guards pin behaviour that already holds.
+// ---------------------------------------------------------------------------
+
+const FUTURE = '2026-03-01T00:00:00.000Z';
+
+function codeOf(run: () => unknown): string {
+  try {
+    run();
+    return 'NO_ERROR';
+  } catch (error) {
+    return error instanceof PitConfidenceCalibrationError ? error.code : 'UNCLASSIFIED: ' + String(error);
+  }
+}
+
+/** Reverses every object's key order, as a store that sorts keys (JSONB) would. The content is unchanged. */
+function reverseKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(reverseKeys);
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value).reverse()) out[key] = reverseKeys((value as Record<string, unknown>)[key]);
+    return out;
+  }
+  return value;
+}
+
+describe('O12 review — future rows are classified by knownAt only (RED)', () => {
+  it('R1 adding a future-known row with identical eligible evidence does not change the fit identity (doc §16)', () => {
+    const base = fitPitConfidenceCalibration(request());
+    const withFuture = fitPitConfidenceCalibration(request({ observations: [...request().observations, observation('future', 0.9, 0, { knownAt: FUTURE })] }));
+    expect(withFuture.excludedFutureSampleCount).toBe(1);
+    expect(withFuture.inputFingerprint).toBe(base.inputFingerprint);
+    expect(withFuture.modelFingerprint).toBe(base.modelFingerprint);
+    expect(withFuture.calibrationRunId).toBe(base.calibrationRunId);
+  });
+
+  it('R2 malformed future-known rows cannot refuse the fit or change it (doc §5, §16)', () => {
+    const base = fitPitConfidenceCalibration(request());
+    const malformed: CalibrationObservation[] = [
+      observation('future-label', 0.9, 0, { knownAt: FUTURE, outcomeLabel: 2 as never }),
+      observation('future-confidence', 1.5, 1, { knownAt: FUTURE }),
+      observation('future-fingerprint', 0.5, 1, { knownAt: FUTURE, evidenceFingerprint: 'short' }),
+      observation('future-backwards', 0.5, 1, { asOf: '2026-03-05T00:00:00.000Z', knownAt: '2026-03-02T00:00:00.000Z' }),
+    ];
+    for (const row of malformed) {
+      const fit = fitPitConfidenceCalibration(request({ observations: [...request().observations, row] }));
+      expect(fit.inputFingerprint, row.observationId).toBe(base.inputFingerprint);
+      expect(fit.excludedFutureSampleCount, row.observationId).toBe(1);
+    }
+  });
+
+  it('R4 a future row repeating an eligible evidence fingerprint neither inflates nor refuses the fit', () => {
+    const base = fitPitConfidenceCalibration(request());
+    const repeated = observation('future-copy', 0.1, 0, { knownAt: FUTURE, evidenceFingerprint: evidenceFingerprint('a') });
+    const fit = fitPitConfidenceCalibration(request({ observations: [...request().observations, repeated] }));
+    expect(fit.eligibleSampleSize).toBe(base.eligibleSampleSize);
+    expect(fit.inputFingerprint).toBe(base.inputFingerprint);
+  });
+
+  it('R12 a future row repeating an eligible observation id does not refuse the fit', () => {
+    expect(codeOf(() => fitPitConfidenceCalibration(request({ observations: [...request().observations, observation('a', 0.5, 1, { knownAt: FUTURE })] })))).toBe('NO_ERROR');
+  });
+
+  it('R13 an evaluation row known after the evaluation instant is excluded even when malformed', () => {
+    const fit = fitPitConfidenceCalibration(request());
+    const evaluation = evaluatePitConfidenceCalibration({
+      model: fit,
+      asOf: '2026-04-01T00:00:00.000Z',
+      observations: [
+        observation('future-eval', 0.8, 2 as never, { asOf: '2026-04-02T00:00:00.000Z', knownAt: '2026-05-01T00:00:00.000Z' }),
+      ],
+    });
+    expect(evaluation).toMatchObject({ eligibleSampleSize: 0, excludedFutureSampleCount: 1 });
+  });
+});
+
+describe('O12 review — evidence identity and reuse (RED)', () => {
+  it('R6 the same evidence fingerprint restated with another knownAt is one piece of evidence, not two', () => {
+    const restated = observation('a-restated', 0.1, 0, { knownAt: '2026-01-03T12:00:00.000Z', evidenceFingerprint: evidenceFingerprint('a') });
+    expect(codeOf(() => fitPitConfidenceCalibration(request({ observations: [observation('a', 0.1, 0), restated] })))).toBe('INVALID_OBSERVATIONS');
+  });
+
+  it('R7 fit evidence reused in an evaluation with a changed knownAt is refused (doc §13)', () => {
+    const fit = fitPitConfidenceCalibration(request());
+    const reused = { ...request().observations[0]!, observationId: 'renamed', knownAt: '2026-01-20T12:00:00.000Z' };
+    expect(
+      codeOf(() => evaluatePitConfidenceCalibration({ model: fit, asOf: '2026-03-01T00:00:00.000Z', observations: [reused] })),
+    ).toBe('FIT_EVIDENCE_REUSE');
+  });
+
+  it('R5 an evaluation asOf before the model fitAsOf is refused: the model did not exist yet (doc §14)', () => {
+    const fit = fitPitConfidenceCalibration(request());
+    const early = observation('eval-early', 0.2, 0, {
+      asOf: '2026-01-05T00:00:00.000Z',
+      knownAt: '2026-01-10T00:00:00.000Z',
+      evidenceFingerprint: evidenceFingerprint('eval-early'),
+    });
+    expect(codeOf(() => evaluatePitConfidenceCalibration({ model: fit, asOf: '2026-01-15T00:00:00.000Z', observations: [early] }))).toBe('INVALID_TIME');
+  });
+});
+
+describe('O12 review — no invented probabilities or quality (RED)', () => {
+  it('R8 an INSUFFICIENT_SAMPLES model exposes no bin probabilities (doc §10: no model is fabricated)', () => {
+    const result = fitPitConfidenceCalibration(request({ observations: [observation('one', 0.8, 1)], policy: { ...policy, minimumFitSamples: 2 } }));
+    expect(result.status).toBe('INSUFFICIENT_SAMPLES');
+    expect(result.bins.every((bin) => bin.probability === null)).toBe(true);
+  });
+
+  it('R9 zero eligible evaluation rows give a null coverage rate, not an invented zero (review item 21)', () => {
+    const fit = fitPitConfidenceCalibration(request());
+    const evaluation = evaluatePitConfidenceCalibration({
+      model: fit,
+      asOf: '2026-04-01T00:00:00.000Z',
+      observations: [observation('future-eval', 0.8, 1, { asOf: '2026-04-02T00:00:00.000Z', knownAt: '2026-05-01T00:00:00.000Z' })],
+    });
+    expect(evaluation).toMatchObject({ eligibleSampleSize: 0, coverageRate: null, brierScore: null });
+  });
+});
+
+describe('O12 review — self-verification of artifacts (RED)', () => {
+  it('R10 a serialized artifact whose keys a store reordered still verifies (its content is unchanged)', () => {
+    const result = fitPitConfidenceCalibration(request());
+    expect(() => verifyPitConfidenceCalibrationModel(reverseKeys(result) as PitConfidenceCalibrationModel)).not.toThrow();
+  });
+
+  it('R11 an evaluation result verifies against its request, and a tampered metric is refused', () => {
+    const fit = fitPitConfidenceCalibration(request());
+    const evaluationRequest = {
+      model: fit,
+      asOf: '2026-04-01T00:00:00.000Z',
+      observations: [
+        observation('eval-low', 0.2, 0, { asOf: '2026-03-01T00:00:00.000Z', knownAt: '2026-03-02T00:00:00.000Z', evidenceFingerprint: evidenceFingerprint('eval-low') }),
+      ],
+    };
+    const evaluation = evaluatePitConfidenceCalibration(evaluationRequest);
+    expect(() => verifyPitCalibrationEvaluation(evaluationRequest, evaluation)).not.toThrow();
+    expect(codeOf(() => verifyPitCalibrationEvaluation(evaluationRequest, { ...evaluation, brierScore: 0 }))).toBe('INVALID_CALIBRATION_MODEL');
+  });
+});
+
+describe('O12 review — boundaries, numerics and time inclusion (guards)', () => {
+  it('G1 every interior edge is lower-inclusive, the last bin includes 1, and a value just below an edge stays in the lower bin', () => {
+    const edges = [0, 0.2, 0.4, 0.6, 0.8, 1];
+    const wide = { ...policy, binEdges: edges, minimumFitSamples: 1, minimumSamplesPerBin: 1 };
+    const atEdges = fitPitConfidenceCalibration(
+      request({
+        policy: wide,
+        observations: [observation('e0', 0, 0), observation('e1', 0.2, 0), observation('e2', 0.4, 0), observation('e3', 0.6, 0), observation('e4', 0.8, 0), observation('one', 1, 1)],
+      }),
+    );
+    expect(atEdges.bins.map((bin) => bin.sampleSize)).toEqual([1, 1, 1, 1, 2]);
+
+    const justBelow = fitPitConfidenceCalibration(
+      request({ policy: wide, observations: [observation('below', 0.19999999999999998, 1)] }),
+    );
+    expect(justBelow.bins.map((bin) => bin.sampleSize)).toEqual([1, 0, 0, 0, 0]);
+  });
+
+  it('G2 -0 is binned as 0, and NaN, Infinity and out-of-range confidences are refused', () => {
+    const fit = fitPitConfidenceCalibration(request({ observations: [observation('zero', -0, 0), observation('one', 0.9, 1)] }));
+    expect(fit.bins[0]!.sampleSize).toBe(1);
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -0.000001, 1.000001]) {
+      expect(codeOf(() => fitPitConfidenceCalibration(request({ observations: [observation('x', bad, 1)] }))), String(bad)).toBe('INVALID_OBSERVATIONS');
+    }
+  });
+
+  it('G3 a populated bin with one positive in three reports exactly 1/3 and verifies', () => {
+    const fit = fitPitConfidenceCalibration(
+      request({
+        observations: [observation('a', 0.1, 1), observation('b', 0.2, 0), observation('c', 0.3, 0)],
+        policy: { ...policy, minimumFitSamples: 3, minimumSamplesPerBin: 1 },
+      }),
+    );
+    expect(fit.bins[0]!.probability).toBe(1 / 3);
+    expect(() => verifyPitConfidenceCalibrationModel(fit)).not.toThrow();
+  });
+
+  it('G4 more than the bounded number of bins is refused', () => {
+    const edges = Array.from({ length: 102 }, (_, index) => index / 101);
+    expect(codeOf(() => fitPitConfidenceCalibration(request({ policy: { ...policy, binEdges: edges } })))).toBe('INVALID_POLICY');
+  });
+
+  it('G5 an outcome known one millisecond after fitAsOf is excluded', () => {
+    const fit = fitPitConfidenceCalibration(request({ observations: [...request().observations, observation('late', 0.9, 0, { knownAt: '2026-02-01T00:00:00.001Z' })] }));
+    expect(fit.excludedFutureSampleCount).toBe(1);
+  });
+
+  it('G6 an evaluation outcome known exactly at evaluation asOf is covered; one millisecond later it is excluded', () => {
+    const fit = fitPitConfidenceCalibration(request());
+    const evaluation = evaluatePitConfidenceCalibration({
+      model: fit,
+      asOf: '2026-03-02T00:00:00.000Z',
+      observations: [
+        observation('at-asof', 0.8, 1, { asOf: '2026-03-01T00:00:00.000Z', knownAt: '2026-03-02T00:00:00.000Z', evidenceFingerprint: evidenceFingerprint('at-asof') }),
+        observation('later', 0.8, 1, { asOf: '2026-03-01T00:00:00.000Z', knownAt: '2026-03-02T00:00:00.001Z', evidenceFingerprint: evidenceFingerprint('later') }),
+      ],
+    });
+    expect(evaluation).toMatchObject({ eligibleSampleSize: 1, excludedFutureSampleCount: 1 });
+  });
+
+  it('G7 a row that belongs to another model is refused even when it is in the future (a contract error, not a time error)', () => {
+    expect(codeOf(() => fitPitConfidenceCalibration(request({ observations: [...request().observations, observation('other', 0.9, 0, { knownAt: FUTURE, modelKey: OTHER_MODEL })] })))).toBe('INVALID_OBSERVATIONS');
+  });
+
+  it('G8 a future row whose knownAt cannot be read is refused: it cannot be placed in time', () => {
+    expect(codeOf(() => fitPitConfidenceCalibration(request({ observations: [...request().observations, observation('future-time', 0.9, 0, { knownAt: 'Mar 1 2026' })] })))).toBe('INVALID_TIME');
+  });
+
+  it('G9 a non-canonical evaluation asOf is refused', () => {
+    const fit = fitPitConfidenceCalibration(request());
+    expect(codeOf(() => evaluatePitConfidenceCalibration({ model: fit, asOf: '2026-03-02', observations: [] }))).toBe('INVALID_TIME');
   });
 });

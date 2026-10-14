@@ -524,6 +524,14 @@ export function applyFittedCalibration(
   };
 }
 
+/** Recomputes an evaluation from its request and compares it with the stored result (O12 review; not implemented yet). */
+export function verifyPitCalibrationEvaluation(
+  _request: CalibrationEvaluationRequest,
+  _result: CalibrationEvaluationResult,
+): void {
+  throw new Error('not implemented');
+}
+
 export function evaluatePitConfidenceCalibration(
   request: CalibrationEvaluationRequest,
 ): CalibrationEvaluationResult {
