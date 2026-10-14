@@ -343,3 +343,82 @@ Persistent learner history, spaced repetition and mastery scoring are follow-up 
 O14 is educational only.
 
 Live Trading, Broker Orders and Physical Purchase remain LOCKED.
+
+## 24. Independent review amendment (Haiku, branch `feature/o14-haiku-review-hardening-v1`)
+
+This section records what the independent review enforced on top of §11, §16, §17 and §19, which leakage clues it removed and why, and which trust limits remain. Where it differs from the sections above, this section is the authoritative description of V1.
+
+### 24.1 Tutor refusals
+
+The tutor reproduces the O13 classification from the embedded diagnostics and policy, and it re-derives the outcome class from the embedded return:
+- the outcome class must equal the class of `returnBp` against O13's flat band (`FLAT_BAND_BP`);
+- the process class must equal the O13 rule applied to the diagnostics, including the pending-approval cap;
+- process diagnostics must be non-negative integers, flags must be booleans, the execution locks must remain `false`, and the quant and approval statuses must be in their vocabularies;
+- every feedback item must carry a known O13 code, a known severity and basis, string references and an explanation; an empty feedback list is refused, since O13 always emits at least `KEEP_PROCESS`;
+- `KEEP_PROCESS` cannot accompany a weak or blocked process;
+- a calibration diagnostic must name the supported binary target, and its Brier contribution must equal `(probability − label)²`;
+- the policy accepts exactly its documented keys.
+
+Feedback is mapped to categories only when the code is known; an unknown code is a refusal, never a silent drop. The fallback that invented a `PROCESS_DISCIPLINE` lesson for an empty category list was removed: after validation the category list is never empty.
+
+`verifyTradingTutorLesson(review, lesson, expectedPolicy?)` takes an optional expected policy. A consumer that expects a policy passes it in, and a lesson re-issued under another policy is refused.
+
+### 24.2 Quiz validation
+
+Lifecycle quizzes (where the status is the answer) require the status to be the one the lifecycle timestamps at `asOf` imply:
+
+| status | confirmedAt | invalidatedAt | resolvedAt |
+|---|---|---|---|
+| forming, retest_pending | null | null | null |
+| confirmed, target_active, retest_confirmed | set | null | null |
+| completed, outcome_ambiguous | set | null | set |
+| failed_breakout | any | null | set |
+| invalidated | null | set | null |
+| expired | any | null | null, or set only with confirmedAt set |
+
+These shapes are taken from Pattern Engine `lifecycle.ts` and `price-action.ts`. The `failed_breakout` and `retest_pending` rows reflect that a retest can fail or wait before any confirmation.
+
+All modes refuse: invalidation and resolution set together (they are mutually exclusive terminal times in the engine); resolution before confirmation; confirmation or invalidation before the first sighting; duplicate anchor roles; a price, boundary line, metric, confirmation level or buffer, or invalidation level that is not exact decimal text (the engine's `Decimal.toString` form, including exponent notation); a malformed boundaries container, reported as a classified refusal.
+
+The quiz policy accepts exactly its documented keys.
+
+### 24.3 Leakage clues removed from the public view
+
+The rule is: a field is a leak when its name or value is the answer, or a deterministic function of the answer alone. Geometry is evidence and stays.
+
+- **Anchor roles** (`head`, `left_shoulder`, `retest_touch`) name the pattern. They become positional labels (`point_1`, …). The anchor price, time, confirmation time and pivot kind (`high`/`low`) stay: the kind is geometry the learner needs to identify a shape.
+- **Boundary names** (`neckline`, `breakUp`, `failUpAfterDown`) name the pattern or its direction. They become positional labels (`line_1`, …). The intercept and slope stay.
+- **Geometry metric names** (`retestBarsAfterBreakout`, `symmetry`) name the pattern. They become positional labels (`metric_1`, …). The metric values stay.
+- **The invalidation rule** (`close_above_head`, `final_close_beyond_failure_boundary`) is withheld. The invalidation level stays.
+- **The confirmation direction** is shown only in the lifecycle mode. In pattern identification it discriminates the breakout families (resistance versus support breakout), and in direction mode it is the answer's neighbour. Lifecycle timestamps known by `asOf` stay in the lifecycle mode: they are the evidence from which the status follows.
+- **Chart context** remains a policy-controlled context field (`revealChartContext`). Its point-in-time validity belongs to the chart-context engine, which O14 does not re-check.
+- **Shared state**: the public view copies the boundary values and the chart context, so editing a quiz cannot edit its source observation.
+
+Hidden fields (the answer label, the explanation, the answer fingerprint) remain only in the internal `answer`, and a test pins that the explanation never appears in `publicView`.
+
+### 24.4 Quiz identity and verification
+
+- Every deterministic field (quiz id, input and answer fingerprints, options, prompt, explanation) is derived by one function that the builder and the verifier share.
+- `validateQuizStructure`, which `gradePatternQuiz` also calls, re-derives those fields from the quiz's own identity fields and checks the visible-evidence fingerprint. A rewrite of the answer, the options, the prompt, the explanation or the evidence without re-deriving the fingerprints is refused without needing the source.
+- `verifyPatternQuiz(observation, quiz, expectedPolicy?)` recomputes the whole quiz from its source. A consistent quiz re-issued from a different observation is refused.
+
+### 24.5 Point-in-time facts verified upstream
+
+- `buildPitView` (`src/patterns/pit-view.ts`) excludes every bar whose start is at or after `asOf`. The run input fingerprint is computed from that point-in-time view, so `patternRunId` does not change with future bars.
+- The lifecycle walk runs over bars before `asOf`, so the observation status and its timestamps are point-in-time when the observation is produced by the engine at its `asOf`.
+- `patternObservationId` hashes the status and the run fingerprint. Both are point-in-time, so the quiz identity does not couple to future values through the observation id.
+
+O14 defends in depth against observations whose fields are later than their `asOf`, for example stored or hand-built observations. It does not depend on the engine to have done so.
+
+### 24.6 Trust limits that remain
+
+1. **Tutor rederivation duplicates O13.** The tutor reproduces O13's process rule in its own code, because O13 does not export a pure classifier. If one copy changes and the other does not, the tutor refuses valid reviews or accepts invalid ones. Recommended follow-up: export one pure classifier from O13 and use it in both places.
+2. **Tutor provenance.** The tutor checks a review against its own embedded diagnostics. It cannot prove the review came from a real decision. A review re-issued with consistent diagnostics passes. Provenance requires `verifyPostTradeReview` against the source trace, which is O13's responsibility.
+3. **Grading trust.** `gradePatternQuiz` checks the quiz's self-consistency only. A quiz re-issued with every fingerprint re-derived passes grading. A consumer that scores learners must call `verifyPatternQuiz` against the source observation first.
+4. **Policy trust.** `verifyPatternQuiz` and `verifyTradingTutorLesson` verify against the policy stored in the artifact unless the consumer passes the expected policy. A consumer that does not pass one accepts any valid policy.
+5. **Geometry is not timestamped.** Boundary lines, metric values and the invalidation level carry no time of their own in `PatternObservation`. O14 cannot prove from the observation alone that they were computed as of `asOf`. It relies on the engine's point-in-time view (see §24.5).
+6. **Chart context** is passed through when its policy is enabled. Its point-in-time validity is not checked here.
+7. **Distractor quality.** Distractors are drawn from the full mode vocabulary, so a chart pattern can be offered a candlestick name. That is a quality issue, not a leak. Pattern family could be used to restrict the vocabulary; V1 does not.
+8. **Outcome-bias wording** is pinned by a matrix over every process and outcome combination. It is not semantic review: a new sentence template needs a new matrix entry.
+
+No field in any artifact can place, route, size or cancel an order. Live Trading, Broker Orders and Physical Purchase remain LOCKED.
