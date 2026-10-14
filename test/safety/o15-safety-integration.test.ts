@@ -122,6 +122,13 @@ describe('O15 trusted integration layer', () => {
     await expect(RiskDayTracker.open(DAY_START, store)).rejects.toMatchObject({ code: 'INVALID_DAY' });
   });
 
+  it('classifies a malformed persisted trip timestamp instead of leaking a Date exception', async () => {
+    const store = await PortfolioKillSwitchStore.open();
+    await expect(store.latch({ ...trip(), trippedAt: 'not-a-time' })).rejects.toSatisfy(
+      (error: unknown) => error instanceof PortfolioKillSwitchStoreError && error.code === 'INVALID_STATE',
+    );
+  });
+
   it('stores one monotonic trip and exposes no reset path', async () => {
     const store = await PortfolioKillSwitchStore.open();
     expect(store.current().status).toBe('ARMED');
@@ -177,6 +184,7 @@ describe('O15 trusted integration layer', () => {
     );
     expect(first.state).toBe('TRIPPED');
     expect(switchStore.current().tripId).toBe(first.killSwitch.tripId);
+    expect(first.killSwitch.triggeringDecisionFingerprint).toBe(switchStore.current().triggeringDecisionFingerprint);
 
     const originalTripId = first.killSwitch.tripId;
     const later = await service.evaluateCurrent(
