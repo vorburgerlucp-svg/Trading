@@ -127,6 +127,7 @@ export class PitConfidenceCalibrationError extends Error {
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
+const CONTROL_OR_SPACE = /[\s\u0000-\u001f\u007f]/;
 const MAX_BINS = 100;
 const compareCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -144,7 +145,7 @@ function validateModelKey(key: unknown, code: 'INVALID_MODEL' | 'INVALID_CALIBRA
   if (
     typeof key !== 'string' ||
     key.trim() !== key ||
-    key.includes(' ') ||
+    CONTROL_OR_SPACE.test(key) ||
     key.split('/').length !== 2 ||
     key.startsWith('/') ||
     key.endsWith('/')
