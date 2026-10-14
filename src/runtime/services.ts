@@ -18,7 +18,8 @@ import {
 import { toUtcIso } from '../market-data/time.js';
 import type { QuantService } from '../quant/quant-service.js';
 import type { PortfolioKillSwitchStore } from '../safety/portfolio-kill-switch-store.js';
-import type { BarsRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
+import type { BarsRequest, InstrumentRegisterRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
+import { RuntimeApiError } from './errors.js';
 
 /** A quote older than this is stale and is never usable for trading. */
 export const QUOTE_MAX_AGE_MS = 15 * 60 * 1000;
@@ -69,15 +70,16 @@ function toSearchItem(candidate: InstrumentCandidate, provider: string, registry
   if (providerSymbol === null || candidate.assetClass === null || candidate.assetClass === undefined) return null;
   const name = sanitizeName(candidate.name);
   if (name === null) return null;
+  const exchange = pattern(candidate.exchange, /^[A-Za-z0-9._-]{1,32}$/);
   return {
-    instrumentId: registry.resolve(provider, providerSymbol, now),
+    instrumentId: registry.resolve(provider, providerSymbol, now, exchange ?? undefined) ?? registry.resolve(provider, providerSymbol, now),
     provider,
     providerSymbol,
     name,
     assetClass: String(candidate.assetClass),
-    exchange: pattern(candidate.exchange, /^[A-Za-z0-9._-]{1,32}$/),
+    exchange,
     mic: pattern(candidate.mic, /^[A-Z0-9]{4}$/),
-    currency: pattern(candidate.currency, /^[A-Z]{3}$/),
+    currency: pattern(candidate.currency, /^[A-Z0-9]{3,10}$/),
     timezone: validTimezone(candidate.timezone),
   };
 }
@@ -174,6 +176,47 @@ export class RuntimeServiceImpl implements RuntimeServices {
     return items;
   }
 
+  async registerInstrument(request: InstrumentRegisterRequest): Promise<InstrumentSearchItem> {
+    const provider = this.requireProvider();
+    const now = this.now();
+    const validFromMs = Date.parse(request.validFrom);
+    if (!Number.isFinite(validFromMs) || new Date(validFromMs).toISOString() !== request.validFrom || validFromMs > Date.parse(now)) {
+      throw new MarketDataError('bad_request', provider.providerId, 'mapping validFrom must be a canonical UTC instant at or before now');
+    }
+    const candidate = await provider.getInstrument(request.providerSymbol, {
+      ...(request.mic !== undefined ? { mic: request.mic } : {}),
+      ...(request.exchange !== undefined ? { exchange: request.exchange } : {}),
+    });
+    if (!candidate) throw new MarketDataError('not_found', provider.providerId, 'instrument was not found');
+    if (candidate.provider !== provider.providerId || candidate.providerSymbol.toUpperCase() !== request.providerSymbol.toUpperCase()) {
+      throw new MarketDataError('schema_invalid', provider.providerId, 'provider returned a different instrument identity');
+    }
+    const item = toSearchItem(candidate, provider.providerId, this.deps.registry, now);
+    if (item === null || item.currency === null || item.timezone === null) {
+      throw new MarketDataError('schema_invalid', provider.providerId, 'instrument metadata is incomplete or invalid');
+    }
+    if (item.instrumentId !== null) return item;
+
+    const instrument = await this.deps.registry.register({
+      assetClass: candidate.assetClass!,
+      symbol: item.providerSymbol,
+      name: item.name,
+      currency: item.currency,
+      timezone: item.timezone,
+      active: true,
+      ...(item.exchange !== null ? { exchange: item.exchange } : {}),
+      ...(item.mic !== null ? { mic: item.mic } : {}),
+    }, { at: now, by: { kind: 'system', id: 'nexus-runtime' }, reason: 'explicit local runtime instrument registration' });
+    await this.deps.registry.addMapping({
+      instrumentId: instrument.instrumentId,
+      provider: provider.providerId,
+      providerSymbol: item.providerSymbol,
+      validFrom: request.validFrom,
+      ...(item.exchange !== null ? { exchange: item.exchange } : {}),
+    }, { at: now, by: { kind: 'system', id: 'nexus-runtime' }, reason: 'explicit local runtime provider mapping registration' });
+    return { ...item, instrumentId: instrument.instrumentId };
+  }
+
   async readBars(request: BarsRequest): Promise<unknown> {
     const provider = this.requireProvider();
     const instrument = this.requireInstrument(request.instrumentId);
@@ -229,6 +272,9 @@ export class RuntimeServiceImpl implements RuntimeServices {
 
   async runQuant(request: QuantRequest): Promise<unknown> {
     const provider = this.requireProvider();
+    if (this.deps.marketDataMode !== 'production') {
+      throw new RuntimeApiError('DATA_QUALITY_ERROR');
+    }
     const instrument = this.requireInstrument(request.instrumentId);
     const adjustment = adjustmentFor(this.deps.marketDataMode);
     const from = toUtcIso(Date.parse(request.asOf) - lookbackMs(request.interval));
