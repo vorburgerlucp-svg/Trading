@@ -15,6 +15,7 @@ import {
   type ShadowBenchmarkModelRequest,
   type ShadowBenchmarkScoreRequest,
   type ShadowBenchmarkScorer,
+  type ShadowModelBenchmarkResult,
 } from '../../src/evaluation/shadow-model-benchmark.js';
 import { hashOf } from '../../src/persistence/canonical-json.js';
 
@@ -896,5 +897,195 @@ describe('O11 review — each validation branch is covered (guards)', () => {
       expect(await codeOfAsync(async () => runShadowModelBenchmark({ modelKey: key, cases: cases(1), registry }, evaluator, new FakeScorer())), key).toBe('INVALID_MODEL');
       expect(evaluator.calls).toHaveLength(0);
     }
+  });
+});
+
+/**
+ * A forger who re-issues every fingerprint a result states, with the public formulas. What such a forger still cannot make pass is what the tests below check.
+ */
+function reissue(result: ShadowModelBenchmarkResult): ShadowModelBenchmarkResult {
+  const cases = result.cases.map((c) => {
+    const caseFingerprint = hashOf({
+      caseId: c.caseId,
+      asOf: c.asOf,
+      domain: c.domain,
+      subtask: c.subtask,
+      modelInputFingerprint: c.modelInputFingerprint,
+      outcomeFingerprint: c.outcomeFingerprint,
+      knownAt: c.knownAt,
+    });
+    const scoringFingerprint = hashOf({
+      modelKey: result.modelKey,
+      caseId: c.caseId,
+      score: String(c.score),
+      outcomeFingerprint: c.outcomeFingerprint,
+      outputFingerprint: c.modelOutput.outputFingerprint,
+    });
+    return { ...c, caseFingerprint, scoringFingerprint };
+  });
+  const caseSetFingerprint = hashOf(cases.map((c) => ({ caseId: c.caseId, caseFingerprint: c.caseFingerprint })));
+  const inputFingerprint = hashOf({
+    engine: SHADOW_MODEL_BENCHMARK_VERSION,
+    modelKey: result.modelKey,
+    shadowModeAtBenchmark: result.shadowModeAtBenchmark,
+    performancePolicy: result.performancePolicy,
+    championPolicy: result.championPolicy,
+    gateAsOf: result.gateAsOf,
+    caseSetFingerprint,
+    cases: cases.map((c) => ({
+      caseId: c.caseId,
+      caseFingerprint: c.caseFingerprint,
+      outputFingerprint: c.modelOutput.outputFingerprint,
+      evidenceFingerprint: c.modelOutput.evidenceFingerprint,
+      confidenceScore: c.modelOutput.confidenceScore,
+      recommendation: c.modelOutput.recommendation,
+      modelVersion: c.modelOutput.modelVersion,
+      score: c.score,
+      scoringFingerprint: c.scoringFingerprint,
+    })),
+  });
+  return { ...result, cases, caseSetFingerprint, inputFingerprint, benchmarkRunId: 'smb_' + inputFingerprint.slice(0, 40) };
+}
+
+describe('O11 review — mutation-derived checks name their reason (guards)', () => {
+  it('K1 an empty case list is refused with the benchmark error', async () => {
+    expect(await messageOfAsync(async () => benchmark([], await registryWith(MODEL)))).toMatch(/at least one historical case/);
+  });
+
+  it('K2 an outcome with a Date or a getter is refused: its hash would not bind the value', async () => {
+    const registry = await registryWith(MODEL);
+    const withDate = [{ ...oneCase('case-001', 0), outcome: { knownAt: '2026-01-10T20:00:00.000Z', when: new Date(0) } as Record<string, unknown> }];
+    withDate[0] = { ...withDate[0]!, outcomeFingerprint: hashOf(withDate[0]!.outcome) };
+    expect(await messageOfAsync(async () => benchmark(withDate, registry))).toMatch(/non-plain object/);
+    let calls = 0;
+    const withGetter = [{ ...oneCase('case-001', 0), outcome: { knownAt: '2026-01-10T20:00:00.000Z', get returnBp() { calls += 1; return calls; } } as Record<string, unknown> }];
+    withGetter[0] = { ...withGetter[0]!, outcomeFingerprint: hashOf({ knownAt: '2026-01-10T20:00:00.000Z', returnBp: 1 }) };
+    expect(await messageOfAsync(async () => benchmark(withGetter, registry))).toMatch(/accessor/);
+  });
+
+  it('K3 a tampered model input under its old fingerprint is refused', async () => {
+    const cs = cases(1);
+    cs[0] = { ...cs[0]!, modelInput: { ...cs[0]!.modelInput, feature: 999 } };
+    expect(await messageOfAsync(async () => benchmark(cs, await registryWith(MODEL)))).toMatch(/model input fingerprint does not match/);
+  });
+
+  it('K4 a tampered outcome under its old fingerprint is refused', async () => {
+    const cs = cases(1);
+    cs[0] = { ...cs[0]!, outcome: { ...cs[0]!.outcome, returnBp: 1 } };
+    expect(await messageOfAsync(async () => benchmark(cs, await registryWith(MODEL)))).toMatch(/outcome fingerprint does not match/);
+  });
+
+  it('K5 an array element that is an accessor is refused', async () => {
+    const list: unknown[] = [1];
+    Object.defineProperty(list, 0, { get: () => 1, enumerable: true, configurable: true });
+    const cs = cases(1);
+    cs[0] = { ...cs[0]!, modelInput: { list } as Record<string, unknown>, modelInputFingerprint: 'a'.repeat(64) };
+    expect(await messageOfAsync(async () => benchmark(cs, await registryWith(MODEL)))).toMatch(/is not a data element/);
+  });
+
+  it('K6 an invalid recommendation is refused even when its output fingerprint is re-issued', async () => {
+    const evaluator = new FakeEvaluator(MODEL, (output) => {
+      const fields = {
+        modelKey: output.modelKey,
+        caseId: output.caseId,
+        recommendation: 'maybe',
+        confidenceScore: output.confidenceScore,
+        modelVersion: output.modelVersion,
+        evidenceFingerprint: output.evidenceFingerprint,
+      };
+      return { ...output, recommendation: 'maybe' as never, outputFingerprint: hashOf(fields) };
+    });
+    expect(await messageOfAsync(async () => runShadowModelBenchmark({ modelKey: MODEL, cases: cases(1), registry: await registryWith(MODEL) }, evaluator, new FakeScorer()))).toMatch(/recommendation is invalid/);
+  });
+
+  it('K7 a blank model version is refused even when its output fingerprint is re-issued', async () => {
+    const evaluator = new FakeEvaluator(MODEL, (output) => {
+      const fields = { modelKey: output.modelKey, caseId: output.caseId, recommendation: output.recommendation, confidenceScore: output.confidenceScore, modelVersion: ' ', evidenceFingerprint: output.evidenceFingerprint };
+      return { ...output, modelVersion: ' ', outputFingerprint: hashOf(fields) };
+    });
+    expect(await messageOfAsync(async () => runShadowModelBenchmark({ modelKey: MODEL, cases: cases(1), registry: await registryWith(MODEL) }, evaluator, new FakeScorer()))).toMatch(/modelVersion is required/);
+  });
+
+  it('K8 a malformed evidence fingerprint is refused even when its output fingerprint is re-issued', async () => {
+    const evaluator = new FakeEvaluator(MODEL, (output) => {
+      const fields = { modelKey: output.modelKey, caseId: output.caseId, recommendation: output.recommendation, confidenceScore: output.confidenceScore, modelVersion: output.modelVersion, evidenceFingerprint: 'short' };
+      return { ...output, evidenceFingerprint: 'short', outputFingerprint: hashOf(fields) };
+    });
+    expect(await messageOfAsync(async () => runShadowModelBenchmark({ modelKey: MODEL, cases: cases(1), registry: await registryWith(MODEL) }, evaluator, new FakeScorer()))).toMatch(/evidenceFingerprint must be/);
+  });
+
+  it('K9 a scorer that answers for another model is refused even with a fingerprint that binds that model', async () => {
+    const scorer: ShadowBenchmarkScorer = {
+      async score(input) {
+        const score = 0.5;
+        return {
+          modelKey: MODEL_2,
+          caseId: input.caseId,
+          score,
+          scoringFingerprint: hashOf({ modelKey: MODEL_2, caseId: input.caseId, score: String(score), outcomeFingerprint: input.outcomeFingerprint, outputFingerprint: input.modelOutput.outputFingerprint }),
+        };
+      },
+    };
+    expect(await messageOfAsync(async () => runShadowModelBenchmark({ modelKey: MODEL, cases: cases(1), registry: await registryWith(MODEL) }, new FakeEvaluator(), scorer))).toMatch(/score identity does not match/);
+  });
+
+  it('K10 to K18 each verified field is checked, and each refusal names its reason', async () => {
+    const a = await benchmark(cases(3), await registryWith(MODEL), 0.4);
+    const reasons: Array<[string, ShadowModelBenchmarkResult, RegExp]> = [
+      ['input fingerprint format', { ...a, inputFingerprint: 'not-a-hash' }, /inputFingerprint is not a 64-character hash/],
+      ['shadow flag type', { ...a, shadowModeAtBenchmark: 'yes' as never }, /must be a boolean/],
+      ['performance policy', { ...a, performancePolicy: { ...a.performancePolicy, priorScore: 2 } }, /priorScore/],
+      ['no cases', { ...a, cases: [] }, /no cases/],
+      ['output identity', structuredClone(a), /model output identity does not match the case/],
+      ['case set fingerprint', { ...a, caseSetFingerprint: 'c'.repeat(64) }, /caseSetFingerprint does not match/],
+      ['gate passed flag alone', { ...a, gate: { ...a.gate, passed: !a.gate.passed } }, /gate does not match/],
+      ['input fingerprint with run id re-derived', { ...a, inputFingerprint: 'b'.repeat(64), benchmarkRunId: 'smb_' + 'b'.repeat(40) }, /inputFingerprint does not match the result contents/],
+    ];
+    const outputIdentity = reasons.find((r) => r[0] === 'output identity')!;
+    const forgedOutput = structuredClone(a);
+    forgedOutput.cases[0]!.modelOutput.caseId = 'case-zzz';
+    outputIdentity[1] = forgedOutput;
+    for (const [name, forged, reason] of reasons) {
+      expect(messageOf(() => verifyShadowModelBenchmarkResult(forged)), name).toMatch(reason);
+    }
+    const scoreForged = structuredClone(a);
+    scoreForged.cases[0]!.score = 0.1;
+    expect(messageOf(() => verifyShadowModelBenchmarkResult(scoreForged))).toMatch(/scoringFingerprint does not bind/);
+  });
+
+  it('K19 a non-canonical as-of, re-issued with every fingerprint, is still refused by the canonical-time rule', async () => {
+    const forged = structuredClone(await benchmark(cases(2), await registryWith(MODEL), 0.4));
+    forged.cases[0]!.asOf = '2026-01-02';
+    expect(messageOf(() => verifyShadowModelBenchmarkResult(reissue(forged)))).toMatch(/asOf is not a canonical UTC instant/);
+  });
+
+  it('K20 a non-canonical knownAt, re-issued with every fingerprint, is still refused by the canonical-time rule', async () => {
+    const forged = structuredClone(await benchmark(cases(2), await registryWith(MODEL), 0.4));
+    forged.cases[0]!.knownAt = '2026-01-10';
+    expect(messageOf(() => verifyShadowModelBenchmarkResult(reissue(forged)))).toMatch(/knownAt is not a canonical UTC instant/);
+  });
+
+  it('K21 a re-issued result that repeats one case evidence under another case id is refused', async () => {
+    const forged = structuredClone(await benchmark(cases(2), await registryWith(MODEL), 0.4));
+    const first = forged.cases[0]!;
+    const second = forged.cases[1]!;
+    Object.assign(second, {
+      asOf: first.asOf,
+      domain: first.domain,
+      subtask: first.subtask,
+      modelInputFingerprint: first.modelInputFingerprint,
+      outcomeFingerprint: first.outcomeFingerprint,
+      knownAt: first.knownAt,
+    });
+    expect(messageOf(() => verifyShadowModelBenchmarkResult(reissue(forged)))).toMatch(/identical evidence/);
+  });
+
+  it('K22 two results with equal sample sizes but different case sets are refused by the comparison', async () => {
+    const base = cases(3);
+    const changed = base.map((c, i) => (i === 1 ? withOutcome(c, { ...c.outcome, returnBp: 1234 }) : c));
+    const a = await benchmark(base, await registryWith(MODEL), 0.4);
+    const b = await runShadowModelBenchmark({ modelKey: MODEL_2, cases: changed, registry: await registryWith(MODEL_2) }, new FakeEvaluator(MODEL_2), new FakeScorer(0.6));
+    expect(a.sampleSize).toBe(b.sampleSize);
+    expect(messageOf(() => compareShadowBenchmarks([a, b]))).toMatch(/case sets differ/);
   });
 });
