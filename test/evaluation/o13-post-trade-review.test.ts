@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PerformanceObservation } from '../../src/ai/model-performance.js';
-import { evaluateTrade, FLAT_BAND_BP, OutcomeEvaluator, type TradeOutcome } from '../../src/evaluation/outcome-evaluator.js';
+import { evaluateTrade, FLAT_BAND_BP, OutcomeEvaluator, scoreAttempt, type TradeOutcome } from '../../src/evaluation/outcome-evaluator.js';
 import {
   POST_TRADE_REVIEW_POLICY_VERSION,
   POST_TRADE_REVIEW_VERSION,
@@ -292,12 +292,14 @@ describe('O13 post-trade review — RED', () => {
   });
 
   it('reuses OutcomeEvaluator performance scores instead of silently rescoring attempts', async () => {
+    // Corrected in the GREEN step: the earlier version fed an arbitrary score (0.123) and asserted it was copied through.
+    // That encoded the bug (review C). The review now reuses the evaluator's own score, and refuses any other value (P7).
     const base = await fixture();
-    const observations = base.observations.map((o) => ({ ...o, score: 0.123 }));
-    const review = buildPostTradeReview(requestOf(base, { performanceObservations: observations }));
+    const review = buildPostTradeReview(requestOf(base));
 
     expect(review.attemptAttribution).toHaveLength(1);
-    expect(review.attemptAttribution[0]!.performanceScore).toBe(0.123);
+    expect(review.attemptAttribution[0]!.performanceScore).toBe(base.observations[0]!.score);
+    expect(review.attemptAttribution[0]!.performanceScore).toBe(scoreAttempt(base.trace.attempts[0]!, base.evaluation.returnBp));
   });
 
   it('never treats raw confidence as probability', async () => {

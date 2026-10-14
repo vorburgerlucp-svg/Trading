@@ -3,7 +3,7 @@ import type { ModelKey, Recommendation } from '../ai/model-types.js';
 import { Decimal } from '../money/decimal.js';
 import { hashOf } from '../persistence/canonical-json.js';
 import type { AttemptRecord, DecisionTrace } from '../nexus/nexus-types.js';
-import { evaluateTrade, FLAT_BAND_BP, type TradeEvaluation, type TradeOutcome } from './outcome-evaluator.js';
+import { evaluateTrade, FLAT_BAND_BP, scoreAttempt, type TradeEvaluation, type TradeOutcome } from './outcome-evaluator.js';
 
 export const POST_TRADE_REVIEW_VERSION = 'post-trade-review:v1' as const;
 export const POST_TRADE_REVIEW_POLICY_VERSION = 'post-trade-review-policy:v1' as const;
@@ -280,6 +280,7 @@ function validateTrace(trace: DecisionTrace): void {
     const step = steps.get(attempt.stepId);
     if (!step) fail('INVALID_TRACE', 'attempt references unknown plan step ' + attempt.stepId);
     if (attempt.role !== step.role) fail('INVALID_TRACE', 'attempt role does not match plan step ' + attempt.stepId);
+    validateProbabilityFields(attempt);
     if (attempt.status === 'ok') {
       if (!attempt.opinion) fail('INVALID_TRACE', 'successful attempt has no opinion');
       if (attempt.provider + '/' + attempt.model !== attempt.modelKey) {
@@ -295,7 +296,6 @@ function validateTrace(trace: DecisionTrace): void {
         fail('INVALID_TRACE', 'multiple successful attempts are ambiguous for performance attribution: ' + key);
       }
       attributable.add(key);
-      validateProbabilityFields(attempt);
     }
   }
 }
@@ -390,20 +390,22 @@ function validateProbabilityFields(attempt: AttemptRecord): void {
   ) {
     fail('INVALID_TRACE', 'attempt confidenceScore must be within 0..1');
   }
-  if (
-    attempt.calibratedProbability !== undefined &&
-    attempt.calibratedProbability !== null
-  ) {
+  const hasProbability = attempt.calibratedProbability !== undefined && attempt.calibratedProbability !== null;
+  const hasMethod = attempt.calibrationMethod !== undefined && attempt.calibrationMethod !== null;
+  if (hasProbability) {
     if (
       !Number.isFinite(attempt.calibratedProbability) ||
-      attempt.calibratedProbability < 0 ||
-      attempt.calibratedProbability > 1
+      attempt.calibratedProbability! < 0 ||
+      attempt.calibratedProbability! > 1
     ) {
       fail('INVALID_TRACE', 'attempt calibratedProbability must be within 0..1');
     }
-    if (typeof attempt.calibrationMethod !== 'string' || attempt.calibrationMethod.trim() === '') {
-      fail('INVALID_TRACE', 'calibrated probability requires a calibration method');
-    }
+  }
+  if (hasProbability !== hasMethod) {
+    fail('INVALID_TRACE', 'calibrated probability and calibration method must be set together');
+  }
+  if (hasMethod && (typeof attempt.calibrationMethod !== 'string' || attempt.calibrationMethod!.trim() === '')) {
+    fail('INVALID_TRACE', 'calibration method must be a non-empty string');
   }
 }
 
@@ -493,6 +495,7 @@ function observationFingerprint(observation: PerformanceObservation): string {
 function validateAndIndexPerformance(
   trace: DecisionTrace,
   outcome: TradeOutcome,
+  evaluation: TradeEvaluation,
   observations: readonly PerformanceObservation[],
 ): Map<string, PerformanceObservation> {
   if (!Array.isArray(observations)) fail('INVALID_PERFORMANCE', 'performanceObservations must be an array');
@@ -534,6 +537,10 @@ function validateAndIndexPerformance(
     const observation = byKey.get(key);
     if (!observation) fail('INVALID_PERFORMANCE', 'missing performance observation for successful attempt ' + key);
     if (observation.shadow !== attempt.shadow) fail('INVALID_PERFORMANCE', 'performance shadow flag does not match attempt');
+    // The stored score must be the one OutcomeEvaluator's rule gives this attempt, not any value in range.
+    if (observation.score !== scoreAttempt(attempt, evaluation.returnBp)) {
+      fail('INVALID_PERFORMANCE', 'performance score does not match the OutcomeEvaluator rule for ' + key);
+    }
   }
   for (const key of byKey.keys()) {
     if (!expected.has(key)) fail('INVALID_PERFORMANCE', 'performance observation does not map to a successful trace attempt');
@@ -611,6 +618,8 @@ function classifyOutcome(evaluation: TradeEvaluation): OutcomeClassification {
 }
 
 function directionalCorrect(recommendation: Recommendation, returnBp: number): boolean | null {
+  // A flat move has no direction to be right about, so it carries no label at all (not a "wrong" label).
+  if (Math.abs(returnBp) <= FLAT_BAND_BP) return null;
   if (recommendation === 'buy') return returnBp > FLAT_BAND_BP;
   if (recommendation === 'sell') return returnBp < -FLAT_BAND_BP;
   return null;
@@ -630,12 +639,16 @@ function attributionsOf(
     const step = steps.get(attempt.stepId)!;
     const key = attributionKey(attempt.modelKey, attempt.role, trace.task.domain, step.subtask ?? trace.task.subtask);
     const observation = byPerformanceKey.get(key)!;
-    const calibratedProbability = attempt.calibratedProbability ?? null;
-    const calibrationMethod = attempt.calibrationMethod ?? null;
+    const probability = attempt.calibratedProbability ?? null;
+    const method = attempt.calibrationMethod ?? null;
     const correct =
       attempt.role === 'analyst'
         ? directionalCorrect(attempt.opinion.recommendation, evaluation.returnBp)
         : null;
+    // A calibrated probability is attributed only where its binary target exists: an analyst's buy/sell on a non-flat move.
+    // Elsewhere (hold/no_trade, critic, counter-analyst, flat moves) the probability has no defined meaning for this outcome.
+    const targetApplies = correct !== null && probability !== null;
+    const calibratedProbability = targetApplies ? probability : null;
 
     attributions.push({
       stepId: attempt.stepId,
@@ -645,24 +658,20 @@ function attributionsOf(
       recommendation: attempt.opinion.recommendation,
       confidenceScore: attempt.confidenceScore ?? null,
       calibratedProbability,
-      calibrationMethod,
+      calibrationMethod: targetApplies ? method : null,
       performanceScore: observation.score,
       directionCorrect: correct,
     });
 
-    if (
-      attempt.role === 'analyst' &&
-      (attempt.opinion.recommendation === 'buy' || attempt.opinion.recommendation === 'sell') &&
-      calibratedProbability !== null
-    ) {
+    if (correct !== null && probability !== null) {
       const label: 0 | 1 = correct ? 1 : 0;
       calibration.push({
         stepId: attempt.stepId,
         modelKey: attempt.modelKey,
         targetId: 'recommendation_direction_correct:v1',
-        calibratedProbability,
+        calibratedProbability: probability,
         outcomeLabel: label,
-        brierContribution: (calibratedProbability - label) ** 2,
+        brierContribution: (probability - label) ** 2,
       });
     }
   }
@@ -788,6 +797,7 @@ export function buildPostTradeReview(request: PostTradeReviewRequest): PostTrade
   const performance = validateAndIndexPerformance(
     request.trace,
     request.outcome,
+    request.evaluation,
     request.performanceObservations,
   );
 
