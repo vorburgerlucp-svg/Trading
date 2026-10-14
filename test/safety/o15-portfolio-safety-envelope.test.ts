@@ -157,7 +157,8 @@ function tripped(): KillSwitchState {
   return {
     version: PORTFOLIO_KILL_SWITCH_VERSION,
     status: 'TRIPPED',
-    tripId: 'trip_' + 'c'.repeat(40),
+    // The trip id is derived from the triggering fingerprint ('d' repeated), as O15 derives it when it trips.
+    tripId: 'trip_' + 'd'.repeat(40),
     trippedAt: '2026-10-14T10:00:00.000Z',
     reasons: ['prior daily loss breach'],
     triggeringDecisionFingerprint: 'd'.repeat(64),

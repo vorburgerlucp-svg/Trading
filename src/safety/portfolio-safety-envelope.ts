@@ -1,4 +1,5 @@
 import type { PortfolioSnapshot, PositionView } from '../capital/capital-types.js';
+import { Decimal } from '../money/decimal.js';
 import {
   nonNegativeChf,
   ratioBp,
@@ -150,6 +151,15 @@ function requireNonNegativeRappen(value: unknown, code: PortfolioSafetyError['co
   if (value < 0n) fail(code, label + ' must be non-negative');
 }
 
+/**
+ * A CHF limit of zero trips a flat portfolio: zero loss, zero realized loss and zero drawdown all reach a zero limit.
+ * Such a policy would latch the kill switch on a healthy day, so it is refused at policy time.
+ */
+function requirePositiveRappen(value: unknown, code: PortfolioSafetyError['code'], label: string): asserts value is Rappen {
+  requireRappen(value, code, label);
+  if (value <= 0n) fail(code, label + ' must be positive: a zero limit trips a flat portfolio');
+}
+
 function requirePositiveSafeInt(value: unknown, code: PortfolioSafetyError['code'], label: string): asserts value is number {
   if (!Number.isSafeInteger(value) || (value as number) <= 0) {
     fail(code, label + ' must be a positive safe integer');
@@ -169,7 +179,7 @@ function validatePolicy(policy: PortfolioSafetyPolicy): void {
     ['maxRealizedTradingLossChf', policy.maxRealizedTradingLossChf],
     ['maxIntradayDrawdownChf', policy.maxIntradayDrawdownChf],
   ] as const) {
-    requireNonNegativeRappen(value, 'INVALID_POLICY', label);
+    requirePositiveRappen(value, 'INVALID_POLICY', label);
   }
   for (const [label, value] of [
     ['maxAdjustedDailyLossBp', policy.maxAdjustedDailyLossBp],
@@ -193,6 +203,12 @@ function validateDay(day: RiskDaySummary, portfolio: PortfolioSnapshot): void {
   if (startMs === null || asOfMs === null || startMs > asOfMs) {
     fail('INVALID_DAY', 'risk-day timestamps are invalid');
   }
+  // V1 risk day is a UTC calendar day. The policy has no day-boundary input, so a trading-day boundary cannot be proven here,
+  // and a day whose start or asOf falls on another UTC date is refused rather than graded against the wrong day.
+  const utcDate = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+  if (day.dayId !== utcDate(startMs) || day.dayId !== utcDate(asOfMs)) {
+    fail('INVALID_DAY', 'dayId must be the UTC calendar day of both dayStartedAt and asOf');
+  }
   for (const [label, value] of [
     ['startNetWorthChf', day.startNetWorthChf],
     ['peakAdjustedNetWorthChf', day.peakAdjustedNetWorthChf],
@@ -213,19 +229,34 @@ function validateDay(day: RiskDaySummary, portfolio: PortfolioSnapshot): void {
   }
 }
 
-function validatePosition(position: PositionView): void {
+function validatePosition(position: PositionView, asOfMs: number): void {
   if (!position || typeof position !== 'object') fail('INVALID_PORTFOLIO', 'position must be an object');
   if (typeof position.brokerId !== 'string' || position.brokerId.trim() === '') fail('INVALID_PORTFOLIO', 'position brokerId is required');
   if (typeof position.instrumentId !== 'string' || position.instrumentId.trim() === '') fail('INVALID_PORTFOLIO', 'position instrumentId is required');
   if (typeof position.isOpen !== 'boolean') fail('INVALID_PORTFOLIO', 'position isOpen must be boolean');
   if (!['live', 'stale', 'not_connected'].includes(position.priceStatus)) fail('INVALID_PORTFOLIO', 'position priceStatus is invalid');
   if (position.marketValueChf !== null) requireNonNegativeRappen(position.marketValueChf, 'INVALID_PORTFOLIO', 'position marketValueChf');
+  // isOpen is derived from the quantity by the capital engine. A flag that contradicts the quantity would hide a holding from
+  // exposure and from the open-position count, so the two must agree. V1 is long-only: a negative quantity is refused.
+  if (!(position.quantity instanceof Decimal) || position.quantity.isNegative()) {
+    fail('INVALID_PORTFOLIO', 'position quantity must be a non-negative decimal');
+  }
+  if (position.isOpen !== !position.quantity.isZero()) fail('INVALID_PORTFOLIO', 'position isOpen contradicts its quantity');
+  // A quote must price this position and cannot be from after the portfolio asOf (that would be a look-ahead price).
+  const quote = position.lastQuote;
+  if (quote !== null) {
+    const quoteMs = typeof quote === 'object' ? canonicalMs(quote.asOf) : null;
+    if (typeof quote !== 'object' || quote.instrumentId !== position.instrumentId || quoteMs === null || quoteMs > asOfMs) {
+      fail('INVALID_PORTFOLIO', 'position quote must price this position at canonical UTC no later than asOf');
+    }
+  }
 }
 
 function validatePortfolio(portfolio: PortfolioSnapshot, day: RiskDaySummary): void {
-  if (!portfolio || typeof portfolio !== 'object' || !portfolio.capital || !Array.isArray(portfolio.positions)) {
+  if (!portfolio || typeof portfolio !== 'object' || !portfolio.capital || !Array.isArray(portfolio.positions) || !Array.isArray(portfolio.inventory)) {
     fail('INVALID_PORTFOLIO', 'portfolio snapshot is malformed');
   }
+  const asOfMs = canonicalMs(day.asOf)!;
   const timestampMs = canonicalMs(portfolio.capital.timestamp);
   if (timestampMs === null || portfolio.capital.timestamp !== day.asOf) {
     fail('INVALID_PORTFOLIO', 'portfolio timestamp must equal risk-day asOf');
@@ -245,7 +276,7 @@ function validatePortfolio(portfolio: PortfolioSnapshot, day: RiskDaySummary): v
 
   const ids = new Set<string>();
   for (const position of portfolio.positions) {
-    validatePosition(position);
+    validatePosition(position, asOfMs);
     const key = position.brokerId + ':' + position.instrumentId;
     if (ids.has(key)) fail('INVALID_PORTFOLIO', 'duplicate position identity ' + key);
     ids.add(key);
@@ -273,6 +304,11 @@ function validateKillSwitch(state: KillSwitchState, asOf: string): void {
   if (state.reasons.length === 0) fail('INVALID_KILL_SWITCH', 'tripped kill switch requires reasons');
   if (typeof state.triggeringDecisionFingerprint !== 'string' || !HEX64.test(state.triggeringDecisionFingerprint)) {
     fail('INVALID_KILL_SWITCH', 'triggering decision fingerprint is invalid');
+  }
+  // A trip id is derived from the fingerprint of the decision that tripped the switch. A latched state carrying any other id
+  // is not one O15 could have produced, so it is refused rather than preserved as a trip identity.
+  if (state.tripId !== 'trip_' + state.triggeringDecisionFingerprint.slice(0, 40)) {
+    fail('INVALID_KILL_SWITCH', 'tripId does not derive from its triggering decision fingerprint');
   }
 }
 
@@ -352,6 +388,7 @@ export function evaluatePortfolioSafetyEnvelope(
   }
   if (
     openPositions.some((position) => position.marketValueChf === null) ||
+    openPositions.some((position) => position.lastQuote === null) ||
     openPositions.some((position) => position.priceStatus !== 'live') ||
     capitalData.unpricedPositions.length > 0 ||
     capitalData.stalePositions.length > 0
