@@ -46,6 +46,8 @@ export interface ProcessDiagnostics {
   distinctAnalystProviders: number;
   requiredIndependentOpinions: number;
   independentOpinionShortfall: number;
+  /** Plan steps whose own model count or provider diversity was not met by successful, non-shadow answers. */
+  planStepShortfallCount: number;
   criticRequired: boolean;
   criticObserved: boolean;
   counterAnalysisRequired: boolean;
@@ -170,70 +172,105 @@ function canonicalMs(value: unknown): number | null {
   return Number.isFinite(ms) && new Date(ms).toISOString() === value ? ms : null;
 }
 
+/** A set-like list of strings in canonical order. Duplicates are kept: a duplicated entry changes the trace, so it changes the identity. */
+function sortedStrings(values: readonly string[]): string[] {
+  return [...values].sort(compareCodeUnit);
+}
+
+/** A deduplicated, canonically ordered list for diagnostics, where a repeated reference is reported once. */
 function sortedUnique(values: readonly string[]): string[] {
   return [...new Set(values)].sort(compareCodeUnit);
 }
 
+/** A set-like list of objects in canonical order, keyed by each object's own canonical hash, so no field is dropped. */
+function sortedByHash<T>(values: readonly T[]): T[] {
+  return values
+    .map((value) => ({ value, key: hashOf(value) }))
+    .sort((a, b) => compareCodeUnit(a.key, b.key))
+    .map((one) => one.value);
+}
+
+/**
+ * The identity view of a trace. Set-like lists are canonicalized so their insertion order cannot change the review id.
+ * Ordered lists keep their order because it is decision-relevant: the fallback chain decides which model is tried next,
+ * the plan steps and pipeline decide what each step sees, and blackboard ids record creation order.
+ */
 function normalizeTraceIdentity(trace: DecisionTrace): unknown {
+  const consensus = trace.decision.consensus;
   return {
     ...trace,
     record: {
       ...trace.record,
-      evidenceRefs: sortedUnique(trace.record.evidenceRefs),
-      reasonCodes: sortedUnique(trace.record.reasonCodes),
+      evidenceRefs: sortedStrings(trace.record.evidenceRefs),
+      reasonCodes: sortedStrings(trace.record.reasonCodes),
     },
     task: {
       ...trace.task,
-      requiredCapabilities: sortedUnique(trace.task.requiredCapabilities),
-      contextRefs: sortedUnique(trace.task.contextRefs),
+      requiredCapabilities: sortedStrings(trace.task.requiredCapabilities),
+      contextRefs: sortedStrings(trace.task.contextRefs),
     },
     plan: {
       ...trace.plan,
-      reasons: sortedUnique(trace.plan.reasons),
+      reasons: sortedStrings(trace.plan.reasons),
     },
     inputs: {
       ...trace.inputs,
       evidence: [...trace.inputs.evidence].sort((a, b) => compareCodeUnit(a.id, b.id)),
-      excludedLookAhead: sortedUnique(trace.inputs.excludedLookAhead),
+      excludedLookAhead: sortedStrings(trace.inputs.excludedLookAhead),
       quant:
         trace.inputs.quant === null
           ? null
           : {
               ...trace.inputs.quant,
-              backtestRunIds: sortedUnique(trace.inputs.quant.backtestRunIds ?? []),
+              backtestRunIds: sortedStrings(trace.inputs.quant.backtestRunIds ?? []),
             },
     },
     routing: trace.routing.map((one) => ({
       ...one,
-      primaries: sortedUnique(one.primaries),
-      fallbacks: sortedUnique(one.fallbacks),
-      shadow: sortedUnique(one.shadow),
-      rejected: [...one.rejected]
-        .map((r) => ({ ...r, reasons: sortedUnique(r.reasons) }))
-        .sort((a, b) => compareCodeUnit(a.modelKey, b.modelKey)),
+      primaries: sortedStrings(one.primaries),
+      fallbacks: [...one.fallbacks],
+      shadow: sortedStrings(one.shadow),
+      rejected: sortedByHash(one.rejected.map((r) => ({ ...r, reasons: sortedStrings(r.reasons) }))),
     })),
     decision: {
       ...trace.decision,
-      reasonCodes: sortedUnique(trace.decision.reasonCodes),
-      humanApprovalReasons: sortedUnique(trace.decision.humanApprovalReasons),
+      reasons: sortedStrings(trace.decision.reasons),
+      reasonCodes: sortedStrings(trace.decision.reasonCodes),
+      humanApprovalReasons: sortedStrings(trace.decision.humanApprovalReasons),
       capital:
         trace.decision.capital === null
           ? null
           : {
               ...trace.decision.capital,
-              cappedBy: sortedUnique(trace.decision.capital.cappedBy),
-              allocationSkipReasons: sortedUnique(trace.decision.capital.allocationSkipReasons),
+              cappedBy: sortedStrings(trace.decision.capital.cappedBy),
+              allocationSkipReasons: sortedStrings(trace.decision.capital.allocationSkipReasons),
             },
+      consensus: {
+        ...consensus,
+        blockingReasons: sortedStrings(consensus.blockingReasons),
+        blockingCodes: sortedStrings(consensus.blockingCodes),
+        votes: sortedByHash(consensus.votes),
+        contradictions: sortedByHash(consensus.contradictions),
+        findings: {
+          blocking: sortedByHash(consensus.findings.blocking),
+          major: sortedByHash(consensus.findings.major),
+          minor: sortedByHash(consensus.findings.minor),
+        },
+      },
       evidence: {
         ...trace.decision.evidence,
-        warnings: [...trace.decision.evidence.warnings].sort((a, b) =>
-          compareCodeUnit(a.code + '|' + a.ref, b.code + '|' + b.ref),
-        ),
-        impact: sortedUnique(trace.decision.evidence.impact),
+        warnings: sortedByHash(trace.decision.evidence.warnings),
+        impact: sortedStrings(trace.decision.evidence.impact),
       },
     },
-    risk: { ...trace.risk, reasons: sortedUnique(trace.risk.reasons) },
-    humanApproval: { ...trace.humanApproval, reasons: sortedUnique(trace.humanApproval.reasons) },
+    risk: { ...trace.risk, reasons: sortedStrings(trace.risk.reasons) },
+    humanApproval: { ...trace.humanApproval, reasons: sortedStrings(trace.humanApproval.reasons) },
+    criticFindings: sortedByHash(trace.criticFindings),
+    security: {
+      quarantinedEvidence: sortedByHash(
+        trace.security.quarantinedEvidence.map((q) => ({ ...q, rules: sortedStrings(q.rules) })),
+      ),
+    },
   };
 }
 
@@ -548,6 +585,15 @@ function validateAndIndexPerformance(
   return byKey;
 }
 
+function planStepShortfallCount(trace: DecisionTrace): number {
+  return trace.plan.steps.filter((step) => {
+    const answers = trace.attempts.filter(
+      (attempt) => attempt.stepId === step.id && attempt.status === 'ok' && !!attempt.opinion && !attempt.shadow,
+    );
+    return answers.length < step.models || new Set(answers.map((attempt) => attempt.provider)).size < step.minDistinctProviders;
+  }).length;
+}
+
 function processDiagnosticsOf(trace: DecisionTrace): ProcessDiagnostics {
   const successfulNonShadowAnalysts = trace.attempts.filter(
     (attempt) => attempt.status === 'ok' && attempt.opinion && attempt.role === 'analyst' && !attempt.shadow,
@@ -569,6 +615,7 @@ function processDiagnosticsOf(trace: DecisionTrace): ProcessDiagnostics {
     distinctAnalystProviders: new Set(successfulNonShadowAnalysts.map((attempt) => attempt.provider)).size,
     requiredIndependentOpinions,
     independentOpinionShortfall: Math.max(0, requiredIndependentOpinions - successfulNonShadowAnalysts.length),
+    planStepShortfallCount: planStepShortfallCount(trace),
     criticRequired: trace.plan.requiresCritic,
     criticObserved,
     counterAnalysisRequired: trace.plan.requiresCounterAnalysis,
@@ -595,17 +642,18 @@ function classifyProcess(diagnostics: ProcessDiagnostics, policy: PostTradeRevie
   if (!diagnostics.riskPassed || diagnostics.blockingFindingCount > 0) return 'PROCESS_BLOCKED';
   if (
     diagnostics.independentOpinionShortfall > 0 ||
+    diagnostics.planStepShortfallCount > 0 ||
     (diagnostics.criticRequired && !diagnostics.criticObserved) ||
     (diagnostics.counterAnalysisRequired && !diagnostics.counterAnalysisObserved) ||
-    diagnostics.majorFindingCount > 0
+    diagnostics.majorFindingCount > 0 ||
+    diagnostics.blockingEvidenceImpactCount > 0 ||
+    diagnostics.quantStatus === 'contradicts'
   ) {
     return 'PROCESS_WEAK';
   }
-  if (
-    diagnostics.evidenceCount >= policy.minimumEvidenceCountForStrong &&
-    diagnostics.evidenceWarningCount === 0 &&
-    diagnostics.blockingEvidenceImpactCount === 0
-  ) {
+  // A required approval that is still pending means the process has not finished, so it cannot be graded strong yet.
+  if (diagnostics.humanApprovalStatus === 'pending') return 'PROCESS_ACCEPTABLE';
+  if (diagnostics.evidenceCount >= policy.minimumEvidenceCountForStrong && diagnostics.evidenceWarningCount === 0) {
     return 'PROCESS_STRONG';
   }
   return 'PROCESS_ACCEPTABLE';

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { ModelKey } from '../../src/ai/model-types.js';
 import type { PerformanceObservation } from '../../src/ai/model-performance.js';
 import { evaluateTrade, FLAT_BAND_BP, OutcomeEvaluator, scoreAttempt, type TradeOutcome } from '../../src/evaluation/outcome-evaluator.js';
 import {
@@ -83,6 +84,11 @@ function strongTrace(source: DecisionTrace): DecisionTrace {
   const trace = structuredClone(source);
   trace.risk = { passed: true, reasons: [] };
   trace.plan.minIndependentOpinions = 1;
+  // A plan step that is still present but never answered is a shortfall, so the requirement and its step are removed together.
+  // The base fixture is a committee plan (two analysts, one answered), so a strong trace declares one analyst and one provider.
+  trace.plan.steps = trace.plan.steps
+    .filter((step) => step.role !== 'critic' && step.role !== 'counter_analyst')
+    .map((step) => (step.role === 'analyst' ? { ...step, models: 1, minDistinctProviders: 1 } : step));
   trace.plan.requiresCritic = false;
   trace.plan.requiresCounterAnalysis = false;
   trace.decision.consensus.findings.blocking = [];
@@ -377,6 +383,20 @@ describe('O13 post-trade review — RED', () => {
     const b = buildPostTradeReview(requestOf(base, { trace: bTrace }));
     expect(b.inputFingerprint).toBe(a.inputFingerprint);
     expect(b.reviewId).toBe(a.reviewId);
+  });
+
+  it('keeps the routing fallback order in identity, because it decides which model is tried next', async () => {
+    const base = await fixture();
+    const first = 'anthropic/fallback-a' as ModelKey;
+    const second = 'anthropic/fallback-b' as ModelKey;
+    const aTrace = structuredClone(base.trace);
+    const bTrace = structuredClone(base.trace);
+    aTrace.routing = [{ stepId: 'analysts', primaries: [CLAUDE], fallbacks: [first, second], shadow: [], rejected: [] }];
+    bTrace.routing = [{ stepId: 'analysts', primaries: [CLAUDE], fallbacks: [second, first], shadow: [], rejected: [] }];
+
+    const a = buildPostTradeReview(requestOf(base, { trace: aTrace }));
+    const b = buildPostTradeReview(requestOf(base, { trace: bTrace }));
+    expect(b.reviewId).not.toBe(a.reviewId);
   });
 
   it('changing the realized outcome changes review identity', async () => {
