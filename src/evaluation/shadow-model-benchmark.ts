@@ -458,6 +458,11 @@ export async function runShadowModelBenchmark(
   };
 }
 
+/** Recomputes every identity and derived value of a benchmark result from its own evidence (O11 review; not implemented yet). */
+export function verifyShadowModelBenchmarkResult(_result: ShadowModelBenchmarkResult): void {
+  throw new Error('not implemented');
+}
+
 export function compareShadowBenchmarks(
   results: readonly ShadowModelBenchmarkResult[],
 ): ShadowBenchmarkComparison {
