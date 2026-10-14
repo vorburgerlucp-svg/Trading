@@ -462,6 +462,12 @@ function validateOutcome(trace: DecisionTrace, outcome: TradeOutcome): void {
   if (knownAtMs < closedAtMs) fail('INVALID_OUTCOME', 'knownAt cannot precede closedAt');
   if (openedAtMs < decisionMs) fail('INVALID_OUTCOME', 'trade cannot open before the decision was made');
   if (typeof outcome.executed !== 'boolean') fail('INVALID_OUTCOME', 'executed must be a boolean');
+  if (
+    outcome.executed &&
+    (trace.decision.outcome !== 'RECOMMEND' || trace.decision.execution.paperIntentAllowed !== true)
+  ) {
+    fail('INVALID_OUTCOME', 'executed trade is inconsistent with the original decision execution gate');
+  }
   if (typeof outcome.feesChf !== 'bigint' || outcome.feesChf < 0n) {
     fail('INVALID_OUTCOME', 'feesChf must be a non-negative Rappen amount');
   }
