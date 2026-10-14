@@ -1,9 +1,10 @@
 import {
   POST_TRADE_REVIEW_VERSION,
+  classifyPostTradeOutcome,
+  classifyPostTradeProcess,
   type PostTradeFeedbackCode,
   type PostTradeReview,
 } from '../evaluation/post-trade-review.js';
-import { FLAT_BAND_BP } from '../evaluation/outcome-evaluator.js';
 import { hashOf } from '../persistence/canonical-json.js';
 
 export const TRADING_TUTOR_VERSION = 'trading-tutor:v1' as const;
@@ -117,30 +118,6 @@ function validatePolicy(raw: TradingTutorPolicy): TradingTutorPolicy {
   return { ...raw };
 }
 
-function expectedProcessClassification(review: PostTradeReview): PostTradeReview['processClassification'] {
-  const d = review.processDiagnostics;
-  if (!d.riskPassed || d.blockingFindingCount > 0) return 'PROCESS_BLOCKED';
-  if (
-    d.independentOpinionShortfall > 0 ||
-    d.planStepShortfallCount > 0 ||
-    (d.criticRequired && !d.criticObserved) ||
-    (d.counterAnalysisRequired && !d.counterAnalysisObserved) ||
-    d.majorFindingCount > 0 ||
-    d.blockingEvidenceImpactCount > 0 ||
-    d.quantStatus === 'contradicts'
-  ) {
-    return 'PROCESS_WEAK';
-  }
-  if (d.humanApprovalStatus === 'pending') return 'PROCESS_ACCEPTABLE';
-  if (
-    d.evidenceCount >= review.policy.minimumEvidenceCountForStrong &&
-    d.evidenceWarningCount === 0
-  ) {
-    return 'PROCESS_STRONG';
-  }
-  return 'PROCESS_ACCEPTABLE';
-}
-
 function validateReview(review: PostTradeReview): void {
   if (!review || typeof review !== 'object' || review.engineVersion !== POST_TRADE_REVIEW_VERSION) {
     fail('INVALID_REVIEW', 'only post-trade-review:v1 is supported');
@@ -198,11 +175,9 @@ function validateReview(review: PostTradeReview): void {
   if (d.liveOrderAllowed !== false || d.physicalPurchaseAllowed !== false) fail('INVALID_REVIEW', 'execution locks must remain false');
   if (!['confirmed', 'contradicts', 'not_available'].includes(d.quantStatus)) fail('INVALID_REVIEW', 'quant status is invalid');
   if (!['pending', 'not_required'].includes(d.humanApprovalStatus)) fail('INVALID_REVIEW', 'human approval status is invalid');
-  // The outcome class is re-derived from the embedded return with O13's own flat band, so a contradicting label is refused.
+  // Reuse O13's single outcome classifier rather than duplicating its flat-band semantics.
   if (!Number.isSafeInteger(o.returnBp)) fail('INVALID_REVIEW', 'outcome return must be an integer basis-point value');
-  const expectedOutcome =
-    o.returnBp > FLAT_BAND_BP ? 'OUTCOME_FAVORABLE' : o.returnBp < -FLAT_BAND_BP ? 'OUTCOME_ADVERSE' : 'OUTCOME_FLAT';
-  if (review.outcomeClassification !== expectedOutcome) {
+  if (review.outcomeClassification !== classifyPostTradeOutcome(o.returnBp)) {
     fail('INVALID_REVIEW', 'outcome classification does not match the embedded return');
   }
   // O13 always emits at least one feedback item (KEEP_PROCESS when nothing fired). An empty list is not a valid review.
@@ -219,7 +194,7 @@ function validateReview(review: PostTradeReview): void {
     }
   }
 
-  if (process !== expectedProcessClassification(review)) {
+  if (process !== classifyPostTradeProcess(d, review.policy)) {
     fail('INVALID_REVIEW', 'process classification does not match the embedded O13 diagnostics');
   }
   // "Keep this process" is a statement about a process that passed review; it cannot accompany a weak or blocked one.
