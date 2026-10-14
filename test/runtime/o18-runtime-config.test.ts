@@ -50,11 +50,15 @@ describe('O18 runtime configuration (fail closed)', () => {
     }
   });
 
-  it('an invalid port or host is refused', () => {
+  it('an invalid port or non-loopback host is refused', () => {
     expect(codeOf({ ...base, PORT: '0' })).toBe('CONFIG_INVALID');
     expect(codeOf({ ...base, PORT: '70000' })).toBe('CONFIG_INVALID');
     expect(codeOf({ ...base, PORT: '3000abc' })).toBe('CONFIG_INVALID');
     expect(codeOf({ ...base, HOST: 'bad host' })).toBe('CONFIG_INVALID');
+    expect(codeOf({ ...base, HOST: '0.0.0.0' })).toBe('CONFIG_INVALID');
+    expect(codeOf({ ...base, HOST: '192.168.1.10' })).toBe('CONFIG_INVALID');
+    expect(loadRuntimeConfig({ ...base, HOST: 'localhost' }).host).toBe('localhost');
+    expect(loadRuntimeConfig({ ...base, HOST: '::1' }).host).toBe('::1');
   });
 
   it('a malformed Twelve Data key is refused, and the error never echoes it', () => {
