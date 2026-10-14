@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { PerformanceObservation } from '../../src/ai/model-performance.js';
 import { evaluateTrade, FLAT_BAND_BP, OutcomeEvaluator, type TradeOutcome } from '../../src/evaluation/outcome-evaluator.js';
 import {
+  POST_TRADE_REVIEW_POLICY_VERSION,
   POST_TRADE_REVIEW_VERSION,
   PostTradeReviewError,
   buildPostTradeReview,
@@ -389,6 +390,46 @@ describe('O13 post-trade review — RED', () => {
     const base = await fixture();
     const tampered = { ...base.evaluation, returnBp: base.evaluation.returnBp + 1 };
     expect(codeOf(() => buildPostTradeReview(requestOf(base, { evaluation: tampered })))).toBe('INVALID_EVALUATION');
+  });
+
+  it('refuses impossible trade chronology and price envelopes', async () => {
+    const base = await fixture();
+
+    const closedBeforeOpen = tradeOutcome(base.trace.decision.decisionId, {
+      openedAt: '2026-10-10T16:00:00.000Z',
+      closedAt: '2026-10-10T15:59:59.999Z',
+    });
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { outcome: closedBeforeOpen })))).toBe('INVALID_OUTCOME');
+
+    const knownBeforeClose = tradeOutcome(base.trace.decision.decisionId, {
+      closedAt: '2026-10-10T16:06:00.000Z',
+      knownAt: '2026-10-10T16:05:00.000Z',
+    });
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { outcome: knownBeforeClose })))).toBe('INVALID_OUTCOME');
+
+    const impossibleHigh = tradeOutcome(base.trace.decision.decisionId, {
+      exitPrice: Decimal.from('108'),
+      highestPrice: Decimal.from('107'),
+    });
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { outcome: impossibleHigh })))).toBe('INVALID_OUTCOME');
+
+    const impossibleLow = tradeOutcome(base.trace.decision.decisionId, {
+      entryPrice: Decimal.from('100'),
+      lowestPrice: Decimal.from('101'),
+    });
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { outcome: impossibleLow })))).toBe('INVALID_OUTCOME');
+  });
+
+  it('refuses malformed review policy and detects tampered review artifacts', async () => {
+    const base = await fixture();
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, {
+      policy: { version: POST_TRADE_REVIEW_POLICY_VERSION, minimumEvidenceCountForStrong: -1 },
+    }))).toBe('INVALID_POLICY');
+
+    const request = requestOf(base);
+    const review = buildPostTradeReview(request);
+    const tampered = { ...review, processClassification: 'PROCESS_BLOCKED' as const };
+    expect(codeOf(() => verifyPostTradeReview(request, tampered))).toBe('INVALID_EVALUATION');
   });
 
   it('keeps weak-process/favorable-outcome and strong-process/adverse-outcome distinct', async () => {
