@@ -455,3 +455,220 @@ describe('O13 post-trade review — RED', () => {
     expect([strong.processClassification, strong.outcomeClassification]).toEqual(['PROCESS_STRONG', 'OUTCOME_ADVERSE']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Independent review probes (RED). Each probe names the review item it attacks. Probes that test a fail-closed refusal expect an error code; probes that
+// test a classification expect the classification. The fixture is the real Brain output (see the explore note in the review commit): its decision is
+// NO_ACTION and its outcome is executed, which is itself inconsistent and is documented as a finding rather than repaired here.
+// ---------------------------------------------------------------------------
+
+function messageOf(run: () => unknown): string {
+  try {
+    run();
+    return 'NO_ERROR';
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+describe('O13 review — evidence and time inside the trace (RED)', () => {
+  it('P1 evidence available after the decision asOf is refused, not graded as pre-trade evidence (review A)', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.inputs.evidence.push({ id: 'future-news', type: 'news', source: 'test', observedAt: '2026-10-01T09:00:00.000Z', availableAt: '2026-10-01T09:00:00.000Z', status: 'fresh', version: null });
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('P2 evidence whose availableAt precedes its observedAt is refused', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.inputs.evidence.push({ id: 'impossible', type: 'news', source: 'test', observedAt: '2026-10-01T07:59:00.000Z', availableAt: '2026-10-01T07:58:00.000Z', status: 'fresh', version: null });
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('P3 an item present both as included evidence and as excluded look-ahead is refused', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.inputs.excludedLookAhead = ['price-aapl'];
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('P4 duplicate evidence ids are refused rather than counted twice (review item 7)', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.inputs.evidence.push({ ...trace.inputs.evidence[0]! });
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('P5 quarantined evidence is not counted as evidence', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.security.quarantinedEvidence = [{ evidenceId: 'price-aapl', rules: ['test-rule'] }];
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('P6 a capital state read after the decision asOf is refused', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.inputs.capitalStateTimestamp = '2026-10-01T09:00:00.000Z';
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('P9 record and decision must agree on finalAction (review D)', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.record.finalAction = 'RECOMMEND';
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('P10 record, decision and inputs must agree on the capital state reference', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.record.capitalStateRef = 'ledger:other@9:00#asOf=2026-10-01T08:00:00.000Z';
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('P11 a successful attempt must be one of the recorded model runs', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.record.modelRuns = ['not-a-recorded-run'];
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+
+  it('P12 record evidence references must resolve to the trace inputs (review §6)', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.record.evidenceRefs = [...trace.record.evidenceRefs, 'ghost-evidence'];
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+});
+
+describe('O13 review — outcome and price semantics (RED)', () => {
+  it('P13 a trade opened before the decision was made is refused', async () => {
+    const base = await fixture();
+    const outcome = tradeOutcome(base.trace.decision.decisionId, { openedAt: '2026-10-01T07:59:59.000Z' });
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { outcome })))).toBe('INVALID_OUTCOME');
+  });
+
+  it('P14 a bullish trade whose stop sits above its entry is refused', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.decision.direction = 'bullish';
+    const outcome = tradeOutcome(base.trace.decision.decisionId, { stopLoss: Decimal.from('105') });
+    const evaluation = evaluateTrade(outcome, 'bullish');
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace, outcome, evaluation })))).toBe('INVALID_OUTCOME');
+  });
+
+  it('P15 a bearish trade with stop or target is refused: the stop and target semantics are long-only', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.decision.direction = 'bearish';
+    const outcome = tradeOutcome(base.trace.decision.decisionId);
+    const evaluation = evaluateTrade(outcome, 'bearish');
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace, outcome, evaluation })))).toBe('INVALID_OUTCOME');
+  });
+
+  it('P16 negative fees are refused at runtime', async () => {
+    const base = await fixture();
+    const outcome = tradeOutcome(base.trace.decision.decisionId, { feesChf: -1n as never });
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { outcome })))).toBe('INVALID_OUTCOME');
+  });
+
+  it('P8 a flat buy or sell carries no direction-correct label, so it produces no Brier diagnostic (review G)', async () => {
+    const base = await fixture({ recommendation: 'buy' });
+    const trace = structuredClone(base.trace);
+    trace.attempts[0]!.calibratedProbability = 0.75;
+    trace.attempts[0]!.calibrationMethod = 'histogram_binning@test';
+    const outcome = tradeOutcome(base.trace.decision.decisionId, { exitPrice: Decimal.from('100.5') });
+    const evaluation = evaluateTrade(outcome, trace.decision.direction);
+    const observations = base.observations.map((o) => ({ ...o, score: 0.5 }));
+    const review = buildPostTradeReview(requestOf(base, { trace, outcome, evaluation, performanceObservations: observations }));
+    expect(review.calibrationDiagnostics).toEqual([]);
+  });
+
+  it('P22 a calibrated probability on a hold is not reported as an attributed probability (review G)', async () => {
+    const base = await fixture({ recommendation: 'hold' });
+    const trace = structuredClone(base.trace);
+    trace.attempts[0]!.calibratedProbability = 0.75;
+    trace.attempts[0]!.calibrationMethod = 'histogram_binning@test';
+    const review = buildPostTradeReview(requestOf(base, { trace }));
+    expect(review.attemptAttribution[0]!.calibratedProbability).toBeNull();
+  });
+
+  it('P21 a calibration method without a probability is refused', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.attempts[0]!.calibrationMethod = 'histogram_binning@test';
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { trace })))).toBe('INVALID_TRACE');
+  });
+});
+
+describe('O13 review — performance scores and classification (RED)', () => {
+  it('P7 an observation score that differs from the OutcomeEvaluator rule is refused (review C)', async () => {
+    const base = await fixture();
+    const observations = base.observations.map((o) => ({ ...o, score: 0.123 }));
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { performanceObservations: observations })))).toBe('INVALID_PERFORMANCE');
+  });
+
+  it('P17 evidence impact on the outcome makes the process weak, not merely not strong (review B)', async () => {
+    const base = await fixture();
+    const trace = strongTrace(base.trace);
+    trace.decision.evidence.impact = ['EVIDENCE_IMPACT_TEST' as never];
+    expect(buildPostTradeReview(requestOf(base, { trace })).processClassification).toBe('PROCESS_WEAK');
+  });
+
+  it('P18 a quant assessment that contradicts the decision makes the process weak (review B)', async () => {
+    const base = await fixture();
+    const trace = strongTrace(base.trace);
+    trace.inputs.quant = { status: 'contradicts', direction: 'bearish', quantRunId: 'quant-run-x' };
+    expect(buildPostTradeReview(requestOf(base, { trace })).processClassification).toBe('PROCESS_WEAK');
+  });
+
+  it('P19 a pending required human approval prevents a strong process grade (review B)', async () => {
+    const base = await fixture();
+    const trace = strongTrace(base.trace);
+    trace.decision.requiresHumanApproval = true;
+    trace.humanApproval = { required: true, status: 'pending', reasons: ['test approval'] };
+    expect(buildPostTradeReview(requestOf(base, { trace })).processClassification).toBe('PROCESS_ACCEPTABLE');
+  });
+
+  it('P20 a plan step whose model or provider requirement is unmet makes the process weak (review B)', async () => {
+    const base = await fixture();
+    const trace = strongTrace(base.trace);
+    trace.plan.steps = trace.plan.steps.map((step) => (step.id === 'analysts' ? { ...step, models: 2, minDistinctProviders: 2 } : step));
+    expect(buildPostTradeReview(requestOf(base, { trace })).processClassification).toBe('PROCESS_WEAK');
+  });
+
+  it('P24 a policy that allows a strong process without any evidence is refused', async () => {
+    const base = await fixture();
+    expect(codeOf(() => buildPostTradeReview(requestOf(base, { policy: { version: POST_TRADE_REVIEW_POLICY_VERSION, minimumEvidenceCountForStrong: 0 } })))).toBe('INVALID_POLICY');
+  });
+
+  it('P23 set-like reasons do not change review identity (review D, item 16)', async () => {
+    const base = await fixture();
+    const a = structuredClone(base.trace);
+    const b = structuredClone(base.trace);
+    a.decision.reasons = ['ALPHA', 'BETA'];
+    b.decision.reasons = ['BETA', 'ALPHA'];
+    expect(buildPostTradeReview(requestOf(base, { trace: b })).reviewId).toBe(buildPostTradeReview(requestOf(base, { trace: a })).reviewId);
+  });
+
+  it('P25 the review message names the reason for an impossible stop (guard for the new refusals)', async () => {
+    const base = await fixture();
+    const trace = structuredClone(base.trace);
+    trace.decision.direction = 'bearish';
+    const outcome = tradeOutcome(base.trace.decision.decisionId);
+    const evaluation = evaluateTrade(outcome, 'bearish');
+    expect(messageOf(() => buildPostTradeReview(requestOf(base, { trace, outcome, evaluation })))).toMatch(/stop|target/i);
+  });
+});
+
+describe('O13 review — the pure core has no side effects (guard)', () => {
+  it('the review module imports no memory, registry, champion, risk, capital, broker or audit module at runtime', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('../../src/evaluation/post-trade-review.ts', import.meta.url), 'utf8');
+    const runtimeImports = [...source.matchAll(/^import (?!type )[^;]*from '([^']+)';/gm)].map((match) => match[1]!);
+    const forbidden = /nexus-memory|model-registry|champion|risk|capital|broker|audit|postgres|model-performance/i;
+    expect(runtimeImports.filter((spec) => forbidden.test(spec))).toEqual([]);
+  });
+});
