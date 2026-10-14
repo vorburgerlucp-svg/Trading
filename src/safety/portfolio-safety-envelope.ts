@@ -27,6 +27,7 @@ export interface PortfolioSafetyPolicy {
   maxGrossExposureBp: number;
   maxSinglePositionExposureBp: number;
   maxOpenPositions: number;
+  maxFinancialQuoteAgeMs: number;
   requireCompleteFinancialPricing: true;
 }
 
@@ -187,6 +188,7 @@ function validatePolicy(policy: PortfolioSafetyPolicy): void {
     ['maxGrossExposureBp', policy.maxGrossExposureBp],
     ['maxSinglePositionExposureBp', policy.maxSinglePositionExposureBp],
     ['maxOpenPositions', policy.maxOpenPositions],
+    ['maxFinancialQuoteAgeMs', policy.maxFinancialQuoteAgeMs],
   ] as const) {
     requirePositiveSafeInt(value, 'INVALID_POLICY', label);
   }
@@ -390,6 +392,11 @@ export function evaluatePortfolioSafetyEnvelope(
     openPositions.some((position) => position.marketValueChf === null) ||
     openPositions.some((position) => position.lastQuote === null) ||
     openPositions.some((position) => position.priceStatus !== 'live') ||
+    openPositions.some((position) => {
+      if (position.lastQuote === null) return true;
+      const quoteMs = Date.parse(position.lastQuote.asOf);
+      return asOfMs - quoteMs > request.policy.maxFinancialQuoteAgeMs;
+    }) ||
     capitalData.unpricedPositions.length > 0 ||
     capitalData.stalePositions.length > 0
   ) {
