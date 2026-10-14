@@ -3,6 +3,7 @@ import {
   type PostTradeFeedbackCode,
   type PostTradeReview,
 } from '../evaluation/post-trade-review.js';
+import { FLAT_BAND_BP } from '../evaluation/outcome-evaluator.js';
 import { hashOf } from '../persistence/canonical-json.js';
 
 export const TRADING_TUTOR_VERSION = 'trading-tutor:v1' as const;
@@ -82,9 +83,24 @@ function fail(code: TradingTutorError['code'], message: string): never {
   throw new TradingTutorError(code, message);
 }
 
+/** The exact policy keys. An unknown key would otherwise be hashed into the lesson identity without being validated. */
+const POLICY_KEYS = [
+  'includeCalibrationDiagnostics',
+  'includeExecutionDiagnostics',
+  'learnerLevel',
+  'maxLearningObjectives',
+  'maxReflectionQuestions',
+  'version',
+];
+const FEEDBACK_SEVERITIES: readonly string[] = ['info', 'minor', 'major'];
+const FEEDBACK_BASES: readonly string[] = ['process', 'outcome', 'both'];
+const CALIBRATION_TARGET = 'recommendation_direction_correct:v1' as const;
+
 function validatePolicy(raw: TradingTutorPolicy): TradingTutorPolicy {
   if (
     !raw ||
+    typeof raw !== 'object' ||
+    Object.keys(raw).sort().join('|') !== POLICY_KEYS.join('|') ||
     raw.version !== TRADING_TUTOR_POLICY_VERSION ||
     !LEVELS.includes(raw.learnerLevel) ||
     !Number.isSafeInteger(raw.maxLearningObjectives) ||
@@ -161,8 +177,54 @@ function validateReview(review: PostTradeReview): void {
   ) {
     fail('INVALID_REVIEW', 'embedded O13 process policy is invalid');
   }
+  const d = review.processDiagnostics;
+  const o = review.outcomeDiagnostics;
+  if (!d || !o || !Array.isArray(review.calibrationDiagnostics) || !Array.isArray(review.feedback)) {
+    fail('INVALID_REVIEW', 'O13 review is missing diagnostics, calibration or feedback');
+  }
+  const counts = [
+    d.evidenceCount, d.excludedLookAheadCount, d.evidenceWarningCount, d.blockingEvidenceImpactCount,
+    d.successfulNonShadowAnalysts, d.distinctAnalystProviders, d.requiredIndependentOpinions,
+    d.independentOpinionShortfall, d.planStepShortfallCount, d.blockingFindingCount, d.majorFindingCount,
+  ];
+  if (counts.some((count) => !Number.isSafeInteger(count) || count < 0)) {
+    fail('INVALID_REVIEW', 'process diagnostics must be non-negative integers');
+  }
+  const flags = [
+    d.riskPassed, d.criticRequired, d.criticObserved, d.counterAnalysisRequired, d.counterAnalysisObserved,
+    d.humanApprovalRequired, d.paperIntentAllowed, d.capitalStateRefPresent,
+  ];
+  if (flags.some((flag) => typeof flag !== 'boolean')) fail('INVALID_REVIEW', 'process diagnostics must be booleans where O13 defines booleans');
+  if (d.liveOrderAllowed !== false || d.physicalPurchaseAllowed !== false) fail('INVALID_REVIEW', 'execution locks must remain false');
+  if (!['confirmed', 'contradicts', 'not_available'].includes(d.quantStatus)) fail('INVALID_REVIEW', 'quant status is invalid');
+  if (!['pending', 'not_required'].includes(d.humanApprovalStatus)) fail('INVALID_REVIEW', 'human approval status is invalid');
+  // The outcome class is re-derived from the embedded return with O13's own flat band, so a contradicting label is refused.
+  if (!Number.isSafeInteger(o.returnBp)) fail('INVALID_REVIEW', 'outcome return must be an integer basis-point value');
+  const expectedOutcome =
+    o.returnBp > FLAT_BAND_BP ? 'OUTCOME_FAVORABLE' : o.returnBp < -FLAT_BAND_BP ? 'OUTCOME_ADVERSE' : 'OUTCOME_FLAT';
+  if (review.outcomeClassification !== expectedOutcome) {
+    fail('INVALID_REVIEW', 'outcome classification does not match the embedded return');
+  }
+  // O13 always emits at least one feedback item (KEEP_PROCESS when nothing fired). An empty list is not a valid review.
+  if (review.feedback.length === 0) fail('INVALID_REVIEW', 'O13 review carries no feedback');
+  for (const item of review.feedback) {
+    if (!Object.prototype.hasOwnProperty.call(FEEDBACK_CATEGORY, item.code)) {
+      fail('INVALID_REVIEW', 'unknown O13 feedback code ' + String(item.code));
+    }
+    if (!FEEDBACK_SEVERITIES.includes(item.severity) || !FEEDBACK_BASES.includes(item.basis)) {
+      fail('INVALID_REVIEW', 'malformed O13 feedback severity or basis');
+    }
+    if (!Array.isArray(item.references) || item.references.some((ref) => typeof ref !== 'string') || typeof item.explanation !== 'string') {
+      fail('INVALID_REVIEW', 'malformed O13 feedback item');
+    }
+  }
+
   if (process !== expectedProcessClassification(review)) {
     fail('INVALID_REVIEW', 'process classification does not match the embedded O13 diagnostics');
+  }
+  // "Keep this process" is a statement about a process that passed review; it cannot accompany a weak or blocked one.
+  if ((process === 'PROCESS_WEAK' || process === 'PROCESS_BLOCKED') && review.feedback.some((item) => item.code === 'KEEP_PROCESS')) {
+    fail('INVALID_REVIEW', 'KEEP_PROCESS cannot accompany a weak or blocked process');
   }
   for (const diagnostic of review.calibrationDiagnostics) {
     if (
@@ -175,6 +237,11 @@ function validateReview(review: PostTradeReview): void {
       (diagnostic.outcomeLabel !== 0 && diagnostic.outcomeLabel !== 1)
     ) {
       fail('INVALID_REVIEW', 'calibration diagnostic is invalid');
+    }
+    if (diagnostic.targetId !== CALIBRATION_TARGET) fail('INVALID_REVIEW', 'calibration target is not supported');
+    // The Brier contribution is re-derived from the probability and the binary label, not trusted from the artifact.
+    if (diagnostic.brierContribution !== (diagnostic.calibratedProbability - diagnostic.outcomeLabel) ** 2) {
+      fail('INVALID_REVIEW', 'Brier contribution does not match its probability and label');
     }
   }
 }
@@ -270,7 +337,7 @@ export function buildTradingTutorLesson(
   validateReview(review);
   const policy = validatePolicy(rawPolicy);
   const categories = categoriesOf(review);
-  const effectiveCategories = categories.length > 0 ? categories : ['PROCESS_DISCIPLINE' as const];
+  if (categories.length === 0) fail('INVALID_REVIEW', 'O13 review yields no lesson category');
   const sourceFingerprint = hashOf(review);
   const inputFingerprint = hashOf({
     engineVersion: TRADING_TUTOR_VERSION,
@@ -280,10 +347,10 @@ export function buildTradingTutorLesson(
   });
   const lessonId = 'ttl_' + inputFingerprint.slice(0, 40);
   const title = 'Post-trade lesson: ' + review.processClassification + ' / ' + review.outcomeClassification;
-  const learningObjectives = effectiveCategories
+  const learningObjectives = categories
     .map((category) => objective(category, policy.learnerLevel))
     .slice(0, policy.maxLearningObjectives);
-  const reflectionQuestions = effectiveCategories
+  const reflectionQuestions = categories
     .map((category) => reflection(category, policy.learnerLevel))
     .slice(0, policy.maxReflectionQuestions);
   const references = [
@@ -307,11 +374,19 @@ export function buildTradingTutorLesson(
   };
 }
 
+/**
+ * Recomputes the lesson from its review. A lesson carries its own policy, so a consumer that expects a specific policy passes
+ * it in: a lesson re-issued under another policy is then refused, instead of verifying against its own stored policy.
+ */
 export function verifyTradingTutorLesson(
   review: PostTradeReview,
   lesson: TradingTutorLesson,
+  expectedPolicy?: TradingTutorPolicy,
 ): void {
   if (!lesson || typeof lesson !== 'object') fail('INVALID_LESSON', 'lesson is missing');
+  if (expectedPolicy !== undefined && hashOf(lesson.policy) !== hashOf(validatePolicy(expectedPolicy))) {
+    fail('INVALID_LESSON', 'lesson was built under a different tutor policy than the expected one');
+  }
   let expected: TradingTutorLesson;
   try {
     expected = buildTradingTutorLesson(review, lesson.policy);
