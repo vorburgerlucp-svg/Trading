@@ -42,17 +42,20 @@ export class PortfolioSafetyService {
     if (previous.status === 'ARMED' && decision.killSwitch.status === 'TRIPPED') {
       try {
         await this.killSwitch.latch(decision.killSwitch);
+        // This exact decision produced the persisted trip fingerprint; return it unchanged for auditability.
+        return decision;
       } catch (error) {
         if (!(error instanceof PortfolioKillSwitchStoreError) || error.code !== 'ALREADY_TRIPPED') throw error;
+        // Another writer won the latch race. Re-evaluate against the authoritative persisted winner.
         await this.killSwitch.sync();
+        previous = this.killSwitch.current();
+        decision = evaluatePortfolioSafetyEnvelope({
+          portfolio,
+          day,
+          previousKillSwitch: previous,
+          policy,
+        });
       }
-      previous = this.killSwitch.current();
-      decision = evaluatePortfolioSafetyEnvelope({
-        portfolio,
-        day,
-        previousKillSwitch: previous,
-        policy,
-      });
     }
 
     return decision;
