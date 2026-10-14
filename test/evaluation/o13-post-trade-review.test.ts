@@ -78,6 +78,19 @@ function requestOf(
   };
 }
 
+function strongTrace(source: DecisionTrace): DecisionTrace {
+  const trace = structuredClone(source);
+  trace.risk = { passed: true, reasons: [] };
+  trace.plan.minIndependentOpinions = 1;
+  trace.plan.requiresCritic = false;
+  trace.plan.requiresCounterAnalysis = false;
+  trace.decision.consensus.findings.blocking = [];
+  trace.decision.consensus.findings.major = [];
+  trace.decision.evidence.warnings = [];
+  trace.decision.evidence.impact = [];
+  return trace;
+}
+
 function codeOf(run: () => unknown): string {
   try {
     run();
@@ -156,6 +169,7 @@ describe('O13 post-trade review — RED', () => {
     const observations = base.observations.map((o) => ({ ...o, score: 0 }));
 
     const review = buildPostTradeReview(requestOf(base, {
+      trace: strongTrace(base.trace),
       outcome: adverseOutcome,
       evaluation: adverseEvaluation,
       performanceObservations: observations,
@@ -392,6 +406,7 @@ describe('O13 post-trade review — RED', () => {
     });
     const adverseEvaluation = evaluateTrade(adverseOutcome, favorable.trace.decision.direction);
     const strong = buildPostTradeReview(requestOf(favorable, {
+      trace: strongTrace(favorable.trace),
       outcome: adverseOutcome,
       evaluation: adverseEvaluation,
       performanceObservations: favorable.observations.map((o) => ({ ...o, score: 0 })),
