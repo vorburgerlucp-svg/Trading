@@ -508,3 +508,46 @@ Broker Orders remain LOCKED.
 Physical Purchase remains LOCKED.
 
 O15 only adds a stricter, independently verifiable permission-reduction layer.
+
+## 27. Independent review amendment (Haiku, branch `feature/o15-haiku-review-hardening-v1`)
+
+This section records the decisions the independent review took where the sections above left a choice open, the rules it added, and the trust boundaries that remain. Where it differs from the sections above, this section is authoritative.
+
+### 27.1 Decisions
+
+- **Risk day is the UTC calendar day (§5, §16).** The policy has no day-boundary input, so a trading-day boundary cannot be proven by O15. A day whose `dayStartedAt` or `asOf` falls on another UTC date than `dayId` is refused. A prior-day start with the current `dayId` is therefore a refusal, not a silent regrade.
+- **CHF loss, realized-loss and drawdown limits are positive (§9).** A zero limit trips a flat portfolio: zero loss meets a zero limit. Such a policy would latch the kill switch on a healthy day, so it is refused at policy time. The bp limits were already positive.
+- **Peak rule (§7).** The text says the peak must never be below "both" the day start and the current adjusted net worth. The code refuses a peak below either. The code is the sound reading: the day's peak is the maximum over the points that include the start and the current state, so it is at least each of them.
+- **Ceiling rounding is conservative (§10, §19).** Daily-loss bp, drawdown bp and exposure bp use the ceiling. A value that exceeds its boundary by a fraction of a basis point therefore trips or blocks on the next whole basis point. This is deliberate: a fractional excess must not pass as "not over the limit".
+- **`isOpen` is derived from the quantity (§8, §16).** The capital engine sets `isOpen = !quantity.isZero()`. O15 refuses a position whose flag contradicts its quantity, since a hidden holding would escape exposure and the open-position count. V1 is long-only, so a negative quantity is refused.
+- **A quote prices its own position and is not from the future.** A quote for another instrument, a quote whose time is not canonical UTC, or a quote later than the portfolio `asOf` is refused as `INVALID_PORTFOLIO`. An open position with a market value but no quote is a `DATA_HOLD`, because the value cannot be shown to be fresh.
+- **A latched trip id is derived from its triggering fingerprint (§14, §15).** O15 derives the id as `trip_` plus the first 40 hex digits of the fingerprint. A previously tripped state carrying any other id is not a state O15 could have produced, so it is refused rather than preserved as a trip identity.
+- **The inventory array is required.** The snapshot's inventory is part of the identity hash, so a malformed value is a classified refusal, not an unclassified `TypeError`.
+
+### 27.2 Rules that already hold, now pinned
+
+- Adjusted net worth subtracts the net external flow: a deposit with a loss shows the loss; a withdrawal with a gain shows the gain; flows larger than current net worth produce a large adjusted loss that trips.
+- Loss and drawdown trip exactly at their limits (`>=`); exposure caps trip above the cap (`>`) and block at the cap (`=`), for the gross, single-position and open-position dimensions.
+- A breach together with a data hold is `TRIPPED`, and the data-hold reason is still reported. Capacity reasons are reported under a data hold.
+- A gross-exposure capacity block and a single-position breach in the same decision keep both reasons and trip.
+- A tripped switch stays tripped under data recovery, under a data hold, and when the current breach differs; its trip id and reasons are preserved.
+- Decision identity is independent of position order, of the order of previous kill-switch reasons and of the data-status lists; it changes with policy, source hashes, data hold, capacity state and hard breaches.
+- The verifier recomputes the decision from the request and rejects any reissued flag, alert, source fingerprint or identity.
+- `canIncreaseRisk` is true only in `NORMAL`; `canReduceRisk` is true in every state; `liveOrderAllowed` and `physicalPurchaseAllowed` are false in every state.
+- The module exposes no reset, clear, arm, unlatch or enable function. The module imports no broker, ledger, registry, champion, capital, audit or network module at runtime.
+
+### 27.3 Trust boundaries that remain
+
+These cannot be proven from `PortfolioSnapshot`, `RiskDaySummary` and `PortfolioKillSwitch` alone. The authoritative producer or the store owns them.
+
+1. **External flows (§5, §6).** O15 cannot verify `netExternalFlowsTodayChf`. A sign-flipped or understated flow can hide a trading loss, and the summary remains structurally consistent. `sourceLedgerHeadHash` binds the summary to a ledger head, but O15 does not verify the ledger. The append-only ledger producer is the authority for flows.
+2. **Day peak (§7).** `peakAdjustedNetWorthChf` is caller-supplied. O15 proves only that it is at least the start and the current adjusted net worth. A deflated peak at that minimum hides an intraday drawdown. The producer must track the true intraday maximum.
+3. **Quote freshness (§8, §11).** The capital policy's quote-age limit is not an O15 input. A quote that is old by policy but still marked `live` by the position view is not detectable here. O15 relies on the position view's `priceStatus` for freshness.
+4. **Kill-switch provenance (§14).** `previousKillSwitch` is an input. A self-consistent latched state that was never stored by O15 is accepted. The store must be append-only, which is outside this branch.
+5. **Trip identity content (§15).** The trip id hashes more than the list in §15: it also binds the metrics and the previous kill-switch hash. It is deterministic; the spec list is a minimum, not an exact definition.
+6. **Realized trading P&L (§5).** `realizedTradingPnlTodayChf` is caller-supplied and is not reconciled with the adjusted daily P&L.
+7. **Stale closed positions.** A closed position listed as stale or unpriced still holds the decision. This is conservative and is pinned.
+
+### 27.4 Scope
+
+No broker adapter, Capital Engine accounting rule, registry, champion governance, alert transport, audit persistence or kill-switch reset flow was changed. `LockedBroker.place` is unchanged.
