@@ -315,8 +315,9 @@ export function evaluatePortfolioSafetyEnvelope(
   request: PortfolioSafetyRequest,
 ): PortfolioSafetyDecision {
   validatePolicy(request.policy);
-  validatePortfolio(request.portfolio, request.day);
+  // Validate the explicit risk-day source first so malformed day timestamps/hashes are attributed to that source.
   validateDay(request.day, request.portfolio);
+  validatePortfolio(request.portfolio, request.day);
   validateKillSwitch(request.previousKillSwitch, request.day.asOf);
 
   const adjustedCurrentNetWorthChf = rappen(
