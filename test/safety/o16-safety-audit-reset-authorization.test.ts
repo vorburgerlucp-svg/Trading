@@ -38,9 +38,9 @@ import { SafetyAuditService } from '../../src/safety/safety-audit.js';
 
 const DAY_START = '2026-10-14T00:00:00.000Z';
 const TRIP_AT = '2026-10-14T10:00:00.000Z';
-const REQUEST_AT = '2026-10-14T10:30:00.000Z';
-const APPROVE_AT = '2026-10-14T11:00:00.000Z';
-const AS_OF = '2026-10-14T11:00:00.000Z';
+const REQUEST_AT = '2026-10-14T10:15:00.000Z';
+const APPROVE_AT = '2026-10-14T10:30:00.000Z';
+const AS_OF = '2026-10-14T10:15:00.000Z';
 
 function position(overrides: Partial<PositionView> = {}): PositionView {
   return {
@@ -474,7 +474,7 @@ describe('O16 recovery and reset authorization — RED', () => {
     expect(auth.applyAllowed).toBe(false);
     expect(auth.liveOrderAllowed).toBe(false);
     expect(auth.physicalPurchaseAllowed).toBe(false);
-    expect(auth.expiresAt).toBe('2026-10-14T11:15:00.000Z');
+    expect(auth.expiresAt).toBe('2026-10-14T10:45:00.000Z');
     expect(() => verifyKillSwitchResetAuthorization(source, request, approval, resetPolicy, auth, APPROVE_AT)).not.toThrow();
   });
 
@@ -495,7 +495,7 @@ describe('O16 recovery and reset authorization — RED', () => {
     });
     const auth = authorizeKillSwitchReset(source, request, approval, resetPolicy, APPROVE_AT);
     expect(errorCode(() => verifyKillSwitchResetAuthorization(
-      source, request, approval, resetPolicy, auth, '2026-10-14T11:15:00.001Z',
+      source, request, approval, resetPolicy, auth, '2026-10-14T10:45:00.001Z',
     ))).toBe('AUTHORIZATION_EXPIRED');
 
     const tampered = structuredClone(auth);
