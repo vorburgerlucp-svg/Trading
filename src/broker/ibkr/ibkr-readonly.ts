@@ -13,7 +13,7 @@ export const IBKR_READ_OPERATIONS = Object.freeze({
   'account.meta': { method: 'GET', path: '/portfolio/{accountId}/meta', minIntervalMs: 0 },
   'account.ledger': { method: 'GET', path: '/portfolio/{accountId}/ledger', minIntervalMs: 0 },
   'positions.page': { method: 'GET', path: '/portfolio/{accountId}/positions/{pageId}', minIntervalMs: 0 },
-  'orders.open': { method: 'GET', path: '/iserver/account/orders', minIntervalMs: 5_000 },
+  'orders.open': { method: 'GET', path: '/iserver/account/orders?accountId={accountId}', minIntervalMs: 5_000 },
 } as const);
 
 export type IbkrReadOperation = keyof typeof IBKR_READ_OPERATIONS;
