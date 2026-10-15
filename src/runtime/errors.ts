@@ -5,6 +5,7 @@ import { IndicatorError } from '../quant/indicators/common.js';
 import { MarketDataError } from '../market-data/market-data-provider.js';
 import { MarketDataIntegrityError, MarketDataStoreError } from '../market-data/market-data-store.js';
 import { InstrumentRegistryError, InstrumentRegistryIntegrityError } from '../market-data/instrument-registry.js';
+import { IbkrError } from '../broker/ibkr/ibkr-errors.js';
 
 export type RuntimeErrorCode =
   | 'DATA_NOT_CONNECTED'
@@ -18,7 +19,20 @@ export type RuntimeErrorCode =
   | 'METHOD_NOT_ALLOWED'
   | 'PAYLOAD_TOO_LARGE'
   | 'NOT_IMPLEMENTED'
-  | 'INTERNAL_ERROR';
+  | 'INTERNAL_ERROR'
+  | 'BROKER_NOT_CONNECTED'
+  | 'BROKER_AUTH_REQUIRED'
+  | 'BROKER_ACCOUNT_NOT_FOUND'
+  | 'BROKER_ACCOUNT_AMBIGUOUS'
+  | 'BROKER_RESPONSE_INVALID'
+  | 'BROKER_TIMEOUT'
+  | 'BROKER_RATE_LIMITED'
+  | 'BROKER_INSTRUMENT_UNMAPPED'
+  | 'BROKER_SNAPSHOT_STALE'
+  | 'BROKER_RECONCILIATION_FAILURE'
+  | 'BROKER_SESSION_COMPETING'
+  | 'BROKER_BROKERAGE_INIT_REQUIRED'
+  | 'BROKER_BROKERAGE_INIT_FAILED';
 
 const FIXED_MESSAGE: Readonly<Record<RuntimeErrorCode, string>> = Object.freeze({
   DATA_NOT_CONNECTED: 'market data is not connected; no data is returned in its place',
@@ -33,6 +47,19 @@ const FIXED_MESSAGE: Readonly<Record<RuntimeErrorCode, string>> = Object.freeze(
   PAYLOAD_TOO_LARGE: 'the request body is too large',
   NOT_IMPLEMENTED: 'this capability is not available in this build',
   INTERNAL_ERROR: 'internal error',
+  BROKER_NOT_CONNECTED: 'the broker is not connected: nothing is returned in its place',
+  BROKER_AUTH_REQUIRED: 'the broker session is not authenticated: log in to the gateway in the browser',
+  BROKER_ACCOUNT_NOT_FOUND: 'the configured broker account is not readable in this session',
+  BROKER_ACCOUNT_AMBIGUOUS: 'several broker accounts are readable and none is configured: refusing to choose',
+  BROKER_RESPONSE_INVALID: 'the broker response does not match the expected read-only schema',
+  BROKER_TIMEOUT: 'the broker gateway did not answer in time',
+  BROKER_RATE_LIMITED: 'the broker request rate limit applies: no retry is made',
+  BROKER_INSTRUMENT_UNMAPPED: 'the broker contract cannot be linked to a NEXUS instrument without guessing',
+  BROKER_SNAPSHOT_STALE: 'the broker snapshot is stale: it is not current broker state',
+  BROKER_RECONCILIATION_FAILURE: 'the reconciliation could not be computed',
+  BROKER_SESSION_COMPETING: 'another broker brokerage session is active: it is not taken over',
+  BROKER_BROKERAGE_INIT_REQUIRED: 'the broker brokerage session is not ready and starting it is not enabled: nothing is started automatically',
+  BROKER_BROKERAGE_INIT_FAILED: 'the broker brokerage session could not be started and verified',
 });
 
 const STATUS: Readonly<Record<RuntimeErrorCode, number>> = Object.freeze({
@@ -48,6 +75,19 @@ const STATUS: Readonly<Record<RuntimeErrorCode, number>> = Object.freeze({
   PAYLOAD_TOO_LARGE: 413,
   NOT_IMPLEMENTED: 501,
   INTERNAL_ERROR: 500,
+  BROKER_NOT_CONNECTED: 503,
+  BROKER_AUTH_REQUIRED: 503,
+  BROKER_ACCOUNT_NOT_FOUND: 409,
+  BROKER_ACCOUNT_AMBIGUOUS: 409,
+  BROKER_RESPONSE_INVALID: 502,
+  BROKER_TIMEOUT: 504,
+  BROKER_RATE_LIMITED: 429,
+  BROKER_INSTRUMENT_UNMAPPED: 409,
+  BROKER_SNAPSHOT_STALE: 409,
+  BROKER_RECONCILIATION_FAILURE: 500,
+  BROKER_SESSION_COMPETING: 409,
+  BROKER_BROKERAGE_INIT_REQUIRED: 409,
+  BROKER_BROKERAGE_INIT_FAILED: 503,
 });
 
 export class RuntimeApiError extends Error {
@@ -83,6 +123,8 @@ export function toRuntimeApiError(error: unknown): RuntimeApiError {
     return new RuntimeApiError('REQUEST_INVALID');
   }
   if (error instanceof MarketDataStoreError) return new RuntimeApiError('DATABASE_ERROR');
+  // Broker errors carry the same code names as the client-facing codes, and their messages are fixed text of this code base.
+  if (error instanceof IbkrError) return new RuntimeApiError(error.code);
   return new RuntimeApiError('INTERNAL_ERROR');
 }
 

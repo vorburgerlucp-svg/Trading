@@ -18,8 +18,10 @@ import {
 import { toUtcIso } from '../market-data/time.js';
 import type { QuantService } from '../quant/quant-service.js';
 import type { PortfolioKillSwitchStore } from '../safety/portfolio-kill-switch-store.js';
-import type { BarsRequest, InstrumentRegisterRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
+import type { BarsRequest, IbkrMappingBody, InstrumentRegisterRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
 import { RuntimeApiError } from './errors.js';
+import type { IbkrBrokerService } from '../broker/ibkr/ibkr-broker-service.js';
+import { IbkrError } from '../broker/ibkr/ibkr-errors.js';
 
 /** A quote older than this is stale and is never usable for trading. */
 export const QUOTE_MAX_AGE_MS = 15 * 60 * 1000;
@@ -41,6 +43,8 @@ export interface RuntimeDeps {
   ping: () => Promise<boolean>;
   version: string;
   clock?: () => Date;
+  /** The IBKR read-only service. Null or absent when IBKR is not enabled: the broker is then reported as not connected. */
+  broker?: IbkrBrokerService | null;
 }
 
 function sanitizeName(value: unknown): string | null {
@@ -159,8 +163,16 @@ export class RuntimeServiceImpl implements RuntimeServices {
       tradingMode: 'paper',
       liveTrading: 'locked',
       buildLocks: { liveTrading: BUILD_LOCKS.liveTrading, brokerOrders: BUILD_LOCKS.brokerOrders, physicalPurchase: BUILD_LOCKS.physicalPurchase },
+      broker: await this.brokerHealth(),
       version: this.deps.version,
     };
+  }
+
+  /** The IBKR state without any account identifier: configured, connection, access. */
+  private async brokerHealth(): Promise<RuntimeHealth['broker']> {
+    if (!this.deps.broker) return { ibkr: { configured: false, connection: 'not_connected', access: 'read_only' } };
+    const status = (await this.deps.broker.status()).ibkr;
+    return { ibkr: { configured: status.configured, connection: status.connection, access: 'read_only' } };
   }
 
   async searchInstruments(query: string): Promise<InstrumentSearchItem[]> {
@@ -320,6 +332,36 @@ export class RuntimeServiceImpl implements RuntimeServices {
       liveTradingAllowed: false,
       alerts: state.status === 'TRIPPED' ? [{ code: 'KILL_SWITCH_LATCHED', severity: 'trip' }] : [],
     };
+  }
+
+  private requireBroker(): IbkrBrokerService {
+    if (!this.deps.broker) throw new IbkrError('BROKER_NOT_CONNECTED', 'IBKR read-only sync is not enabled');
+    return this.deps.broker;
+  }
+
+  async brokerIbkrStatus(): Promise<unknown> {
+    if (!this.deps.broker) return { ibkr: { configured: false, connection: 'not_connected', access: 'read_only', lastSuccessfulSync: null, lastErrorCode: null, accountRef: null } };
+    return this.deps.broker.status();
+  }
+
+  async brokerIbkrSync(): Promise<unknown> {
+    return this.requireBroker().sync();
+  }
+
+  /** No snapshot yet is reported as null: nothing is invented to fill the gap. */
+  async brokerIbkrSnapshot(): Promise<unknown> {
+    return { snapshot: await this.requireBroker().latestSnapshot() };
+  }
+
+  async brokerIbkrReconciliation(requireFresh: boolean): Promise<unknown> {
+    const report = await this.requireBroker().latestReconciliation();
+    if (report === null) return { reconciliation: null };
+    if (requireFresh && report.stale) throw new IbkrError('BROKER_SNAPSHOT_STALE');
+    return { reconciliation: report };
+  }
+
+  async brokerIbkrMapInstrument(request: IbkrMappingBody): Promise<unknown> {
+    return this.requireBroker().mapInstrument(request);
   }
 }
 

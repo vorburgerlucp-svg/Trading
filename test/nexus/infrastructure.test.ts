@@ -116,8 +116,8 @@ describe('Broker Sync (read-only, nicht verbunden)', () => {
       retrievedAt: T0,
       cash: [money('CHF', '200'), money('USD', '10')],
       positions: [
-        { instrumentId: 'AAPL', brokerSymbol: 'AAPL', quantity: Decimal.from(3), currency: currency('USD'), averageCost: money('USD', '170'), marketValue: null, unrealizedPnl: null, realizedPnl: null },
-        { instrumentId: 'MSFT', brokerSymbol: 'MSFT', quantity: Decimal.from(1), currency: currency('USD'), averageCost: money('USD', '400'), marketValue: null, unrealizedPnl: null, realizedPnl: null },
+        { instrumentId: 'AAPL', brokerSymbol: 'AAPL', quantity: Decimal.from(3), currency: currency('USD'), averageCost: { currency: currency('USD'), value: Decimal.from('170') }, marketValue: null, unrealizedPnl: null, realizedPnl: null },
+        { instrumentId: 'MSFT', brokerSymbol: 'MSFT', quantity: Decimal.from(1), currency: currency('USD'), averageCost: { currency: currency('USD'), value: Decimal.from('400') }, marketValue: null, unrealizedPnl: null, realizedPnl: null },
       ],
       openOrders: [],
     };
