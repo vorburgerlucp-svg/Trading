@@ -7,7 +7,7 @@ import type { AccountBalance, AccountKey } from '../../capital/capital-types.js'
 import type { Instrument, ProviderInstrumentMapping } from '../../market-data/market-data-types.js';
 import type { AppendOnlyLog } from '../../persistence/append-only-log.js';
 import { hashOf } from '../../persistence/canonical-json.js';
-import { brokerSnapshotFingerprint, normalizeBrokerSnapshot, type BrokerSnapshotContent } from '../broker-snapshot-model.js';
+import { brokerAccountKey, brokerSnapshotFingerprint, normalizeBrokerSnapshot, type BrokerSnapshotContent } from '../broker-snapshot-model.js';
 import { reconcileBrokerSnapshot, type BrokerSnapshot, type BrokerSyncAdapter, type ReconciliationIssue } from '../broker-sync.js';
 import { IbkrError } from './ibkr-errors.js';
 
@@ -18,6 +18,8 @@ export const IBKR_PROVIDER = 'ibkr' as const;
 export interface SnapshotRecord {
   readonly schema: 'broker-snapshot:v1';
   readonly snapshotId: string;
+  /** Stable pseudonymous broker-account identity; never the raw account id. */
+  readonly accountKey: string;
   readonly content: BrokerSnapshotContent;
 }
 
@@ -170,8 +172,9 @@ export class IbkrBrokerService {
     this.lastErrorCode = null;
 
     const content = normalizeBrokerSnapshot(snapshot);
-    const snapshotId = 'bsnap_' + brokerSnapshotFingerprint(content).slice(0, 40);
-    await this.deps.snapshots.append(snapshotId, { schema: 'broker-snapshot:v1', snapshotId, content });
+    const accountKey = brokerAccountKey(snapshot);
+    const snapshotId = 'bsnap_' + brokerSnapshotFingerprint(content, accountKey).slice(0, 40);
+    await this.deps.snapshots.append(snapshotId, { schema: 'broker-snapshot:v1', snapshotId, accountKey, content });
     const syncId = 'bsync_' + hashOf({ snapshotId, observedAt: snapshot.observedAt, retrievedAt: snapshot.retrievedAt }).slice(0, 40);
     await this.deps.syncs.append(syncId, { schema: 'broker-sync:v1', syncId, outcome: 'success', snapshotId, observedAt: snapshot.observedAt, retrievedAt: snapshot.retrievedAt });
 
