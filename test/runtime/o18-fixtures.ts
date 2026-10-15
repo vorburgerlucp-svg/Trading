@@ -35,7 +35,21 @@ export function fixtureProvider(): MarketDataProvider {
       mic: 'XNAS',
       timezone: 'America/New_York',
     }],
-    getInstrument: async () => null,
+    getInstrument: async (symbol, hint = {}) => {
+      if (symbol.toUpperCase() !== 'AAPL') return null;
+      if (hint.mic && hint.mic !== 'XNAS' && hint.mic !== 'XNGS') return null;
+      if (hint.exchange && hint.exchange !== 'NASDAQ') return null;
+      return {
+        provider: 'twelvedata',
+        providerSymbol: 'AAPL',
+        assetClass: 'stock',
+        name: 'Apple Inc',
+        currency: 'USD',
+        exchange: 'NASDAQ',
+        mic: 'XNGS',
+        timezone: 'America/New_York',
+      };
+    },
     getHistoricalBars: async (request) => ({
       source: FIXTURE_SOURCE,
       requests: 1,
