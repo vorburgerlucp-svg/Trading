@@ -7,8 +7,7 @@ import { createServer } from 'node:net';
 import pg from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
 import { RuntimeStartError, startRuntime } from '../../src/runtime/bootstrap.js';
-import { openPostgresMarketDataStores } from '../../src/persistence/postgres/postgres-stores.js';
-import { RUNTIME_TEST_NOW, fixtureProvider, registerAapl } from '../runtime/o18-fixtures.js';
+import { RUNTIME_TEST_NOW, fixtureProvider } from '../runtime/o18-fixtures.js';
 import { createTestDatabase, pgAvailable, pgInfo, pgSkipReason, type TestDatabase } from './db.js';
 
 function connected() {
@@ -93,23 +92,30 @@ describe.skipIf(!pgAvailable)('O18 runtime on PostgreSQL' + (pgAvailable ? '' : 
 
   it('starts on a migrated database, serves the API, and after a restart reads its state back from PostgreSQL', async () => {
     const db = await trackDatabase(createTestDatabase());
-    const stores = await openPostgresMarketDataStores(db.pool);
-    await registerAapl(stores.instruments);
     const options = { provider: fixtureProvider(), clock: () => new Date(RUNTIME_TEST_NOW) };
+    let instrumentId = '';
 
     const first = await startRuntime(envFor(db.name, await freePort()), options);
     try {
       const health = await (await fetch(first.url + '/health')).json() as Record<string, unknown>;
       expect(health).toMatchObject({ status: 'ok', database: 'connected', marketData: 'configured', tradingMode: 'paper', liveTrading: 'locked' });
 
-      const bars = await (await fetch(first.url + '/api/market/bars?instrumentId=ins_aapl&interval=1d&from=2026-08-01T00:00:00.000Z&to=2026-10-14T00:00:00.000Z')).json() as { bars: unknown[]; usableForTrading: boolean };
+      const registration = await fetch(first.url + '/api/instruments/register', {
+        method: 'POST',
+        body: JSON.stringify({ providerSymbol: 'AAPL', validFrom: '1980-12-12T00:00:00.000Z', mic: 'XNAS', exchange: 'NASDAQ' }),
+      });
+      expect(registration.status).toBe(201);
+      instrumentId = ((await registration.json()) as { instrument: { instrumentId: string } }).instrument.instrumentId;
+      expect(instrumentId).toMatch(/^ins_/);
+
+      const bars = await (await fetch(first.url + '/api/market/bars?instrumentId=' + instrumentId + '&interval=1d&from=2026-08-01T00:00:00.000Z&to=2026-10-14T00:00:00.000Z')).json() as { bars: unknown[]; usableForTrading: boolean };
       expect(bars.bars.length).toBeGreaterThan(0);
       expect(bars.usableForTrading).toBe(false);
 
       const quant = await fetch(first.url + '/api/quant/run', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ instrumentId: 'ins_aapl', interval: '1d', asOf: RUNTIME_TEST_NOW }),
+        body: JSON.stringify({ instrumentId, interval: '1d', asOf: RUNTIME_TEST_NOW }),
       });
       expect(quant.status).toBe(200);
     } finally {
@@ -125,7 +131,7 @@ describe.skipIf(!pgAvailable)('O18 runtime on PostgreSQL' + (pgAvailable ? '' : 
     const second = await startRuntime(envFor(db.name, await freePort()), options);
     try {
       const search = await (await fetch(second.url + '/api/instruments/search?q=AAPL')).json() as { instruments: Array<{ instrumentId: string | null }> };
-      expect(search.instruments[0]?.instrumentId).toBe('ins_aapl');
+      expect(search.instruments[0]?.instrumentId).toBe(instrumentId);
     } finally {
       await second.close();
     }
