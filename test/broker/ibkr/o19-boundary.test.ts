@@ -45,7 +45,8 @@ describe('O19 read-only boundary: the allowlist', () => {
   it('paths are built only from validated parameters', () => {
     expect(buildIbkrPath('positions.page', { accountId: 'U1234567', pageId: 0 })).toBe('/portfolio/U1234567/positions/0');
     expect(() => buildIbkrPath('positions.page', { accountId: 'U1/../x', pageId: 0 })).toThrow('invalid IBKR account parameter');
-    expect(buildIbkrPath('orders.open')).toBe('/iserver/account/orders');
+    expect(buildIbkrPath('orders.open', { accountId: 'U1234567' })).toBe('/iserver/account/orders?accountId=U1234567');
+    expect(() => buildIbkrPath('orders.open')).toThrow('invalid IBKR account parameter');
     expect(() => buildIbkrPath('positions.page', { accountId: 'U1234567', pageId: 5 })).toThrow('invalid IBKR page parameter');
     expect(() => buildIbkrPath('account.meta', {})).toThrow('invalid IBKR account parameter');
   });
