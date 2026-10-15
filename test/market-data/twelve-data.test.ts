@@ -92,7 +92,7 @@ describe('Normalisierung', () => {
 
 describe('Befunde aus dem echten API-Kontakt (Regression)', () => {
   it('getInstrument akzeptiert Segment-MIC XNGS für Venue-Hinweis XNAS', async () => {
-    const h = harness([{ body: { status: 'ok', data: [{ symbol: 'AAPL', instrument_name: 'Apple Inc', exchange: 'NASDAQ', mic_code: 'XNGS', exchange_timezone: 'America/New_York', instrument_type: 'Common Stock', country: 'United States', currency: 'USD' }] } }]);
+    const h = harness([{ body: { status: 'ok', data: [{ symbol: 'AAPL', instrument_name: 'Apple Inc', exchange: 'NASDAQ', mic_code: 'XNGS', exchange_timezone: 'America/New_York', instrument_type: 'Common Stock', country: 'United States', currency: 'USD' }] } }, { body: { status: 'ok', data: [{ symbol: 'AAPL', instrument_name: 'Apple Inc', exchange: 'NASDAQ', mic_code: 'XNGS', exchange_timezone: 'America/New_York', instrument_type: 'Common Stock', country: 'United States', currency: 'USD' }] } }]);
     const instrument = await h.provider.getInstrument('AAPL', { mic: 'XNAS', exchange: 'NASDAQ' });
     expect(instrument).toMatchObject({ providerSymbol: 'AAPL', mic: 'XNGS', exchange: 'NASDAQ' });
     expect(await h.provider.getInstrument('AAPL', { mic: 'XNYS', exchange: 'NASDAQ' })).toBeNull();
