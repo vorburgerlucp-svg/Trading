@@ -101,7 +101,7 @@ export class IbkrBrokerSyncAdapter implements BrokerSyncAdapter {
       }
 
       // Open orders need the brokerage session. Without it they are unknown, and the snapshot says so.
-      const orders: OrderRecord[] | null = this.brokerageAuthenticated ? parseOrders(await this.call('orders.open'), accountId) : null;
+      const orders: OrderRecord[] | null = this.brokerageAuthenticated ? parseOrders(await this.call('orders.open', { accountId }), accountId) : null;
       const retrievedAt = this.options.clock().toISOString();
       this.connected = true;
 
