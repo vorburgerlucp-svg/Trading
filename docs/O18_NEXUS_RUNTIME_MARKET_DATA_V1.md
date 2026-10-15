@@ -75,7 +75,7 @@ Routes are a fixed table in `src/runtime/app.ts`. Unknown paths return `NOT_FOUN
 |---|---|---|
 | GET | `/health`, `/api/health` | Status, database, market data mode, provider state, trading mode, locks. |
 | GET | `/api/instruments/search?q=` | Validated candidates only. Injected text is sanitized. `instrumentId` is `null` when the symbol is not registered. |
-| POST | `/api/instruments/register` | Explicit local onboarding. Body: `providerSymbol`, canonical `validFrom`, optional `mic`/`exchange`. Provider metadata is re-fetched and validated; registration is idempotent for an existing mapping. |
+| POST | `/api/instruments/register` | Explicit local onboarding. Body: `providerSymbol`, canonical `validFrom`, optional `mic`/`exchange`. Provider metadata is re-fetched and validated; segment MICs are normalized to their operating MIC (for example XNGS → XNAS). Instrument plus first provider mapping are appended atomically, so a mapping conflict cannot leave an orphan instrument. Registration is idempotent for an existing mapping. |
 | GET | `/api/market/bars?instrumentId=&interval=&from=&to=` | Intervals `1m 5m 15m 1h 4h 1d`. Canonical UTC times, `from` before `to`, at most 366 days. |
 | GET | `/api/market/quote?instrumentId=` | Freshness and `usableForTrading`. A quote is usable only when it is fresh (15 minutes) and from production. |
 | POST | `/api/quant/run` | JSON body with exactly `instrumentId`, `interval`, `asOf`. Other keys are refused. Body limit 16 KB. |
@@ -150,4 +150,4 @@ npm run test:live
 - The server runs compiled output (`dist/`). There is no TypeScript runner in the start path.
 - **Demo quant is deliberately blocked.** The public demo key serves split-adjusted prices only, while the quant service derives split-adjusted series from raw bars. O18 now returns `DATA_QUALITY_ERROR` before provider fetch/persistence instead of creating a misleading run.
 - **The production quant path is not verified live.** It requests raw prices and reads them directly, but no production key was available to test it.
-- **Instrument onboarding is explicit.** `POST /api/instruments/register` requires a provider symbol and a canonical `validFrom` supplied by the caller. NEXUS does not invent symbol-history start dates; incorrect history remains a human data-governance risk.
+- **Instrument onboarding is explicit and atomic.** `POST /api/instruments/register` requires a provider symbol and a canonical `validFrom` supplied by the caller. Segment MICs such as Twelve Data's XNGS are matched against the operating venue XNAS. Instrument and first mapping are one append-only registry event / PostgreSQL transaction, so a rejected mapping leaves no orphan instrument. NEXUS does not invent symbol-history start dates; incorrect history remains a human data-governance risk.
