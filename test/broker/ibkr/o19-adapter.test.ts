@@ -79,6 +79,13 @@ describe('O19 IBKR adapter: session and authentication', () => {
     expect(JSON.stringify(error) + error.message).not.toContain(FIXTURE_SESSION_TOKEN);
   });
 
+  it('scopes the open-order read to the selected account', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    const { adapter } = adapterWith(fixture);
+    await adapter.fetchSnapshot();
+    expect(fixture.calls.filter((c) => c.operation === 'orders.open').map((c) => c.params?.accountId)).toEqual([FIXTURE_ACCOUNT]);
+  });
+
   it('an unauthenticated brokerage session still reads the portfolio, but the open orders are unknown (null), never empty', async () => {
     const fixture = new FixtureIbkrReadOnlyAdapter();
     fixture.data.tickle = fixtureTickle({ iserver: { authStatus: { authenticated: false, competing: false } } });
