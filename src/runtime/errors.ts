@@ -29,7 +29,9 @@ export type RuntimeErrorCode =
   | 'BROKER_RATE_LIMITED'
   | 'BROKER_INSTRUMENT_UNMAPPED'
   | 'BROKER_SNAPSHOT_STALE'
-  | 'BROKER_RECONCILIATION_FAILURE';
+  | 'BROKER_RECONCILIATION_FAILURE'
+  | 'BROKER_SESSION_COMPETING'
+  | 'BROKER_BROKERAGE_INIT_FAILED';
 
 const FIXED_MESSAGE: Readonly<Record<RuntimeErrorCode, string>> = Object.freeze({
   DATA_NOT_CONNECTED: 'market data is not connected; no data is returned in its place',
@@ -54,6 +56,8 @@ const FIXED_MESSAGE: Readonly<Record<RuntimeErrorCode, string>> = Object.freeze(
   BROKER_INSTRUMENT_UNMAPPED: 'the broker contract cannot be linked to a NEXUS instrument without guessing',
   BROKER_SNAPSHOT_STALE: 'the broker snapshot is stale: it is not current broker state',
   BROKER_RECONCILIATION_FAILURE: 'the reconciliation could not be computed',
+  BROKER_SESSION_COMPETING: 'another broker brokerage session is active: it is not taken over',
+  BROKER_BROKERAGE_INIT_FAILED: 'the broker brokerage session could not be started and verified',
 });
 
 const STATUS: Readonly<Record<RuntimeErrorCode, number>> = Object.freeze({
@@ -79,6 +83,8 @@ const STATUS: Readonly<Record<RuntimeErrorCode, number>> = Object.freeze({
   BROKER_INSTRUMENT_UNMAPPED: 409,
   BROKER_SNAPSHOT_STALE: 409,
   BROKER_RECONCILIATION_FAILURE: 500,
+  BROKER_SESSION_COMPETING: 409,
+  BROKER_BROKERAGE_INIT_FAILED: 503,
 });
 
 export class RuntimeApiError extends Error {

@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { IbkrBrokerSyncAdapter } from '../../src/broker/ibkr/ibkr-sync-adapter.js';
 import { parseLoopbackBaseUrl, IBKR_DEFAULT_BASE_URL } from '../../src/broker/ibkr/ibkr-base-url.js';
 import { HttpsIbkrTransport } from '../../src/broker/ibkr/ibkr-transport.js';
-import { IBKR_READ_OPERATIONS, type IbkrReadOperation } from '../../src/broker/ibkr/ibkr-readonly.js';
+import { IBKR_ALLOWED_OPERATIONS, type IbkrOperation } from '../../src/broker/ibkr/ibkr-readonly.js';
 import { readFileSync } from 'node:fs';
 
 const optIn = process.env.IBKR_LIVE_TEST === '1';
@@ -18,9 +18,9 @@ describe.skipIf(!optIn)('IBKR read-only live smoke' + (optIn ? '' : ' (IBKR LIVE
       baseUrl: parseLoopbackBaseUrl(process.env.IBKR_BASE_URL?.trim() || IBKR_DEFAULT_BASE_URL),
       caCertPem: caPath ? readFileSync(caPath, 'utf8') : null,
     });
-    const observed: IbkrReadOperation[] = [];
+    const observed: IbkrOperation[] = [];
     const recording = {
-      call: async (operation: IbkrReadOperation, params?: Parameters<typeof transport.call>[1]) => {
+      call: async (operation: IbkrOperation, params?: Parameters<typeof transport.call>[1]) => {
         observed.push(operation);
         return transport.call(operation, params);
       },
@@ -35,7 +35,7 @@ describe.skipIf(!optIn)('IBKR read-only live smoke' + (optIn ? '' : ' (IBKR LIVE
     expect(snapshot.access).toBe('read_only');
     expect(snapshot.accountId.length).toBeGreaterThan(0);
     expect(snapshot.cash.length).toBeGreaterThanOrEqual(0);
-    expect(observed.every((operation) => operation in IBKR_READ_OPERATIONS)).toBe(true);
+    expect(observed.every((operation) => operation in IBKR_ALLOWED_OPERATIONS)).toBe(true);
     expect(observed.filter((operation) => operation === 'session.tickle').length).toBeGreaterThan(0);
   });
 });

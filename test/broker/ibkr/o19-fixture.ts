@@ -2,7 +2,7 @@
 // synthetic data in the shape of the official reference, records every call, and can be told to fail an operation. It is the
 // only IBKR stand-in used by the CI tests. No real account, no real session, no real credential exists in this file.
 
-import type { IbkrOperationParams, IbkrReadOperation } from '../../../src/broker/ibkr/ibkr-readonly.js';
+import type { IbkrOperation, IbkrOperationParams } from '../../../src/broker/ibkr/ibkr-readonly.js';
 import type { IbkrResponse, IbkrTransport } from '../../../src/broker/ibkr/ibkr-transport.js';
 
 /** Synthetic values. The session token is a marker: no test may ever find it in an error, a log or a response. */
@@ -81,15 +81,27 @@ export function defaultFixtureData(): FixtureData {
   };
 }
 
+export type BrokerageInitOutcome = 'ok' | 'refused' | 'server-error';
+
 export class FixtureIbkrReadOnlyAdapter implements IbkrTransport {
   /** Every call the adapter made, in order. Tests assert on this to prove the read-only boundary. */
-  readonly calls: Array<{ operation: IbkrReadOperation; params: IbkrOperationParams | undefined }> = [];
-  private readonly failures = new Map<IbkrReadOperation, IbkrResponse | Error>();
+  readonly calls: Array<{ operation: IbkrOperation; params: IbkrOperationParams | undefined }> = [];
+  private readonly failures = new Map<IbkrOperation, IbkrResponse | Error>();
+  /** Whether the brokerage start succeeded in this fixture. Before a start, the tickle answers with the configured data. */
+  brokerageStarted = false;
+  /** How the brokerage initialization answers. */
+  initOutcome: BrokerageInitOutcome = 'ok';
+  /** Another client holds the brokerage session: the tickle then reports competing. */
+  competingAfterInit = false;
+  /** Whether the brokerage reports itself connected after a start. */
+  connectedAfterInit = true;
+  /** Accounts the brokerage session reports after a start. */
+  brokerageAccounts: unknown = { accounts: [FIXTURE_ACCOUNT], selectedAccount: FIXTURE_ACCOUNT };
 
   constructor(public data: FixtureData = defaultFixtureData()) {}
 
   /** Makes one operation answer with this response, or throw this error, on every later call. */
-  fail(operation: IbkrReadOperation, outcome: IbkrResponse | Error): void {
+  fail(operation: IbkrOperation, outcome: IbkrResponse | Error): void {
     this.failures.set(operation, outcome);
   }
 
@@ -97,14 +109,26 @@ export class FixtureIbkrReadOnlyAdapter implements IbkrTransport {
     this.failures.clear();
   }
 
-  async call(operation: IbkrReadOperation, params?: IbkrOperationParams): Promise<IbkrResponse> {
+  async call(operation: IbkrOperation, params?: IbkrOperationParams): Promise<IbkrResponse> {
     this.calls.push({ operation, params });
     const outcome = this.failures.get(operation);
     if (outcome instanceof Error) throw outcome;
     if (outcome !== undefined) return outcome;
     switch (operation) {
       case 'session.tickle':
-        return { status: 200, body: this.data.tickle };
+        if (!this.brokerageStarted) return { status: 200, body: this.data.tickle };
+        return {
+          status: 200,
+          body: fixtureTickle({ iserver: { authStatus: { authenticated: !this.competingAfterInit, connected: this.connectedAfterInit, competing: this.competingAfterInit } } }),
+        };
+      case 'brokerage.init':
+        if (this.initOutcome === 'ok') {
+          this.brokerageStarted = true;
+          return { status: 200, body: {} };
+        }
+        return { status: this.initOutcome === 'refused' ? 409 : 500, body: null };
+      case 'brokerage.accounts':
+        return { status: 200, body: this.brokerageAccounts };
       case 'accounts.list':
         return { status: 200, body: this.data.accounts };
       case 'account.meta':
@@ -119,7 +143,7 @@ export class FixtureIbkrReadOnlyAdapter implements IbkrTransport {
   }
 
   /** Operations that were called, without duplicates, in first-call order. */
-  operationsCalled(): IbkrReadOperation[] {
+  operationsCalled(): IbkrOperation[] {
     return [...new Set(this.calls.map((c) => c.operation))];
   }
 }

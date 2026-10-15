@@ -5,7 +5,7 @@ import { accounts } from '../../../src/capital/accounts.js';
 import { IbkrBrokerService, IBKR_SNAPSHOT_MAX_AGE_MS, type ReconciliationRecord, type SnapshotRecord, type SyncRecord } from '../../../src/broker/ibkr/ibkr-broker-service.js';
 import { IbkrError } from '../../../src/broker/ibkr/ibkr-errors.js';
 import { IbkrBrokerSyncAdapter } from '../../../src/broker/ibkr/ibkr-sync-adapter.js';
-import { IBKR_READ_OPERATIONS } from '../../../src/broker/ibkr/ibkr-readonly.js';
+import { IBKR_ALLOWED_OPERATIONS } from '../../../src/broker/ibkr/ibkr-readonly.js';
 import { InstrumentRegistry, type InstrumentEvent } from '../../../src/market-data/instrument-registry.js';
 import { AppendOnlyLog, InMemoryAppendOnlyStore } from '../../../src/persistence/append-only-log.js';
 import { chf } from '../../../src/money/money.js';
@@ -200,7 +200,7 @@ describe('O19 IBKR service: the sync changes nothing but the broker records', ()
   it('[21] the sync calls only allowlisted read operations and the keepalive; the gateway sees no order traffic', async () => {
     const { service, fixture } = await build();
     await service.sync();
-    expect(fixture.operationsCalled().every((operation) => operation in IBKR_READ_OPERATIONS)).toBe(true);
+    expect(fixture.operationsCalled().every((operation) => operation in IBKR_ALLOWED_OPERATIONS)).toBe(true);
     expect(fixture.calls.filter((c) => c.operation === 'session.tickle')).toHaveLength(1);
     expect(fixture.operationsCalled()).toEqual(expect.arrayContaining(['orders.open']));
   });

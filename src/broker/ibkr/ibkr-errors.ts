@@ -11,7 +11,9 @@ export type IbkrErrorCode =
   | 'BROKER_RATE_LIMITED'
   | 'BROKER_INSTRUMENT_UNMAPPED'
   | 'BROKER_SNAPSHOT_STALE'
-  | 'BROKER_RECONCILIATION_FAILURE';
+  | 'BROKER_RECONCILIATION_FAILURE'
+  | 'BROKER_SESSION_COMPETING'
+  | 'BROKER_BROKERAGE_INIT_FAILED';
 
 const FIXED_MESSAGE: Readonly<Record<IbkrErrorCode, string>> = Object.freeze({
   BROKER_NOT_CONNECTED: 'the IBKR Client Portal Gateway is not reachable or its certificate is not trusted',
@@ -24,6 +26,8 @@ const FIXED_MESSAGE: Readonly<Record<IbkrErrorCode, string>> = Object.freeze({
   BROKER_INSTRUMENT_UNMAPPED: 'the IBKR contract cannot be linked to this NEXUS instrument: no identity-safe mapping exists',
   BROKER_SNAPSHOT_STALE: 'the broker snapshot is older than the freshness limit and is not current broker state',
   BROKER_RECONCILIATION_FAILURE: 'the reconciliation could not be computed from the stored snapshot and ledger',
+  BROKER_SESSION_COMPETING: 'another IBKR brokerage session is active: this build does not take it over',
+  BROKER_BROKERAGE_INIT_FAILED: 'the IBKR brokerage session could not be started and verified as authenticated and connected',
 });
 
 export class IbkrError extends Error {

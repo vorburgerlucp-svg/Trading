@@ -1,5 +1,6 @@
 // The IBKR transport against an injected network function: no socket, no TLS stack, no real gateway. Covers the
 // adversarial cases for responses: oversized body [5], malformed JSON [4], timeout [6], session errors [7], secrets in errors [8].
+import { readFileSync } from 'node:fs';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import type { RequestOptions } from 'node:https';
 import { EventEmitter } from 'node:events';
@@ -19,8 +20,10 @@ class FakeRequest extends EventEmitter {
     this.timeoutCallback = callback;
     return this;
   }
-  end(): void {
+  body: string | null = null;
+  end(data?: string): void {
     this.ended = true;
+    this.body = data ?? null;
   }
   destroy(error?: Error): this {
     this.destroyedWith = error ?? null;
@@ -184,6 +187,38 @@ describe('O19 IBKR transport: hostile responses fail closed', () => {
     const { transport } = transportWith({ kind: 'respond', status: 200, body: '' });
     const response = await transport.call('session.tickle');
     expect(response.body).toBeNull();
+  });
+});
+
+describe('O19 IBKR transport: bodies are fixed per operation, never supplied by a caller', () => {
+  it('brokerage.init sends exactly the fixed body with compete=false, with its true content length', async () => {
+    const { transport, seen, requests } = transportWith({ kind: 'respond', status: 200, body: '{}' });
+    await transport.call('brokerage.init');
+    const expected = '{"publish":true,"compete":false}';
+    expect(seen[0]?.url).toBe('https://localhost:5000/v1/api/iserver/auth/ssodh/init');
+    expect(requests[0]?.body).toBe(expected);
+    expect(seen[0]?.headers?.['content-type']).toBe('application/json');
+    expect(seen[0]?.headers?.['content-length']).toBe(String(Buffer.byteLength(expected)));
+  });
+
+  it('a POST without a fixed body sends no body and states a zero length', async () => {
+    const { transport, seen, requests } = transportWith({ kind: 'respond', status: 200, body: '{}' });
+    await transport.call('session.tickle');
+    expect(requests[0]?.body).toBeNull();
+    expect(seen[0]?.headers?.['content-length']).toBe('0');
+    expect(seen[0]?.headers?.['content-type']).toBeUndefined();
+  });
+
+  it('a GET sends no body', async () => {
+    const { transport, requests } = transportWith({ kind: 'respond', status: 200, body: '[]' });
+    await transport.call('accounts.list');
+    expect(requests[0]?.body).toBeNull();
+  });
+
+  it('the transport call takes no body from the caller: no parameter of the call can carry one', () => {
+    const source = readFileSync(new URL('../../../src/broker/ibkr/ibkr-transport.ts', import.meta.url), 'utf8');
+    expect(source).toContain('call(operation: IbkrOperation, params: IbkrOperationParams = {}): Promise<IbkrResponse>');
+    expect(source).not.toMatch(/call\([^)]*body\s*:/);
   });
 });
 

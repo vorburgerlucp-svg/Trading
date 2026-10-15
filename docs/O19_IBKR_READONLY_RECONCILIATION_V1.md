@@ -20,16 +20,25 @@ IBKR → read-only adapter → schema and security validation → instrument ide
   - Paths beginning with `/gw/api`, `/oauth` or `/oauth2` are not supported through the gateway. NEXUS uses none of them.
   - Two tiers: a *read-only session* is required for every call, and it allows the non-`/iserver` endpoints (portfolio, accounts). The *brokerage session* is required for `/iserver` endpoints (open orders). A single username can hold only one brokerage session.
   - The session expires after several minutes without requests. IBKR asks for a `POST /tickle` about every 60 seconds to keep it alive.
-- NEXUS's sync starts with one `POST /tickle`. It reads the session (`ssoExpires` > 0) and the brokerage state (`iserver.authStatus.authenticated`). A missing session is `BROKER_AUTH_REQUIRED`. There is no background keepalive timer in this build, so a sync after a long pause may need a fresh tickle or a browser login.
+- NEXUS's sync starts with one `POST /tickle`. It reads the session (`ssoExpires` > 0) and the brokerage state (`authenticated`, `connected`, `competing`). A missing session is `BROKER_AUTH_REQUIRED`. A competing brokerage session is `BROKER_SESSION_COMPETING`, and this build never takes it over.
+- **Brokerage start (only when the brokerage is not ready).** Once per sync, and only with a valid read-only session and no competing session: `POST /iserver/auth/ssodh/init` with the fixed body `{"publish":true,"compete":false}`, then at least 2 seconds of settle time, then `GET /iserver/accounts` (must be non-empty), then one more tickle. The brokerage must then be `authenticated = true`, `connected = true`, `competing = false`. Otherwise the sync stops with `BROKER_BROKERAGE_INIT_FAILED`. An initialization is never repeated within one sync, and `compete` is never `true`.
+- A gateway server error during the initialization is `BROKER_NOT_CONNECTED` (the gateway answered with an error), and a refused initialization (for example 409) is `BROKER_BROKERAGE_INIT_FAILED`.
+- The gateway requires a `User-Agent` header on every request (official request documentation). NEXUS sends the fixed value `NEXUS-O19/1.0`, which names no user, account or machine. Without it the gateway answers `403` with a non-JSON body.
+- A `POST` without a fixed body states `Content-Length: 0`. Without it the gateway waits for a body and the request times out. The brokerage start sends its fixed body with its true length.
+- There is no background keepalive timer in this build, so a sync after a long pause may need a fresh tickle or a browser login.
 - The official cURL sample for open orders shows an `Authorization: Bearer` header. That header belongs to the OAuth path. The gateway path sends none, and NEXUS sends none.
 
 ## 3. Read-only boundary
 
-Every call NEXUS can make is listed in one frozen table (`src/broker/ibkr/ibkr-readonly.ts`). There is no generic request function and no way to build another path. The table is checked by a test (`test/broker/ibkr/o19-boundary.test.ts`), which also scans the source for execution functions.
+Every call NEXUS can make is listed in one frozen table (`IBKR_ALLOWED_OPERATIONS` in `src/broker/ibkr/ibkr-readonly.ts`). There is no generic request function, no way to build another path, and no way for a caller to supply a body. The table is checked by a test (`test/broker/ibkr/o19-boundary.test.ts`), which also scans the source for execution functions.
+
+Exactly two operations are `POST`, and only the second one has a fixed body. Everything else is `GET`.
 
 | Operation | Method and path | Pacing (official) | Purpose |
 |---|---|---|---|
 | `session.tickle` | `POST /tickle` | 1 req/s | Keep the session alive; read session and brokerage state. No account data. |
+| `brokerage.init` | `POST /iserver/auth/ssodh/init` with the fixed body `{"publish":true,"compete":false}` | none listed | Start the brokerage session when it is not ready. `compete` is always `false`. Once per sync. This is a session control, not an order. |
+| `brokerage.accounts` | `GET /iserver/accounts` | none listed | Accounts the started brokerage session reports. Must be non-empty. |
 | `accounts.list` | `GET /portfolio/accounts` | 1 req/5 s | Accounts this session can read. |
 | `account.meta` | `GET /portfolio/{accountId}/meta` | global 10 req/s | Account currency and clearing status (`O` = open). |
 | `account.ledger` | `GET /portfolio/{accountId}/ledger` | global | Cash per currency (`cashbalance`). |
@@ -65,7 +74,7 @@ Not in the table, on purpose: every `POST /iserver/...` order route, modify, can
 - `IbkrBrokerSyncAdapter` (`src/broker/ibkr/ibkr-sync-adapter.ts`) implements the existing `BrokerSyncAdapter`. It does **not** use `BrokerAdapter` (the order port), and it has no order method (a test checks the prototype).
 - Account selection: with `IBKR_ACCOUNT_ID`, exact match, else `BROKER_ACCOUNT_NOT_FOUND`. Without it: exactly one readable account is used. Several accounts → `BROKER_ACCOUNT_AMBIGUOUS`. Zero → `BROKER_ACCOUNT_NOT_FOUND`. NEXUS never picks one of several.
 - Every response is validated field by field (`src/broker/ibkr/ibkr-validation.ts`): type, size, shape, the account it belongs to. A position or order of another account is refused. A number that is not finite, or that IBKR would write in exponent notation, is refused. Unknown extra fields are ignored. Error details name a field, never a value.
-- Transport (`src/broker/ibkr/ibkr-transport.ts`): loopback HTTPS only; 10 s timeout; body limit 1 MiB, enforced while streaming; JSON only; no redirect followed; no cookie or token stored or sent; a 401/403 is `BROKER_AUTH_REQUIRED`, a 429 is `BROKER_RATE_LIMITED`. A TLS failure is `BROKER_NOT_CONNECTED` with a fixed reason, never the driver text.
+- Transport (`src/broker/ibkr/ibkr-transport.ts`): loopback HTTPS only; 10 s timeout; body limit 1 MiB, enforced while streaming; JSON only; no redirect followed; no cookie or token stored or sent; a fixed `User-Agent` and the true `Content-Length` on every request; a 401/403 is `BROKER_AUTH_REQUIRED`, a 429 is `BROKER_RATE_LIMITED`. A TLS failure is `BROKER_NOT_CONNECTED` with a fixed reason, never the driver text.
 - One sync at a time: a second call while one runs shares its result.
 
 ## 7. Instrument identity (conid, not ticker)
@@ -82,7 +91,7 @@ Not in the table, on purpose: every `POST /iserver/...` order route, modify, can
 - `access: 'read_only'`, `observedAt`, `retrievedAt`, `accountStatus` (IBKR clearing status),
 - `cash` (per currency, in minor units; a value that does not fit the currency is refused, never rounded),
 - `positions` (quantity, average cost, market value, unrealized and realized P&L as full-precision amounts, `brokerInstrumentId` (conid), `listingExchange`, `instrumentId` or null),
-- `openOrders` — **`null` means unknown** (the brokerage session was not authenticated), `[]` means read and none open. The two are never confused.
+- `openOrders` — **`null` means unknown** (not read). `[]` means read and none open. The two are never confused. This build starts the brokerage before it reads, so a sync produces a list, never `null`.
 
 Persistence uses the existing `AppendOnlyLog` on PostgreSQL (`append_only_logs` / `append_only_records`; no schema change). Three logs:
 
@@ -139,6 +148,8 @@ Persistence uses the existing `AppendOnlyLog` on PostgreSQL (`append_only_logs` 
 | `BROKER_INSTRUMENT_UNMAPPED` | 409 | The contract cannot be linked without guessing. |
 | `BROKER_SNAPSHOT_STALE` | 409 | `requireFresh=1` and the snapshot is older than the limit. |
 | `BROKER_RECONCILIATION_FAILURE` | 500 | The comparison could not be computed. |
+| `BROKER_SESSION_COMPETING` | 409 | Another brokerage session is active. It is not taken over. |
+| `BROKER_BROKERAGE_INIT_FAILED` | 503 | The brokerage session could not be started and verified as authenticated and connected. |
 
 Existing `DATABASE_ERROR` is returned when a store fails.
 
@@ -198,7 +209,7 @@ Note: the runtime opens the ledger store for reconciliation. On a database where
 - **Not verified against a real gateway in this milestone.** The CI tests use the fixture. The live smoke test was not run in this environment (see the report).
 - **Realized P&L** is documented by IBKR as "profit made today through trades", not a lifetime figure. It is stored as given and not used for reconciliation.
 - **Average cost and P&L** are the gateway's values in the position currency; they are not converted.
-- **Open orders** are read only in an authenticated brokerage session. Otherwise the snapshot says they are unknown.
+- **Open orders** are read only after a started brokerage session. If the brokerage cannot be started, the sync stops (no portfolio read, no `openOrders = []`). The model keeps `null` for an unknown state, but this build does not produce it.
 - **Keepalive.** No background tickle. A sync after a long pause may fail with `BROKER_AUTH_REQUIRED`.
 - **Single brokerage session per username.** An open TWS or other platform session can make this session "competing": the brokerage state is then reported as not authenticated.
 - **Multi-currency.** Only CHF cash is reconciled. Other currencies are reported as unsupported.

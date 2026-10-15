@@ -12,16 +12,23 @@ function clockAt(iso: string) {
   return { now: () => new Date(current), set: (next: string) => (current = Date.parse(next)), advance: (ms: number) => (current += ms) };
 }
 
-function adapterWith(fixture: FixtureIbkrReadOnlyAdapter, options: { accountId?: string | null; clock?: ReturnType<typeof clockAt>; resolve?: (conid: string) => string | null } = {}) {
+function adapterWith(
+  fixture: FixtureIbkrReadOnlyAdapter,
+  options: { accountId?: string | null; clock?: ReturnType<typeof clockAt>; resolve?: (conid: string) => string | null; delays?: number[] } = {},
+) {
   const clock = options.clock ?? clockAt(T0);
   const resolve = options.resolve ?? ((conid: string) => (conid === FIXTURE_CONID_AAPL ? 'ins_aapl' : null));
+  const delays = options.delays ?? [];
   const adapter = new IbkrBrokerSyncAdapter({
     transport: fixture,
     accountId: options.accountId ?? null,
     clock: clock.now,
     resolveInstrument: (conid) => resolve(conid),
+    delay: async (ms) => {
+      delays.push(ms);
+    },
   });
-  return { adapter, clock };
+  return { adapter, clock, delays };
 }
 
 async function errorOf(promise: Promise<unknown>): Promise<IbkrError> {
@@ -86,14 +93,88 @@ describe('O19 IBKR adapter: session and authentication', () => {
     expect(fixture.calls.filter((c) => c.operation === 'orders.open').map((c) => c.params?.accountId)).toEqual([FIXTURE_ACCOUNT]);
   });
 
-  it('an unauthenticated brokerage session still reads the portfolio, but the open orders are unknown (null), never empty', async () => {
+  const unauthenticated = () => fixtureTickle({ iserver: { authStatus: { authenticated: false, connected: false, competing: false } } });
+
+  it('an unauthenticated brokerage session is started once with the fixed initialization, then the portfolio is read', async () => {
     const fixture = new FixtureIbkrReadOnlyAdapter();
-    fixture.data.tickle = fixtureTickle({ iserver: { authStatus: { authenticated: false, competing: false } } });
-    const { adapter } = adapterWith(fixture);
+    fixture.data.tickle = unauthenticated();
+    const delays: number[] = [];
+    const { adapter } = adapterWith(fixture, { delays });
     const snapshot = await adapter.fetchSnapshot();
-    expect(snapshot.openOrders).toBeNull();
-    expect(fixture.operationsCalled()).not.toContain('orders.open');
+    const order = fixture.operationsCalled();
+    expect(fixture.calls.filter((c) => c.operation === 'brokerage.init')).toHaveLength(1);
+    expect(order.indexOf('brokerage.init')).toBeLessThan(order.indexOf('accounts.list'));
+    expect(order.indexOf('brokerage.accounts')).toBeGreaterThan(order.indexOf('brokerage.init'));
     expect(snapshot.positions).toHaveLength(1);
+    expect(snapshot.openOrders).toHaveLength(1);
+  });
+
+  it('the initialization waits the official settle time before the accounts are read', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.data.tickle = unauthenticated();
+    const delays: number[] = [];
+    const { adapter } = adapterWith(fixture, { delays });
+    await adapter.fetchSnapshot();
+    expect(delays).toEqual([2_000]);
+  });
+
+  it('a refused initialization stops the sync: no portfolio is read and the start is not repeated', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.data.tickle = unauthenticated();
+    fixture.initOutcome = 'refused';
+    const { adapter } = adapterWith(fixture);
+    const error = await errorOf(adapter.fetchSnapshot());
+    expect(error.code).toBe('BROKER_BROKERAGE_INIT_FAILED');
+    expect(fixture.calls.filter((c) => c.operation === 'brokerage.init')).toHaveLength(1);
+    expect(fixture.operationsCalled()).not.toContain('positions.page');
+    expect(adapter.connection()).toBe('not_connected');
+  });
+
+  it('a gateway server error on the initialization is reported as a gateway error, never as a started session', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.data.tickle = unauthenticated();
+    fixture.initOutcome = 'server-error';
+    const error = await errorOf(adapterWith(fixture).adapter.fetchSnapshot());
+    expect(error.code).toBe('BROKER_NOT_CONNECTED');
+    expect(error.message).toContain('gateway returned 500');
+    expect(fixture.operationsCalled()).not.toContain('positions.page');
+  });
+
+  it('a competing brokerage session is reported before any initialization, and this build never sends one', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.data.tickle = fixtureTickle({ iserver: { authStatus: { authenticated: true, connected: true, competing: true } } });
+    const error = await errorOf(adapterWith(fixture).adapter.fetchSnapshot());
+    expect(error.code).toBe('BROKER_SESSION_COMPETING');
+    expect(fixture.operationsCalled()).not.toContain('brokerage.init');
+    expect(fixture.operationsCalled()).not.toContain('positions.page');
+  });
+
+  it('a competing session that appears after the initialization stops the sync, with no second initialization', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.data.tickle = unauthenticated();
+    fixture.competingAfterInit = true;
+    const error = await errorOf(adapterWith(fixture).adapter.fetchSnapshot());
+    expect(error.code).toBe('BROKER_SESSION_COMPETING');
+    expect(fixture.calls.filter((c) => c.operation === 'brokerage.init')).toHaveLength(1);
+    expect(fixture.operationsCalled()).not.toContain('positions.page');
+  });
+
+  it('a started brokerage that is not connected is refused', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.data.tickle = unauthenticated();
+    fixture.connectedAfterInit = false;
+    const error = await errorOf(adapterWith(fixture).adapter.fetchSnapshot());
+    expect(error.code).toBe('BROKER_BROKERAGE_INIT_FAILED');
+    expect(fixture.operationsCalled()).not.toContain('positions.page');
+  });
+
+  it('an empty brokerage account list after initialization is an initialization failure', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.data.tickle = unauthenticated();
+    fixture.brokerageAccounts = { accounts: [] };
+    const error = await errorOf(adapterWith(fixture).adapter.fetchSnapshot());
+    expect(error.code).toBe('BROKER_BROKERAGE_INIT_FAILED');
+    expect(fixture.operationsCalled()).not.toContain('accounts.list');
   });
 
   it('a gateway outage is BROKER_NOT_CONNECTED, and the adapter does not pretend to be connected afterwards', async () => {

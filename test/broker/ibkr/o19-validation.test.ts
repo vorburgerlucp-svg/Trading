@@ -1,7 +1,7 @@
 // Schema validation of IBKR responses: untrusted input is checked field by field, and a mismatch is an error, never a guess.
 import { describe, expect, it } from 'vitest';
 import { IbkrError } from '../../../src/broker/ibkr/ibkr-errors.js';
-import { parseAccounts, parseLedger, parseMeta, parseOrders, parsePositions, parseTickle } from '../../../src/broker/ibkr/ibkr-validation.js';
+import { parseAccounts, parseBrokerageAccounts, parseLedger, parseMeta, parseOrders, parsePositions, parseTickle } from '../../../src/broker/ibkr/ibkr-validation.js';
 import { FIXTURE_ACCOUNT, FIXTURE_CONID_AAPL, FIXTURE_OTHER_ACCOUNT, FIXTURE_SESSION_TOKEN, fixtureOrder, fixturePosition, fixtureTickle } from './o19-fixture.js';
 
 function invalidOf(fn: () => unknown): IbkrError {
@@ -16,7 +16,9 @@ function invalidOf(fn: () => unknown): IbkrError {
 
 describe('O19 IBKR validation: session and accounts', () => {
   it('the tickle answer proves a valid session and a brokerage session only when both are present', () => {
-    expect(parseTickle(fixtureTickle())).toEqual({ sessionValid: true, brokerageAuthenticated: true });
+    expect(parseTickle(fixtureTickle())).toEqual({ sessionValid: true, brokerageAuthenticated: true, competing: false });
+    expect(parseTickle(fixtureTickle({ iserver: { authStatus: { authenticated: true, connected: false, competing: false } } }))).toMatchObject({ brokerageAuthenticated: false });
+    expect(parseTickle(fixtureTickle({ iserver: { authStatus: { authenticated: true, connected: true, competing: true } } }))).toEqual({ sessionValid: true, brokerageAuthenticated: false, competing: true });
     expect(parseTickle(fixtureTickle({ session: undefined }))).toMatchObject({ sessionValid: false });
     expect(parseTickle(fixtureTickle({ ssoExpires: 0 }))).toMatchObject({ sessionValid: false });
     expect(parseTickle(fixtureTickle({ iserver: { authStatus: { authenticated: true, competing: true } } }))).toMatchObject({ brokerageAuthenticated: false });
@@ -37,6 +39,22 @@ describe('O19 IBKR validation: session and accounts', () => {
   it('the account metadata must describe the requested account', () => {
     expect(parseMeta({ id: FIXTURE_ACCOUNT, accountId: FIXTURE_ACCOUNT, currency: 'USD', clearingStatus: 'O' }, FIXTURE_ACCOUNT)).toEqual({ currency: 'USD', clearingStatus: 'O' });
     expect(invalidOf(() => parseMeta({ id: FIXTURE_OTHER_ACCOUNT, currency: 'USD' }, FIXTURE_ACCOUNT)).message).toContain('meta.id');
+  });
+});
+
+describe('O19 IBKR validation: brokerage accounts after a start', () => {
+  it('a started brokerage session lists at least one account id', () => {
+    expect(parseBrokerageAccounts({ accounts: [FIXTURE_ACCOUNT], selectedAccount: FIXTURE_ACCOUNT })).toEqual([FIXTURE_ACCOUNT]);
+    expect(parseBrokerageAccounts([FIXTURE_ACCOUNT])).toEqual([FIXTURE_ACCOUNT]);
+  });
+
+  it('an empty answer is not a started session', () => {
+    expect(invalidOf(() => parseBrokerageAccounts({ accounts: [] })).message).toContain('no brokerage account');
+    expect(invalidOf(() => parseBrokerageAccounts([])).code).toBe('BROKER_RESPONSE_INVALID');
+  });
+
+  it('an account entry that is not a plain identifier is refused', () => {
+    expect(invalidOf(() => parseBrokerageAccounts({ accounts: ['U1/../x'] })).message).toContain('iserver.accounts[0]');
   });
 });
 

@@ -67,8 +67,10 @@ function optionalDecimal(value: unknown, path: string): Decimal | null {
 export interface TickleResult {
   /** The read-only session is alive (a session identifier and a positive expiry). */
   readonly sessionValid: boolean;
-  /** The brokerage session is authenticated and not competing with another connection. */
+  /** The brokerage session is ready: authenticated, connected, and not competing with another connection. */
   readonly brokerageAuthenticated: boolean;
+  /** Another brokerage connection is active. This build never takes it over. */
+  readonly competing: boolean;
 }
 
 export function parseTickle(body: unknown): TickleResult {
@@ -76,16 +78,33 @@ export function parseTickle(body: unknown): TickleResult {
   const hasSession = typeof obj.session === 'string' && obj.session.length > 0 && obj.session.length <= 256;
   const expires = obj.ssoExpires;
   const sessionValid = hasSession && typeof expires === 'number' && Number.isFinite(expires) && expires > 0;
-  let brokerageAuthenticated = false;
+  let authenticated = false;
+  let connected = false;
+  let competing = false;
   const iserver = obj.iserver;
   if (typeof iserver === 'object' && iserver !== null && !Array.isArray(iserver)) {
     const auth = (iserver as Record<string, unknown>).authStatus;
     if (typeof auth === 'object' && auth !== null) {
       const status = auth as Record<string, unknown>;
-      brokerageAuthenticated = status.authenticated === true && status.competing !== true;
+      authenticated = status.authenticated === true;
+      connected = status.connected === true;
+      competing = status.competing === true;
     }
   }
-  return { sessionValid, brokerageAuthenticated };
+  return { sessionValid, brokerageAuthenticated: authenticated && connected && !competing, competing };
+}
+
+/**
+ * The brokerage accounts after a brokerage start. An empty answer is not a started session: it is refused here.
+ */
+export function parseBrokerageAccounts(body: unknown): string[] {
+  const list = Array.isArray(body) ? body : objectAt(body, 'iserver accounts').accounts;
+  const accounts = arrayAt(list, 'iserver.accounts', IBKR_MAX_ACCOUNTS).map((entry, index) => {
+    if (typeof entry !== 'string' || !ACCOUNT_ID.test(entry)) throw invalid('iserver.accounts[' + index + ']');
+    return entry;
+  });
+  if (accounts.length === 0) throw invalid('no brokerage account after initialization');
+  return accounts;
 }
 
 export function parseAccounts(body: unknown): string[] {

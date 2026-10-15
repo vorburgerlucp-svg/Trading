@@ -1,4 +1,4 @@
-// HTTPS transport to the local Client Portal Gateway. Only the operations of IBKR_READ_OPERATIONS can be sent.
+// HTTPS transport to the local Client Portal Gateway. Only the operations of IBKR_ALLOWED_OPERATIONS can be sent.
 // No cookies or tokens are stored or sent by this code: the gateway holds the login. Certificate verification stays on: the
 // gateway uses a self-signed certificate, so it is trusted only through an explicitly configured certificate (IBKR_CA_CERT_PATH),
 // never by switching verification off. Response bodies are untrusted: size-bounded, time-bounded, parsed as JSON only.
@@ -7,7 +7,7 @@ import type { ClientRequest, IncomingMessage } from 'node:http';
 import { request as httpsRequest, type RequestOptions } from 'node:https';
 import { IbkrError } from './ibkr-errors.js';
 import { IBKR_MAX_RESPONSE_BYTES_DEFAULT, IBKR_REQUEST_TIMEOUT_MS } from './ibkr-limits.js';
-import { buildIbkrPath, IBKR_READ_OPERATIONS, type IbkrOperationParams, type IbkrReadOperation } from './ibkr-readonly.js';
+import { buildIbkrPath, IBKR_ALLOWED_OPERATIONS, IBKR_BROKERAGE_INIT_BODY, type IbkrOperation, type IbkrOperationParams } from './ibkr-readonly.js';
 
 /** A fixed, non-sensitive product identifier. It names no user, account or machine. */
 export const IBKR_USER_AGENT = 'NEXUS-O19/1.0' as const;
@@ -19,7 +19,8 @@ export interface IbkrResponse {
 }
 
 export interface IbkrTransport {
-  call(operation: IbkrReadOperation, params?: IbkrOperationParams): Promise<IbkrResponse>;
+  /** Only operations of IBKR_ALLOWED_OPERATIONS. The body comes from the operation's fixed definition, never from the caller. */
+  call(operation: IbkrOperation, params?: IbkrOperationParams): Promise<IbkrResponse>;
 }
 
 /** Reads a response stream, refusing as soon as it exceeds the byte limit. */
@@ -76,8 +77,10 @@ export class HttpsIbkrTransport implements IbkrTransport {
     this.requestFunction = options.requestFunction ?? httpsRequest;
   }
 
-  call(operation: IbkrReadOperation, params: IbkrOperationParams = {}): Promise<IbkrResponse> {
-    const spec = IBKR_READ_OPERATIONS[operation];
+  call(operation: IbkrOperation, params: IbkrOperationParams = {}): Promise<IbkrResponse> {
+    const spec = IBKR_ALLOWED_OPERATIONS[operation];
+    // The body is fixed per operation: only brokerage.init has one, with compete=false. Nothing else can be sent.
+    const body = spec.body === 'brokerage-init' ? JSON.stringify(IBKR_BROKERAGE_INIT_BODY) : undefined;
     const url = new URL(this.basePath + buildIbkrPath(operation, params), this.origin);
     return new Promise<IbkrResponse>((resolve, reject) => {
       let settled = false;
@@ -89,7 +92,10 @@ export class HttpsIbkrTransport implements IbkrTransport {
       // The gateway's request documentation asks for a User-Agent on every request. A POST without a body states its empty length:
       // otherwise the gateway waits for a body and the request times out.
       const headers: Record<string, string> = { accept: 'application/json', 'user-agent': IBKR_USER_AGENT };
-      if (spec.method === 'POST') headers['content-length'] = '0';
+      if (spec.method === 'POST') {
+        headers['content-length'] = String(body === undefined ? 0 : Buffer.byteLength(body));
+        if (body !== undefined) headers['content-type'] = 'application/json';
+      }
       const request = this.requestFunction(
         url,
         { method: spec.method, headers, ca: this.ca, rejectUnauthorized: true },
@@ -125,7 +131,7 @@ export class HttpsIbkrTransport implements IbkrTransport {
       );
       request.setTimeout(this.timeoutMs, () => request.destroy(new IbkrError('BROKER_TIMEOUT')));
       request.on('error', (error: unknown) => settle(() => reject(toIbkrError(error))));
-      request.end();
+      request.end(body);
     });
   }
 }
