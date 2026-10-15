@@ -88,7 +88,17 @@ describe('O19 IBKR transport: request shape', () => {
     expect(seen[0]?.method).toBe('POST');
     expect(seen[0]?.rejectUnauthorized).toBe(true);
     expect(seen[0]?.ca).toBe('-----PEM-----');
-    expect(Object.keys(seen[0]?.headers ?? {})).toEqual(['accept']);
+    // The gateway's request documentation asks for a User-Agent on every request; a POST without a body states its empty length.
+    expect(Object.keys(seen[0]?.headers ?? {}).sort()).toEqual(['accept', 'content-length', 'user-agent']);
+    expect(seen[0]?.headers?.['user-agent']).toBe('NEXUS-O19/1.0');
+    expect(seen[0]?.headers?.['content-length']).toBe('0');
+  });
+
+  it('a GET carries the User-Agent but no content length', async () => {
+    const { transport, seen } = transportWith({ kind: 'respond', status: 200, body: '[]' });
+    await transport.call('accounts.list');
+    expect(seen[0]?.headers?.['user-agent']).toBe('NEXUS-O19/1.0');
+    expect(seen[0]?.headers?.['content-length']).toBeUndefined();
   });
 
   it('never disables certificate verification, even when no CA is configured', async () => {

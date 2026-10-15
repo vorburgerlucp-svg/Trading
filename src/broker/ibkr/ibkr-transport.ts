@@ -9,6 +9,9 @@ import { IbkrError } from './ibkr-errors.js';
 import { IBKR_MAX_RESPONSE_BYTES_DEFAULT, IBKR_REQUEST_TIMEOUT_MS } from './ibkr-limits.js';
 import { buildIbkrPath, IBKR_READ_OPERATIONS, type IbkrOperationParams, type IbkrReadOperation } from './ibkr-readonly.js';
 
+/** A fixed, non-sensitive product identifier. It names no user, account or machine. */
+export const IBKR_USER_AGENT = 'NEXUS-O19/1.0' as const;
+
 export interface IbkrResponse {
   readonly status: number;
   /** Parsed JSON, or null for an empty body. Untrusted until the validation layer has checked it. */
@@ -83,9 +86,13 @@ export class HttpsIbkrTransport implements IbkrTransport {
         settled = true;
         action();
       };
+      // The gateway's request documentation asks for a User-Agent on every request. A POST without a body states its empty length:
+      // otherwise the gateway waits for a body and the request times out.
+      const headers: Record<string, string> = { accept: 'application/json', 'user-agent': IBKR_USER_AGENT };
+      if (spec.method === 'POST') headers['content-length'] = '0';
       const request = this.requestFunction(
         url,
-        { method: spec.method, headers: { accept: 'application/json' }, ca: this.ca, rejectUnauthorized: true },
+        { method: spec.method, headers, ca: this.ca, rejectUnauthorized: true },
         (response) => {
           const status = response.statusCode ?? 0;
           if (status === 401 || status === 403) {
