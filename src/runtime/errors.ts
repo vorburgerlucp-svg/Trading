@@ -31,6 +31,7 @@ export type RuntimeErrorCode =
   | 'BROKER_SNAPSHOT_STALE'
   | 'BROKER_RECONCILIATION_FAILURE'
   | 'BROKER_SESSION_COMPETING'
+  | 'BROKER_BROKERAGE_INIT_REQUIRED'
   | 'BROKER_BROKERAGE_INIT_FAILED';
 
 const FIXED_MESSAGE: Readonly<Record<RuntimeErrorCode, string>> = Object.freeze({
@@ -57,6 +58,7 @@ const FIXED_MESSAGE: Readonly<Record<RuntimeErrorCode, string>> = Object.freeze(
   BROKER_SNAPSHOT_STALE: 'the broker snapshot is stale: it is not current broker state',
   BROKER_RECONCILIATION_FAILURE: 'the reconciliation could not be computed',
   BROKER_SESSION_COMPETING: 'another broker brokerage session is active: it is not taken over',
+  BROKER_BROKERAGE_INIT_REQUIRED: 'the broker brokerage session is not ready and starting it is not enabled: nothing is started automatically',
   BROKER_BROKERAGE_INIT_FAILED: 'the broker brokerage session could not be started and verified',
 });
 
@@ -84,6 +86,7 @@ const STATUS: Readonly<Record<RuntimeErrorCode, number>> = Object.freeze({
   BROKER_SNAPSHOT_STALE: 409,
   BROKER_RECONCILIATION_FAILURE: 500,
   BROKER_SESSION_COMPETING: 409,
+  BROKER_BROKERAGE_INIT_REQUIRED: 409,
   BROKER_BROKERAGE_INIT_FAILED: 503,
 });
 

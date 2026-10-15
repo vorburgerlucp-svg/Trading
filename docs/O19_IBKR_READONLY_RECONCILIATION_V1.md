@@ -20,8 +20,9 @@ IBKR → read-only adapter → schema and security validation → instrument ide
   - Paths beginning with `/gw/api`, `/oauth` or `/oauth2` are not supported through the gateway. NEXUS uses none of them.
   - Two tiers: a *read-only session* is required for every call, and it allows the non-`/iserver` endpoints (portfolio, accounts). The *brokerage session* is required for `/iserver` endpoints (open orders). A single username can hold only one brokerage session.
   - The session expires after several minutes without requests. IBKR asks for a `POST /tickle` about every 60 seconds to keep it alive.
-- NEXUS's sync starts with one `POST /tickle`. It reads the session (`ssoExpires` > 0) and the brokerage state (`authenticated`, `connected`, `competing`). A missing session is `BROKER_AUTH_REQUIRED`. A competing brokerage session is `BROKER_SESSION_COMPETING`, and this build never takes it over.
-- **Brokerage start (only when the brokerage is not ready).** Once per sync, and only with a valid read-only session and no competing session: `POST /iserver/auth/ssodh/init` with the fixed body `{"publish":true,"compete":false}`, then at least 2 seconds of settle time, then `GET /iserver/accounts` (must be non-empty), then one more tickle. The brokerage must then be `authenticated = true`, `connected = true`, `competing = false`. Otherwise the sync stops with `BROKER_BROKERAGE_INIT_FAILED`. An initialization is never repeated within one sync, and `compete` is never `true`.
+- NEXUS's sync starts with one `POST /tickle`. It proves only the outer gateway session: a `session` identifier is present and `ssoExpires` > 0. A missing or mistyped field is `BROKER_RESPONSE_INVALID`. An expiry of zero or less is `BROKER_AUTH_REQUIRED`. The tickle says nothing about brokerage readiness.
+- Brokerage readiness comes only from `POST /iserver/auth/status` (`brokerage.status`). The four flags `authenticated`, `connected`, `competing` and `established` are required booleans. A missing or mistyped one is `BROKER_RESPONSE_INVALID`. Ready means authenticated, connected and established, and not competing. `competing = true` is `BROKER_SESSION_COMPETING`, and nothing else is sent.
+- **Initialization gate.** A brokerage that is not ready is started only when `IBKR_ALLOW_BROKERAGE_INIT=1` is set for this process. The default is `0`. With the gate closed, the sync stops with `BROKER_BROKERAGE_INIT_REQUIRED` and sends nothing. With the gate open, one sync sends at most one `POST /iserver/auth/ssodh/init` with the fixed body `{"publish":true,"compete":false}`, waits at least 2 seconds, reads `brokerage.status` again (it must be ready), and then `GET /iserver/accounts` must be non-empty. The initialization's own answer is not authority. A failure after the initialization is `BROKER_BROKERAGE_INIT_FAILED`. There is no retry, and `compete` is never `true`.
 - A gateway server error during the initialization is `BROKER_NOT_CONNECTED` (the gateway answered with an error), and a refused initialization (for example 409) is `BROKER_BROKERAGE_INIT_FAILED`.
 - The gateway requires a `User-Agent` header on every request (official request documentation). NEXUS sends the fixed value `NEXUS-O19/1.0`, which names no user, account or machine. Without it the gateway answers `403` with a non-JSON body.
 - A `POST` without a fixed body states `Content-Length: 0`. Without it the gateway waits for a body and the request times out. The brokerage start sends its fixed body with its true length.
@@ -36,8 +37,9 @@ Exactly two operations are `POST`, and only the second one has a fixed body. Eve
 
 | Operation | Method and path | Pacing (official) | Purpose |
 |---|---|---|---|
-| `session.tickle` | `POST /tickle` | 1 req/s | Keep the session alive; read session and brokerage state. No account data. |
-| `brokerage.init` | `POST /iserver/auth/ssodh/init` with the fixed body `{"publish":true,"compete":false}` | none listed | Start the brokerage session when it is not ready. `compete` is always `false`. Once per sync. This is a session control, not an order. |
+| `session.tickle` | `POST /tickle` | 1 req/s | Keep the outer gateway session alive. Proves session validity only. No account data. |
+| `brokerage.status` | `POST /iserver/auth/status`, no body | none listed | The only source of brokerage readiness (`authenticated`, `connected`, `competing`, `established`). A session control, not an order. |
+| `brokerage.init` | `POST /iserver/auth/ssodh/init` with the fixed body `{"publish":true,"compete":false}` | none listed | Start the brokerage session only when `IBKR_ALLOW_BROKERAGE_INIT=1` and the status is not ready. `compete` is always `false`. At most once per sync. A session control, not an order. |
 | `brokerage.accounts` | `GET /iserver/accounts` | none listed | Accounts the started brokerage session reports. Must be non-empty. |
 | `accounts.list` | `GET /portfolio/accounts` | 1 req/5 s | Accounts this session can read. |
 | `account.meta` | `GET /portfolio/{accountId}/meta` | global 10 req/s | Account currency and clearing status (`O` = open). |
@@ -61,6 +63,7 @@ Not in the table, on purpose: every `POST /iserver/...` order route, modify, can
 | Variable | Default | Rule |
 |---|---|---|
 | `IBKR_ENABLED` | `0` | `1` or `0` only. Off means nothing is read and the broker reports `not_connected`. |
+| `IBKR_ALLOW_BROKERAGE_INIT` | `0` | `1` or `0` only. `1` lets one sync start a brokerage session that is not ready. Keep `0`; set `1` only for one deliberate, supervised start. Never commit it as `1`. |
 | `IBKR_BASE_URL` | `https://localhost:5000/v1/api` | Must be HTTPS, a loopback host (`localhost`, `127.0.0.1`, `[::1]`), the path `/v1/api`, with no credentials, query or fragment. Anything else fails the start. |
 | `IBKR_ACCOUNT_ID` | none | 1 to 32 letters or digits. Matched exactly against the readable accounts. |
 | `IBKR_CA_CERT_PATH` | none | A PEM file with the gateway's own certificate. It adds trust for that certificate. Verification stays on. An unreadable file fails the start (`IBKR_CA_UNREADABLE`). |
@@ -149,7 +152,8 @@ Persistence uses the existing `AppendOnlyLog` on PostgreSQL (`append_only_logs` 
 | `BROKER_SNAPSHOT_STALE` | 409 | `requireFresh=1` and the snapshot is older than the limit. |
 | `BROKER_RECONCILIATION_FAILURE` | 500 | The comparison could not be computed. |
 | `BROKER_SESSION_COMPETING` | 409 | Another brokerage session is active. It is not taken over. |
-| `BROKER_BROKERAGE_INIT_FAILED` | 503 | The brokerage session could not be started and verified as authenticated and connected. |
+| `BROKER_BROKERAGE_INIT_REQUIRED` | 409 | The brokerage session is not ready and starting it is not enabled (`IBKR_ALLOW_BROKERAGE_INIT` is `0`). Nothing is started automatically. |
+| `BROKER_BROKERAGE_INIT_FAILED` | 503 | The brokerage session could not be started and verified as authenticated, connected and established. |
 
 Existing `DATABASE_ERROR` is returned when a store fails.
 

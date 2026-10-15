@@ -13,6 +13,7 @@ export type IbkrErrorCode =
   | 'BROKER_SNAPSHOT_STALE'
   | 'BROKER_RECONCILIATION_FAILURE'
   | 'BROKER_SESSION_COMPETING'
+  | 'BROKER_BROKERAGE_INIT_REQUIRED'
   | 'BROKER_BROKERAGE_INIT_FAILED';
 
 const FIXED_MESSAGE: Readonly<Record<IbkrErrorCode, string>> = Object.freeze({
@@ -27,7 +28,8 @@ const FIXED_MESSAGE: Readonly<Record<IbkrErrorCode, string>> = Object.freeze({
   BROKER_SNAPSHOT_STALE: 'the broker snapshot is older than the freshness limit and is not current broker state',
   BROKER_RECONCILIATION_FAILURE: 'the reconciliation could not be computed from the stored snapshot and ledger',
   BROKER_SESSION_COMPETING: 'another IBKR brokerage session is active: this build does not take it over',
-  BROKER_BROKERAGE_INIT_FAILED: 'the IBKR brokerage session could not be started and verified as authenticated and connected',
+  BROKER_BROKERAGE_INIT_REQUIRED: 'the IBKR brokerage session is not ready and starting it is not enabled for this process: nothing is started automatically',
+  BROKER_BROKERAGE_INIT_FAILED: 'the IBKR brokerage session could not be started and verified as authenticated, connected and established',
 });
 
 export class IbkrError extends Error {

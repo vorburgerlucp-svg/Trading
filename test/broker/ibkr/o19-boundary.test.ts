@@ -28,22 +28,23 @@ const EXECUTION_WORDS = [
 const EXECUTION_PATH = /place|modify|cancel|replace|exercise|transfer|withdraw|deposit|fxtrade|rebalance|whatif|reply|secdef/i;
 
 describe('O19 read-only boundary: the allowlist', () => {
-  it('[21] contains exactly the eight operations: six reads, the keepalive and the brokerage start', () => {
+  it('[21] contains exactly the nine operations: six reads, the keepalive, the official brokerage status and the brokerage start', () => {
     expect(Object.keys(IBKR_ALLOWED_OPERATIONS).sort()).toEqual([
       'account.ledger',
       'account.meta',
       'accounts.list',
       'brokerage.accounts',
       'brokerage.init',
+      'brokerage.status',
       'orders.open',
       'positions.page',
       'session.tickle',
     ]);
   });
 
-  it('[21] exactly two operations are POST: the keepalive and the brokerage start. No PUT, DELETE or PATCH exists anywhere', () => {
+  it('[21] exactly three operations are POST: the keepalive, the brokerage status and the brokerage start. No PUT, DELETE or PATCH exists anywhere', () => {
     const methods = Object.entries(IBKR_ALLOWED_OPERATIONS).map(([name, spec]) => [name, spec.method] as const);
-    expect(methods.filter(([, method]) => method === 'POST').map(([name]) => name).sort()).toEqual(['brokerage.init', 'session.tickle']);
+    expect(methods.filter(([, method]) => method === 'POST').map(([name]) => name).sort()).toEqual(['brokerage.init', 'brokerage.status', 'session.tickle']);
     expect(methods.every(([, method]) => method === 'GET' || method === 'POST')).toBe(true);
   });
 
@@ -62,8 +63,12 @@ describe('O19 read-only boundary: the allowlist', () => {
     expect(methods.some((method) => ['DELETE', 'PUT', 'PATCH'].includes(method))).toBe(false);
   });
 
-  it('[21] the brokerage start is a session control, marked as such: not a read, not an order', () => {
+  it('[21] the brokerage start and the brokerage status are session controls, marked as such: not a read, not an order', () => {
     expect(IBKR_ALLOWED_OPERATIONS['brokerage.init'].kind).toBe('session');
+    expect(IBKR_ALLOWED_OPERATIONS['brokerage.status'].kind).toBe('session');
+    expect(IBKR_ALLOWED_OPERATIONS['brokerage.status'].body).toBe('none');
+    expect(IBKR_ALLOWED_OPERATIONS['brokerage.status'].method).toBe('POST');
+    expect(IBKR_ALLOWED_OPERATIONS['brokerage.status'].path).toBe('/iserver/auth/status');
     expect(IBKR_ALLOWED_OPERATIONS['brokerage.accounts'].kind).toBe('read');
   });
 

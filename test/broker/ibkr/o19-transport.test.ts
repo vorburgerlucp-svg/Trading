@@ -209,6 +209,16 @@ describe('O19 IBKR transport: bodies are fixed per operation, never supplied by 
     expect(seen[0]?.headers?.['content-type']).toBeUndefined();
   });
 
+  it('brokerage.status is a POST to the status path with no body and a zero content length, never the init path', async () => {
+    const { transport, seen, requests } = transportWith({ kind: 'respond', status: 200, body: '{"authenticated":false,"connected":false,"competing":false,"established":false}' });
+    await transport.call('brokerage.status');
+    expect(seen[0]?.url).toBe('https://localhost:5000/v1/api/iserver/auth/status');
+    expect(seen[0]?.method).toBe('POST');
+    expect(requests[0]?.body).toBeNull();
+    expect(seen[0]?.headers?.['content-length']).toBe('0');
+    expect(seen[0]?.headers?.['content-type']).toBeUndefined();
+  });
+
   it('a GET sends no body', async () => {
     const { transport, requests } = transportWith({ kind: 'respond', status: 200, body: '[]' });
     await transport.call('accounts.list');

@@ -65,33 +65,71 @@ function optionalDecimal(value: unknown, path: string): Decimal | null {
 }
 
 export interface TickleResult {
-  /** The read-only session is alive (a session identifier and a positive expiry). */
-  readonly sessionValid: boolean;
-  /** The brokerage session is ready: authenticated, connected, and not competing with another connection. */
-  readonly brokerageAuthenticated: boolean;
-  /** Another brokerage connection is active. This build never takes it over. */
-  readonly competing: boolean;
+  /** Always true. A session that is not valid is refused with an error, never returned as a quiet false. */
+  readonly sessionValid: true;
 }
 
+const SESSION_MAX_LENGTH = 256;
+const STATUS_TEXT_MAX_LENGTH = 256;
+
+/**
+ * The keepalive answer. It proves the outer gateway session only: a session identifier and a positive expiry. It never says
+ * whether the brokerage is ready; that comes from brokerage.status alone. Fail closed: a missing or mistyped field is
+ * BROKER_RESPONSE_INVALID, and an expiry of zero or less is an expired session (BROKER_AUTH_REQUIRED). The session identifier
+ * is checked and then dropped: it is never returned, logged or stored.
+ */
 export function parseTickle(body: unknown): TickleResult {
   const obj = objectAt(body, 'tickle');
-  const hasSession = typeof obj.session === 'string' && obj.session.length > 0 && obj.session.length <= 256;
+  const session = obj.session;
+  if (typeof session !== 'string' || session.length === 0 || session.length > SESSION_MAX_LENGTH) throw invalid('tickle.session');
   const expires = obj.ssoExpires;
-  const sessionValid = hasSession && typeof expires === 'number' && Number.isFinite(expires) && expires > 0;
-  let authenticated = false;
-  let connected = false;
-  let competing = false;
-  const iserver = obj.iserver;
-  if (typeof iserver === 'object' && iserver !== null && !Array.isArray(iserver)) {
-    const auth = (iserver as Record<string, unknown>).authStatus;
-    if (typeof auth === 'object' && auth !== null) {
-      const status = auth as Record<string, unknown>;
-      authenticated = status.authenticated === true;
-      connected = status.connected === true;
-      competing = status.competing === true;
-    }
-  }
-  return { sessionValid, brokerageAuthenticated: authenticated && connected && !competing, competing };
+  if (typeof expires !== 'number' || !Number.isFinite(expires)) throw invalid('tickle.ssoExpires');
+  if (expires <= 0) throw new IbkrError('BROKER_AUTH_REQUIRED', 'the gateway session has expired');
+  return { sessionValid: true };
+}
+
+export interface BrokerageStatusResult {
+  readonly authenticated: boolean;
+  readonly connected: boolean;
+  readonly competing: boolean;
+  readonly established: boolean;
+}
+
+/** A required flag: a JSON boolean. A missing or differently typed flag is refused, never read as false. */
+function requiredBoolean(obj: Record<string, unknown>, key: string, path: string): boolean {
+  const value = obj[key];
+  if (typeof value !== 'boolean') throw invalid(path + '.' + key);
+  return value;
+}
+
+/** An optional status text: absent or null is fine; anything else must be a string of bounded length. Its content is not used. */
+function optionalStatusText(obj: Record<string, unknown>, key: string, path: string): void {
+  const value = obj[key];
+  if (value === undefined || value === null) return;
+  if (typeof value !== 'string' || value.length > STATUS_TEXT_MAX_LENGTH) throw invalid(path + '.' + key);
+}
+
+/**
+ * The official brokerage status (POST /iserver/auth/status), the only source of brokerage readiness. Fail closed: the four
+ * flags are required booleans, and an incomplete or mistyped answer is BROKER_RESPONSE_INVALID. message and fail are optional
+ * bounded texts; they are validated and never returned.
+ */
+export function parseBrokerageStatus(body: unknown): BrokerageStatusResult {
+  const obj = objectAt(body, 'brokerage status');
+  const result: BrokerageStatusResult = {
+    authenticated: requiredBoolean(obj, 'authenticated', 'brokerage status'),
+    connected: requiredBoolean(obj, 'connected', 'brokerage status'),
+    competing: requiredBoolean(obj, 'competing', 'brokerage status'),
+    established: requiredBoolean(obj, 'established', 'brokerage status'),
+  };
+  optionalStatusText(obj, 'message', 'brokerage status');
+  optionalStatusText(obj, 'fail', 'brokerage status');
+  return result;
+}
+
+/** The single NEXUS readiness rule: authenticated, connected and established, and not competing with another connection. */
+export function isBrokerageReady(status: BrokerageStatusResult): boolean {
+  return status.authenticated && status.connected && status.established && !status.competing;
 }
 
 /**

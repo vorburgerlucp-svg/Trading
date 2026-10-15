@@ -30,6 +30,8 @@ describe.skipIf(!optIn)('IBKR read-only live smoke' + (optIn ? '' : ' (IBKR LIVE
       accountId: process.env.IBKR_ACCOUNT_ID?.trim() || null,
       clock: () => new Date(),
       resolveInstrument: () => null,
+      // Only an explicit IBKR_ALLOW_BROKERAGE_INIT=1 for this run allows a start; anything else keeps the gate closed.
+      allowBrokerageInit: process.env.IBKR_ALLOW_BROKERAGE_INIT?.trim() === '1',
     });
     const snapshot = await adapter.fetchSnapshot();
     expect(snapshot.access).toBe('read_only');

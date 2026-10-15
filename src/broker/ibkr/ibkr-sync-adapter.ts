@@ -1,7 +1,9 @@
-// IBKR read-only sync adapter. It implements BrokerSyncAdapter only: it checks the session, starts the brokerage session when it is
-// not running (once per sync, with a fixed body that never takes over another session), then reads the accounts, the account
-// status, the cash, the positions and the open orders, and returns a validated BrokerSnapshot. It has no order method, cannot call
-// anything outside IBKR_ALLOWED_OPERATIONS, and never writes to the ledger or to the instrument registry.
+// IBKR read-only sync adapter. It implements BrokerSyncAdapter only. Per sync it reads the outer session (tickle) and then the
+// brokerage status, which is the only source of brokerage readiness. A brokerage that is not ready is started only when this
+// process allows it (allowBrokerageInit): then exactly one initialization is sent, the status is read again after the settle
+// time, and the accounts must answer. Otherwise the sync stops with BROKER_BROKERAGE_INIT_REQUIRED and nothing is started.
+// It has no order method, cannot call anything outside IBKR_ALLOWED_OPERATIONS, and never writes to the ledger or to the
+// instrument registry.
 
 import type { AdapterConnection } from '../../ai/model-adapter.js';
 import { currency as toCurrency, money, type CurrencyCode, type Money } from '../../money/currency.js';
@@ -10,7 +12,7 @@ import type { BrokerAmount, BrokerOpenOrder, BrokerPositionSnapshot, BrokerSnaps
 import { IbkrError } from './ibkr-errors.js';
 import { IBKR_MAX_POSITION_PAGES, IBKR_PORTFOLIO_PAGE_SIZE, IBKR_ALLOWED_OPERATIONS, type IbkrOperation, type IbkrOperationParams } from './ibkr-readonly.js';
 import type { IbkrTransport } from './ibkr-transport.js';
-import { parseAccounts, parseBrokerageAccounts, parseLedger, parseMeta, parseOrders, parsePositions, parseTickle, type OrderRecord, type PositionRecord } from './ibkr-validation.js';
+import { isBrokerageReady, parseAccounts, parseBrokerageAccounts, parseBrokerageStatus, parseLedger, parseMeta, parseOrders, parsePositions, parseTickle, type OrderRecord, type PositionRecord } from './ibkr-validation.js';
 
 /** Official guidance: at least two seconds between the brokerage initialization and the status check. */
 export const IBKR_BROKERAGE_SETTLE_MS = 2_000;
@@ -22,6 +24,11 @@ export interface IbkrSyncAdapterOptions {
   clock: () => Date;
   /** Maps an IBKR conid to a NEXUS instrument through the instrument registry. Null when unmapped. Never invented. */
   resolveInstrument: (brokerInstrumentId: string, at: string) => string | null;
+  /**
+   * Whether this process may send the brokerage initialization (IBKR_ALLOW_BROKERAGE_INIT=1). Required, with no default: every
+   * caller states it. False: a brokerage that is not ready stops the sync (BROKER_BROKERAGE_INIT_REQUIRED) and nothing is sent.
+   */
+  allowBrokerageInit: boolean;
   /** Waits between the brokerage initialization and its check. Tests replace it with a no-op. */
   delay?: (ms: number) => Promise<void>;
 }
@@ -92,10 +99,11 @@ export class IbkrBrokerSyncAdapter implements BrokerSyncAdapter {
   }
 
   /**
-   * Starts the brokerage session. At most one initialization attempt per sync; it is never repeated. The body is fixed with
-   * compete=false, so a session that another client runs is reported (BROKER_SESSION_COMPETING) and never taken over.
+   * The one brokerage initialization of this sync. It is sent at most once and never repeated. Its answer is not authority: the
+   * status is read again after the settle time, and only that status, plus a non-empty accounts answer, makes the session ready.
+   * The body is fixed with compete=false, so a session that another client runs is reported (BROKER_SESSION_COMPETING), never taken over.
    */
-  private async startBrokerage(): Promise<void> {
+  private async initializeBrokerage(): Promise<void> {
     try {
       await this.call('brokerage.init');
     } catch (error) {
@@ -103,25 +111,29 @@ export class IbkrBrokerSyncAdapter implements BrokerSyncAdapter {
       throw new IbkrError('BROKER_BROKERAGE_INIT_FAILED', 'initialization was refused');
     }
     await (this.options.delay ?? defaultDelay)(IBKR_BROKERAGE_SETTLE_MS);
+    const status = parseBrokerageStatus(await this.call('brokerage.status'));
+    if (status.competing) throw new IbkrError('BROKER_SESSION_COMPETING');
+    if (!isBrokerageReady(status)) throw new IbkrError('BROKER_BROKERAGE_INIT_FAILED', 'not authenticated, connected and established after initialization');
     try {
       parseBrokerageAccounts(await this.call('brokerage.accounts'));
     } catch (error) {
       if (error instanceof IbkrError && CAUSE_PRESERVED_ON_INIT.has(error.code)) throw error;
       throw new IbkrError('BROKER_BROKERAGE_INIT_FAILED', 'no brokerage account after initialization');
     }
-    const status = parseTickle(await this.call('session.tickle'));
-    if (status.competing) throw new IbkrError('BROKER_SESSION_COMPETING');
-    if (!status.brokerageAuthenticated) throw new IbkrError('BROKER_BROKERAGE_INIT_FAILED', 'not authenticated and connected after initialization');
   }
 
   private async collect(): Promise<BrokerSnapshot> {
     try {
       const observedAt = this.options.clock().toISOString();
-      const session = parseTickle(await this.call('session.tickle'));
-      if (!session.sessionValid) throw new IbkrError('BROKER_AUTH_REQUIRED');
-      // A competing session is reported before anything else is sent: this build never takes it over.
-      if (session.competing) throw new IbkrError('BROKER_SESSION_COMPETING');
-      if (!session.brokerageAuthenticated) await this.startBrokerage();
+      // The keepalive proves the outer session. A missing or expired session stops here, before any brokerage call.
+      parseTickle(await this.call('session.tickle'));
+      const status = parseBrokerageStatus(await this.call('brokerage.status'));
+      // A competing session is reported before anything else: this build never takes it over and never initializes beside it.
+      if (status.competing) throw new IbkrError('BROKER_SESSION_COMPETING');
+      if (!isBrokerageReady(status)) {
+        if (!this.options.allowBrokerageInit) throw new IbkrError('BROKER_BROKERAGE_INIT_REQUIRED');
+        await this.initializeBrokerage();
+      }
 
       const accountId = selectAccount(parseAccounts(await this.call('accounts.list')), this.options.accountId);
       const meta = parseMeta(await this.call('account.meta', { accountId }), accountId);

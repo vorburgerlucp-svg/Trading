@@ -1,9 +1,9 @@
-// The IBKR read-only adapter over the fixture gateway: account selection, session and auth errors, pagination and its cap,
-// pacing, single-flight, unknown open orders, and identity by conid (never by ticker).
+// The IBKR read-only adapter over the fixture gateway: account selection, session and auth errors, the brokerage readiness rule
+// and its initialization gate, pagination and its cap, pacing, single-flight, unknown open orders, and identity by conid.
 import { describe, expect, it } from 'vitest';
 import { IbkrError } from '../../../src/broker/ibkr/ibkr-errors.js';
 import { IbkrBrokerSyncAdapter, selectAccount } from '../../../src/broker/ibkr/ibkr-sync-adapter.js';
-import { FixtureIbkrReadOnlyAdapter, FIXTURE_ACCOUNT, FIXTURE_CONID_AAPL, FIXTURE_CONID_SPY, FIXTURE_OTHER_ACCOUNT, FIXTURE_SESSION_TOKEN, defaultFixtureData, fixtureOrder, fixturePosition, fixtureTickle } from './o19-fixture.js';
+import { FixtureIbkrReadOnlyAdapter, FIXTURE_ACCOUNT, FIXTURE_CONID_AAPL, FIXTURE_CONID_SPY, FIXTURE_OTHER_ACCOUNT, FIXTURE_SESSION_TOKEN, defaultFixtureData, fixtureOrder, fixturePosition, fixtureTickle, statusOf } from './o19-fixture.js';
 
 const T0 = '2026-10-15T09:00:00.000Z';
 
@@ -14,7 +14,7 @@ function clockAt(iso: string) {
 
 function adapterWith(
   fixture: FixtureIbkrReadOnlyAdapter,
-  options: { accountId?: string | null; clock?: ReturnType<typeof clockAt>; resolve?: (conid: string) => string | null; delays?: number[] } = {},
+  options: { accountId?: string | null; clock?: ReturnType<typeof clockAt>; resolve?: (conid: string) => string | null; delays?: number[]; allowInit?: boolean } = {},
 ) {
   const clock = options.clock ?? clockAt(T0);
   const resolve = options.resolve ?? ((conid: string) => (conid === FIXTURE_CONID_AAPL ? 'ins_aapl' : null));
@@ -24,6 +24,7 @@ function adapterWith(
     accountId: options.accountId ?? null,
     clock: clock.now,
     resolveInstrument: (conid) => resolve(conid),
+    allowBrokerageInit: options.allowInit ?? false,
     delay: async (ms) => {
       delays.push(ms);
     },
@@ -40,6 +41,8 @@ async function errorOf(promise: Promise<unknown>): Promise<IbkrError> {
   }
   throw new Error('expected an IbkrError');
 }
+
+const initCalls = (fixture: FixtureIbkrReadOnlyAdapter) => fixture.calls.filter((c) => c.operation === 'brokerage.init');
 
 describe('O19 IBKR adapter: account selection fails closed', () => {
   it('[2] a configured account that the session cannot read is BROKER_ACCOUNT_NOT_FOUND', async () => {
@@ -75,15 +78,39 @@ describe('O19 IBKR adapter: account selection fails closed', () => {
   });
 });
 
-describe('O19 IBKR adapter: session and authentication', () => {
-  it('[7] a missing session is BROKER_AUTH_REQUIRED, the adapter reports not connected, and no token leaks', async () => {
+describe('O19 IBKR adapter: the outer session (tickle) is a keepalive, not a readiness source', () => {
+  it('[7] an expired gateway session is BROKER_AUTH_REQUIRED, the adapter reports not connected, and no token leaks', async () => {
     const fixture = new FixtureIbkrReadOnlyAdapter();
-    fixture.data.tickle = fixtureTickle({ session: undefined, ssoExpires: 0 });
+    fixture.data.tickle = fixtureTickle({ ssoExpires: 0 });
     const { adapter } = adapterWith(fixture);
     const error = await errorOf(adapter.fetchSnapshot());
     expect(error.code).toBe('BROKER_AUTH_REQUIRED');
     expect(adapter.connection()).toBe('not_connected');
     expect(JSON.stringify(error) + error.message).not.toContain(FIXTURE_SESSION_TOKEN);
+  });
+
+  it('a tickle without a session identifier is BROKER_RESPONSE_INVALID, and no brokerage call follows it', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.data.tickle = fixtureTickle({ session: undefined });
+    const error = await errorOf(adapterWith(fixture, { allowInit: true }).adapter.fetchSnapshot());
+    expect(error.code).toBe('BROKER_RESPONSE_INVALID');
+    expect(fixture.operationsCalled()).not.toContain('brokerage.status');
+    expect(initCalls(fixture)).toHaveLength(0);
+  });
+
+  it('a tickle without a numeric expiry is BROKER_RESPONSE_INVALID, never a quiet "no session"', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.data.tickle = fixtureTickle({ ssoExpires: '460311' });
+    expect((await errorOf(adapterWith(fixture).adapter.fetchSnapshot())).code).toBe('BROKER_RESPONSE_INVALID');
+  });
+
+  it('a tickle that says nothing about the brokerage is still enough for the keepalive; the status decides readiness', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.data.tickle = fixtureTickle({ iserver: undefined });
+    fixture.brokerageBefore = statusOf();
+    const snapshot = await adapterWith(fixture).adapter.fetchSnapshot();
+    expect(snapshot.positions).toHaveLength(1);
+    expect(initCalls(fixture)).toHaveLength(0);
   });
 
   it('scopes the open-order read to the selected account', async () => {
@@ -93,96 +120,201 @@ describe('O19 IBKR adapter: session and authentication', () => {
     expect(fixture.calls.filter((c) => c.operation === 'orders.open').map((c) => c.params?.accountId)).toEqual([FIXTURE_ACCOUNT]);
   });
 
-  const unauthenticated = () => fixtureTickle({ iserver: { authStatus: { authenticated: false, connected: false, competing: false } } });
-
-  it('an unauthenticated brokerage session is started once with the fixed initialization, then the portfolio is read', async () => {
-    const fixture = new FixtureIbkrReadOnlyAdapter();
-    fixture.data.tickle = unauthenticated();
-    const delays: number[] = [];
-    const { adapter } = adapterWith(fixture, { delays });
-    const snapshot = await adapter.fetchSnapshot();
-    const order = fixture.operationsCalled();
-    expect(fixture.calls.filter((c) => c.operation === 'brokerage.init')).toHaveLength(1);
-    expect(order.indexOf('brokerage.init')).toBeLessThan(order.indexOf('accounts.list'));
-    expect(order.indexOf('brokerage.accounts')).toBeGreaterThan(order.indexOf('brokerage.init'));
-    expect(snapshot.positions).toHaveLength(1);
-    expect(snapshot.openOrders).toHaveLength(1);
-  });
-
-  it('the initialization waits the official settle time before the accounts are read', async () => {
-    const fixture = new FixtureIbkrReadOnlyAdapter();
-    fixture.data.tickle = unauthenticated();
-    const delays: number[] = [];
-    const { adapter } = adapterWith(fixture, { delays });
-    await adapter.fetchSnapshot();
-    expect(delays).toEqual([2_000]);
-  });
-
-  it('a refused initialization stops the sync: no portfolio is read and the start is not repeated', async () => {
-    const fixture = new FixtureIbkrReadOnlyAdapter();
-    fixture.data.tickle = unauthenticated();
-    fixture.initOutcome = 'refused';
-    const { adapter } = adapterWith(fixture);
-    const error = await errorOf(adapter.fetchSnapshot());
-    expect(error.code).toBe('BROKER_BROKERAGE_INIT_FAILED');
-    expect(fixture.calls.filter((c) => c.operation === 'brokerage.init')).toHaveLength(1);
-    expect(fixture.operationsCalled()).not.toContain('positions.page');
-    expect(adapter.connection()).toBe('not_connected');
-  });
-
-  it('a gateway server error on the initialization is reported as a gateway error, never as a started session', async () => {
-    const fixture = new FixtureIbkrReadOnlyAdapter();
-    fixture.data.tickle = unauthenticated();
-    fixture.initOutcome = 'server-error';
-    const error = await errorOf(adapterWith(fixture).adapter.fetchSnapshot());
-    expect(error.code).toBe('BROKER_NOT_CONNECTED');
-    expect(error.message).toContain('gateway returned 500');
-    expect(fixture.operationsCalled()).not.toContain('positions.page');
-  });
-
-  it('a competing brokerage session is reported before any initialization, and this build never sends one', async () => {
-    const fixture = new FixtureIbkrReadOnlyAdapter();
-    fixture.data.tickle = fixtureTickle({ iserver: { authStatus: { authenticated: true, connected: true, competing: true } } });
-    const error = await errorOf(adapterWith(fixture).adapter.fetchSnapshot());
-    expect(error.code).toBe('BROKER_SESSION_COMPETING');
-    expect(fixture.operationsCalled()).not.toContain('brokerage.init');
-    expect(fixture.operationsCalled()).not.toContain('positions.page');
-  });
-
-  it('a competing session that appears after the initialization stops the sync, with no second initialization', async () => {
-    const fixture = new FixtureIbkrReadOnlyAdapter();
-    fixture.data.tickle = unauthenticated();
-    fixture.competingAfterInit = true;
-    const error = await errorOf(adapterWith(fixture).adapter.fetchSnapshot());
-    expect(error.code).toBe('BROKER_SESSION_COMPETING');
-    expect(fixture.calls.filter((c) => c.operation === 'brokerage.init')).toHaveLength(1);
-    expect(fixture.operationsCalled()).not.toContain('positions.page');
-  });
-
-  it('a started brokerage that is not connected is refused', async () => {
-    const fixture = new FixtureIbkrReadOnlyAdapter();
-    fixture.data.tickle = unauthenticated();
-    fixture.connectedAfterInit = false;
-    const error = await errorOf(adapterWith(fixture).adapter.fetchSnapshot());
-    expect(error.code).toBe('BROKER_BROKERAGE_INIT_FAILED');
-    expect(fixture.operationsCalled()).not.toContain('positions.page');
-  });
-
-  it('an empty brokerage account list after initialization is an initialization failure', async () => {
-    const fixture = new FixtureIbkrReadOnlyAdapter();
-    fixture.data.tickle = unauthenticated();
-    fixture.brokerageAccounts = { accounts: [] };
-    const error = await errorOf(adapterWith(fixture).adapter.fetchSnapshot());
-    expect(error.code).toBe('BROKER_BROKERAGE_INIT_FAILED');
-    expect(fixture.operationsCalled()).not.toContain('accounts.list');
-  });
-
   it('a gateway outage is BROKER_NOT_CONNECTED, and the adapter does not pretend to be connected afterwards', async () => {
     const fixture = new FixtureIbkrReadOnlyAdapter();
     fixture.fail('session.tickle', { status: 503, body: null });
     const { adapter } = adapterWith(fixture);
     expect((await errorOf(adapter.fetchSnapshot())).code).toBe('BROKER_NOT_CONNECTED');
     expect(adapter.connection()).toBe('not_connected');
+  });
+});
+
+describe('O19 IBKR adapter: the initialization gate (default: never)', () => {
+  const notReady = () => statusOf({ authenticated: false, connected: false });
+
+  it('a ready brokerage is read without any initialization, even when the gate is open', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    const snapshot = await adapterWith(fixture, { allowInit: true }).adapter.fetchSnapshot();
+    expect(snapshot.positions).toHaveLength(1);
+    expect(initCalls(fixture)).toHaveLength(0);
+  });
+
+  it('a brokerage that is not ready and the gate closed: nothing is sent to start it, and the sync stops', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.brokerageBefore = notReady();
+    const error = await errorOf(adapterWith(fixture, { allowInit: false }).adapter.fetchSnapshot());
+    expect(error.code).toBe('BROKER_BROKERAGE_INIT_REQUIRED');
+    expect(initCalls(fixture)).toHaveLength(0);
+    expect(fixture.operationsCalled()).not.toContain('positions.page');
+    expect(fixture.operationsCalled()).not.toContain('accounts.list');
+  });
+
+  it('a tickle that is not the readiness source: a tickle-only "ready" is not enough when the status says not ready', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.data.tickle = fixtureTickle({ iserver: { authStatus: { authenticated: true, connected: true, competing: false } } });
+    fixture.brokerageBefore = notReady();
+    expect((await errorOf(adapterWith(fixture).adapter.fetchSnapshot())).code).toBe('BROKER_BROKERAGE_INIT_REQUIRED');
+    expect(initCalls(fixture)).toHaveLength(0);
+  });
+
+  it('the gate open and a brokerage that is not ready: exactly one initialization, the settle wait, the status again, then the accounts', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.brokerageBefore = notReady();
+    const delays: number[] = [];
+    const snapshot = await adapterWith(fixture, { allowInit: true, delays }).adapter.fetchSnapshot();
+    const order = fixture.operationsCalled();
+    expect(initCalls(fixture)).toHaveLength(1);
+    expect(order.indexOf('brokerage.init')).toBeLessThan(order.indexOf('accounts.list'));
+    expect(fixture.calls.filter((c) => c.operation === 'brokerage.status')).toHaveLength(2);
+    expect(order.indexOf('brokerage.accounts')).toBeGreaterThan(order.indexOf('brokerage.init'));
+    expect(delays).toEqual([2_000]);
+    expect(snapshot.positions).toHaveLength(1);
+    expect(snapshot.openOrders).toHaveLength(1);
+  });
+
+  it('the initialization carries no caller parameters: its body is fixed inside the transport (compete=false)', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.brokerageBefore = notReady();
+    await adapterWith(fixture, { allowInit: true }).adapter.fetchSnapshot();
+    expect(initCalls(fixture)).toHaveLength(1);
+    expect(initCalls(fixture)[0]?.params).toBeUndefined();
+  });
+
+  it('a refused initialization stops the sync: no portfolio is read and the start is not repeated', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.brokerageBefore = notReady();
+    fixture.initOutcome = 'refused';
+    const { adapter } = adapterWith(fixture, { allowInit: true });
+    const error = await errorOf(adapter.fetchSnapshot());
+    expect(error.code).toBe('BROKER_BROKERAGE_INIT_FAILED');
+    expect(initCalls(fixture)).toHaveLength(1);
+    expect(fixture.operationsCalled()).not.toContain('positions.page');
+    expect(adapter.connection()).toBe('not_connected');
+  });
+
+  it('a gateway server error on the initialization is reported as a gateway error, never as a started session', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.brokerageBefore = notReady();
+    fixture.initOutcome = 'server-error';
+    const error = await errorOf(adapterWith(fixture, { allowInit: true }).adapter.fetchSnapshot());
+    expect(error.code).toBe('BROKER_NOT_CONNECTED');
+    expect(error.message).toContain('gateway returned 500');
+    expect(fixture.operationsCalled()).not.toContain('positions.page');
+  });
+
+  it('one sync sends at most one initialization, even when that sync then fails; the next sync is judged on its own status', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.brokerageBefore = notReady();
+    fixture.brokerageAfterInit = statusOf({ connected: false });
+    const { adapter, clock } = adapterWith(fixture, { allowInit: true });
+    expect((await errorOf(adapter.fetchSnapshot())).code).toBe('BROKER_BROKERAGE_INIT_FAILED');
+    expect(initCalls(fixture)).toHaveLength(1);
+    clock.advance(10_000);
+    expect((await errorOf(adapter.fetchSnapshot())).code).toBe('BROKER_BROKERAGE_INIT_FAILED');
+    // The second sync reads its own status first, sees a session that is still not connected, and may send its own single initialization.
+    expect(initCalls(fixture)).toHaveLength(2);
+  });
+});
+
+describe('O19 IBKR adapter: competing sessions are reported and never taken over', () => {
+  it('a competing brokerage session is reported before any initialization, with the gate open or closed', async () => {
+    for (const allowInit of [false, true]) {
+      const fixture = new FixtureIbkrReadOnlyAdapter();
+      fixture.brokerageBefore = statusOf({ competing: true });
+      const error = await errorOf(adapterWith(fixture, { allowInit }).adapter.fetchSnapshot());
+      expect(error.code).toBe('BROKER_SESSION_COMPETING');
+      expect(initCalls(fixture)).toHaveLength(0);
+      expect(fixture.operationsCalled()).not.toContain('positions.page');
+    }
+  });
+
+  it('a competing session that appears after the initialization stops the sync, with no second initialization', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.brokerageBefore = statusOf({ authenticated: false, connected: false });
+    fixture.brokerageAfterInit = statusOf({ competing: true });
+    const error = await errorOf(adapterWith(fixture, { allowInit: true }).adapter.fetchSnapshot());
+    expect(error.code).toBe('BROKER_SESSION_COMPETING');
+    expect(initCalls(fixture)).toHaveLength(1);
+    expect(fixture.operationsCalled()).not.toContain('positions.page');
+  });
+});
+
+describe('O19 IBKR adapter: inconsistent brokerage states never lead to portfolio reads', () => {
+  const inconsistent: Array<[string, Record<string, unknown>]> = [
+    ['authenticated, not connected', { authenticated: true, connected: false, established: true }],
+    ['authenticated, not established', { authenticated: true, connected: true, established: false }],
+    ['established, not authenticated', { authenticated: false, connected: true, established: true }],
+    ['connected, nothing else', { authenticated: false, connected: true, established: false }],
+  ];
+
+  for (const [name, flags] of inconsistent) {
+    it(`${name}, gate closed: BROKER_BROKERAGE_INIT_REQUIRED, no initialization, no portfolio read`, async () => {
+      const fixture = new FixtureIbkrReadOnlyAdapter();
+      fixture.brokerageBefore = statusOf(flags);
+      expect((await errorOf(adapterWith(fixture).adapter.fetchSnapshot())).code).toBe('BROKER_BROKERAGE_INIT_REQUIRED');
+      expect(initCalls(fixture)).toHaveLength(0);
+      expect(fixture.operationsCalled()).not.toContain('positions.page');
+    });
+
+    it(`${name}, gate open, still inconsistent after the one initialization: BROKER_BROKERAGE_INIT_FAILED, no portfolio read`, async () => {
+      const fixture = new FixtureIbkrReadOnlyAdapter();
+      fixture.brokerageBefore = statusOf(flags);
+      fixture.brokerageAfterInit = statusOf(flags);
+      expect((await errorOf(adapterWith(fixture, { allowInit: true }).adapter.fetchSnapshot())).code).toBe('BROKER_BROKERAGE_INIT_FAILED');
+      expect(initCalls(fixture)).toHaveLength(1);
+      expect(fixture.operationsCalled()).not.toContain('positions.page');
+      expect(fixture.operationsCalled()).not.toContain('accounts.list');
+    });
+  }
+
+  it('the initialization answer is not authority: an answer that claims ready, followed by a status that does not, is a failure', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.brokerageBefore = statusOf({ authenticated: false });
+    fixture.initBody = { authenticated: true, connected: true, competing: false, established: true };
+    fixture.brokerageAfterInit = statusOf({ established: false });
+    expect((await errorOf(adapterWith(fixture, { allowInit: true }).adapter.fetchSnapshot())).code).toBe('BROKER_BROKERAGE_INIT_FAILED');
+    expect(fixture.operationsCalled()).not.toContain('positions.page');
+  });
+
+  it('an incomplete status after the initialization is BROKER_RESPONSE_INVALID, and the sync does not repeat the initialization', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.brokerageBefore = statusOf({ authenticated: false });
+    fixture.brokerageAfterInit = { authenticated: true, connected: true, competing: false };
+    expect((await errorOf(adapterWith(fixture, { allowInit: true }).adapter.fetchSnapshot())).code).toBe('BROKER_RESPONSE_INVALID');
+    expect(initCalls(fixture)).toHaveLength(1);
+    expect(fixture.operationsCalled()).not.toContain('positions.page');
+  });
+
+  it('an accounts answer that is empty after the initialization is BROKER_BROKERAGE_INIT_FAILED, and no portfolio is read', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.brokerageBefore = statusOf({ authenticated: false });
+    fixture.brokerageAccounts = { accounts: [] };
+    const error = await errorOf(adapterWith(fixture, { allowInit: true }).adapter.fetchSnapshot());
+    expect(error.code).toBe('BROKER_BROKERAGE_INIT_FAILED');
+    expect(fixture.operationsCalled()).not.toContain('accounts.list');
+  });
+});
+
+describe('O19 IBKR adapter: malformed brokerage status is refused, and an initialization is never sent on its basis', () => {
+  it('a status without one of the four required flags is BROKER_RESPONSE_INVALID, even with the gate open, and nothing is initialized', async () => {
+    for (const key of ['authenticated', 'connected', 'competing', 'established']) {
+      const fixture = new FixtureIbkrReadOnlyAdapter();
+      const body: Record<string, unknown> = statusOf({ authenticated: false });
+      delete body[key];
+      fixture.brokerageBefore = body;
+      const error = await errorOf(adapterWith(fixture, { allowInit: true }).adapter.fetchSnapshot());
+      expect(error.code).toBe('BROKER_RESPONSE_INVALID');
+      expect(error.message).toContain('brokerage status.' + key);
+      expect(initCalls(fixture)).toHaveLength(0);
+    }
+  });
+
+  it('a status with a string where a flag belongs is BROKER_RESPONSE_INVALID, never read as true', async () => {
+    const fixture = new FixtureIbkrReadOnlyAdapter();
+    fixture.brokerageBefore = statusOf({ authenticated: 'true' });
+    expect((await errorOf(adapterWith(fixture, { allowInit: true }).adapter.fetchSnapshot())).code).toBe('BROKER_RESPONSE_INVALID');
+    expect(initCalls(fixture)).toHaveLength(0);
+    expect(fixture.operationsCalled()).not.toContain('positions.page');
   });
 });
 
@@ -271,9 +403,10 @@ describe('O19 IBKR adapter: the snapshot carries the broker facts, and nothing e
     expect(snapshot.positions[0]?.averageCost?.value.toString()).toBe('150.5');
   });
 
-  it('the adapter only ever calls allowlisted operations, and only the keepalive is a POST', async () => {
+  it('the adapter only ever calls allowlisted operations; the POST operations are the keepalive, the status and the one initialization', async () => {
     const fixture = new FixtureIbkrReadOnlyAdapter();
-    await adapterWith(fixture).adapter.fetchSnapshot();
-    expect(fixture.operationsCalled().sort()).toEqual(['account.ledger', 'account.meta', 'accounts.list', 'orders.open', 'positions.page', 'session.tickle']);
+    fixture.brokerageBefore = statusOf({ authenticated: false });
+    await adapterWith(fixture, { allowInit: true }).adapter.fetchSnapshot();
+    expect(fixture.operationsCalled().sort()).toEqual(['account.ledger', 'account.meta', 'accounts.list', 'brokerage.accounts', 'brokerage.init', 'brokerage.status', 'orders.open', 'positions.page', 'session.tickle']);
   });
 });

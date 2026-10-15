@@ -81,20 +81,27 @@ export function defaultFixtureData(): FixtureData {
   };
 }
 
+/** A complete, ready brokerage status body. Tests override single flags, or replace the whole body with a malformed one. */
+export function statusOf(flags: Record<string, unknown> = {}): Record<string, unknown> {
+  return { authenticated: true, connected: true, competing: false, established: true, message: '', ...flags };
+}
+
 export type BrokerageInitOutcome = 'ok' | 'refused' | 'server-error';
 
 export class FixtureIbkrReadOnlyAdapter implements IbkrTransport {
   /** Every call the adapter made, in order. Tests assert on this to prove the read-only boundary. */
   readonly calls: Array<{ operation: IbkrOperation; params: IbkrOperationParams | undefined }> = [];
   private readonly failures = new Map<IbkrOperation, IbkrResponse | Error>();
-  /** Whether the brokerage start succeeded in this fixture. Before a start, the tickle answers with the configured data. */
+  /** Whether the brokerage initialization was accepted in this fixture. */
   brokerageStarted = false;
   /** How the brokerage initialization answers. */
   initOutcome: BrokerageInitOutcome = 'ok';
-  /** Another client holds the brokerage session: the tickle then reports competing. */
-  competingAfterInit = false;
-  /** Whether the brokerage reports itself connected after a start. */
-  connectedAfterInit = true;
+  /** The raw brokerage status before any initialization. Tests may set malformed or inconsistent bodies here. */
+  brokerageBefore: unknown = statusOf();
+  /** The raw brokerage status after an accepted initialization. */
+  brokerageAfterInit: unknown = statusOf();
+  /** The raw body an accepted initialization answers with. It is not authority: only the status decides readiness. */
+  initBody: unknown = { authenticated: true, connected: true, competing: false, established: true, passed: true };
   /** Accounts the brokerage session reports after a start. */
   brokerageAccounts: unknown = { accounts: [FIXTURE_ACCOUNT], selectedAccount: FIXTURE_ACCOUNT };
 
@@ -116,15 +123,13 @@ export class FixtureIbkrReadOnlyAdapter implements IbkrTransport {
     if (outcome !== undefined) return outcome;
     switch (operation) {
       case 'session.tickle':
-        if (!this.brokerageStarted) return { status: 200, body: this.data.tickle };
-        return {
-          status: 200,
-          body: fixtureTickle({ iserver: { authStatus: { authenticated: !this.competingAfterInit, connected: this.connectedAfterInit, competing: this.competingAfterInit } } }),
-        };
+        return { status: 200, body: this.data.tickle };
+      case 'brokerage.status':
+        return { status: 200, body: this.brokerageStarted ? this.brokerageAfterInit : this.brokerageBefore };
       case 'brokerage.init':
         if (this.initOutcome === 'ok') {
           this.brokerageStarted = true;
-          return { status: 200, body: {} };
+          return { status: 200, body: this.initBody };
         }
         return { status: this.initOutcome === 'refused' ? 409 : 500, body: null };
       case 'brokerage.accounts':

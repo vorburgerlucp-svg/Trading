@@ -39,7 +39,7 @@ async function build(options: Build = {}) {
   const snapshots = await AppendOnlyLog.open<SnapshotRecord>('broker-snapshots', new InMemoryAppendOnlyStore<SnapshotRecord>(), { clock: clock.now });
   const syncs = await AppendOnlyLog.open<SyncRecord>('broker-sync-events', new InMemoryAppendOnlyStore<SyncRecord>(), { clock: clock.now });
   const reconciliations = await AppendOnlyLog.open<ReconciliationRecord>('broker-reconciliations', new InMemoryAppendOnlyStore<ReconciliationRecord>(), { clock: clock.now });
-  const adapter = new IbkrBrokerSyncAdapter({ transport: fixture, accountId: null, clock: clock.now, resolveInstrument: (conid, at) => registry.resolve('ibkr', conid, at) });
+  const adapter = new IbkrBrokerSyncAdapter({ transport: fixture, accountId: null, clock: clock.now, resolveInstrument: (conid, at) => registry.resolve('ibkr', conid, at), allowBrokerageInit: false });
   const service = new IbkrBrokerService({ adapter, enabled: true, accountRef: null, ledger, registry, snapshots, syncs, reconciliations, clock: clock.now });
   return { service, adapter, fixture, ledger, engine, clock, registry, snapshots, syncs, reconciliations };
 }

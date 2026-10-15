@@ -51,6 +51,7 @@ async function harness(options: { ibkr: boolean; mapAapl?: boolean }): Promise<H
             transport: fixture,
             accountId: null,
             accountRef: 'U****567',
+            allowBrokerageInit: false,
             ledger,
             snapshots: await AppendOnlyLog.open<SnapshotRecord>('broker-snapshots', new InMemoryAppendOnlyStore<SnapshotRecord>(), { clock }),
             syncs: await AppendOnlyLog.open<SyncRecord>('broker-sync-events', new InMemoryAppendOnlyStore<SyncRecord>(), { clock }),

@@ -17,8 +17,20 @@ function codeOf(env: Record<string, string>): { code: string; message: string } 
 describe('O19 IBKR configuration', () => {
   it('IBKR is off by default: no URL, no account, and the summary says not configured', () => {
     const config = loadRuntimeConfig(BASE);
-    expect(config.ibkr).toEqual({ enabled: false, baseUrl: null, accountId: null, caCertPath: null });
+    expect(config.ibkr).toEqual({ enabled: false, baseUrl: null, accountId: null, caCertPath: null, allowBrokerageInit: false });
     expect(summarizeRuntimeConfig(config).ibkr).toBe('not_configured');
+  });
+
+  it('the brokerage initialization gate is closed by default; only IBKR_ALLOW_BROKERAGE_INIT=1 opens it, and only as written', () => {
+    expect(loadRuntimeConfig({ ...BASE, IBKR_ENABLED: '1' }).ibkr.allowBrokerageInit).toBe(false);
+    expect(loadRuntimeConfig({ ...BASE, IBKR_ENABLED: '1', IBKR_ALLOW_BROKERAGE_INIT: '0' }).ibkr.allowBrokerageInit).toBe(false);
+    expect(loadRuntimeConfig({ ...BASE, IBKR_ENABLED: '1', IBKR_ALLOW_BROKERAGE_INIT: '1' }).ibkr.allowBrokerageInit).toBe(true);
+  });
+
+  it('the initialization gate accepts exactly 1 or 0: true, yes and other spellings are refused, never read as open', () => {
+    for (const value of ['true', 'yes', 'on', '2', 'TRUE']) {
+      expect(codeOf({ IBKR_ENABLED: '1', IBKR_ALLOW_BROKERAGE_INIT: value })?.message).toContain('IBKR_ALLOW_BROKERAGE_INIT must be 1 or 0');
+    }
   });
 
   it('enabled with nothing else uses the local gateway default', () => {

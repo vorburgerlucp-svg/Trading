@@ -1,7 +1,7 @@
 // Schema validation of IBKR responses: untrusted input is checked field by field, and a mismatch is an error, never a guess.
 import { describe, expect, it } from 'vitest';
 import { IbkrError } from '../../../src/broker/ibkr/ibkr-errors.js';
-import { parseAccounts, parseBrokerageAccounts, parseLedger, parseMeta, parseOrders, parsePositions, parseTickle } from '../../../src/broker/ibkr/ibkr-validation.js';
+import { isBrokerageReady, parseAccounts, parseBrokerageAccounts, parseBrokerageStatus, parseLedger, parseMeta, parseOrders, parsePositions, parseTickle } from '../../../src/broker/ibkr/ibkr-validation.js';
 import { FIXTURE_ACCOUNT, FIXTURE_CONID_AAPL, FIXTURE_OTHER_ACCOUNT, FIXTURE_SESSION_TOKEN, fixtureOrder, fixturePosition, fixtureTickle } from './o19-fixture.js';
 
 function invalidOf(fn: () => unknown): IbkrError {
@@ -15,14 +15,33 @@ function invalidOf(fn: () => unknown): IbkrError {
 }
 
 describe('O19 IBKR validation: session and accounts', () => {
-  it('the tickle answer proves a valid session and a brokerage session only when both are present', () => {
-    expect(parseTickle(fixtureTickle())).toEqual({ sessionValid: true, brokerageAuthenticated: true, competing: false });
-    expect(parseTickle(fixtureTickle({ iserver: { authStatus: { authenticated: true, connected: false, competing: false } } }))).toMatchObject({ brokerageAuthenticated: false });
-    expect(parseTickle(fixtureTickle({ iserver: { authStatus: { authenticated: true, connected: true, competing: true } } }))).toEqual({ sessionValid: true, brokerageAuthenticated: false, competing: true });
-    expect(parseTickle(fixtureTickle({ session: undefined }))).toMatchObject({ sessionValid: false });
-    expect(parseTickle(fixtureTickle({ ssoExpires: 0 }))).toMatchObject({ sessionValid: false });
-    expect(parseTickle(fixtureTickle({ iserver: { authStatus: { authenticated: true, competing: true } } }))).toMatchObject({ brokerageAuthenticated: false });
-    expect(parseTickle(fixtureTickle({ iserver: undefined }))).toMatchObject({ brokerageAuthenticated: false });
+  it('the tickle answer proves the outer session and nothing else: it never says the brokerage is ready', () => {
+    expect(parseTickle(fixtureTickle())).toEqual({ sessionValid: true });
+    // Whatever the tickle says about iserver, readiness is not derived from it.
+    expect(parseTickle(fixtureTickle({ iserver: { authStatus: { authenticated: false, connected: false, competing: true } } }))).toEqual({ sessionValid: true });
+    expect(parseTickle(fixtureTickle({ iserver: undefined }))).toEqual({ sessionValid: true });
+  });
+
+  it('fail closed: a missing or mistyped session identifier is BROKER_RESPONSE_INVALID, never a quiet "no session"', () => {
+    expect(invalidOf(() => parseTickle(fixtureTickle({ session: undefined }))).code).toBe('BROKER_RESPONSE_INVALID');
+    expect(invalidOf(() => parseTickle(fixtureTickle({ session: '' }))).message).toContain('tickle.session');
+    expect(invalidOf(() => parseTickle(fixtureTickle({ session: 'x'.repeat(257) }))).code).toBe('BROKER_RESPONSE_INVALID');
+    expect(invalidOf(() => parseTickle(fixtureTickle({ session: 12345 }))).code).toBe('BROKER_RESPONSE_INVALID');
+  });
+
+  it('fail closed: a missing, mistyped or non-finite expiry is BROKER_RESPONSE_INVALID', () => {
+    expect(invalidOf(() => parseTickle(fixtureTickle({ ssoExpires: undefined }))).message).toContain('tickle.ssoExpires');
+    expect(invalidOf(() => parseTickle(fixtureTickle({ ssoExpires: '460311' }))).code).toBe('BROKER_RESPONSE_INVALID');
+    expect(invalidOf(() => parseTickle(fixtureTickle({ ssoExpires: Number.NaN }))).code).toBe('BROKER_RESPONSE_INVALID');
+    expect(invalidOf(() => parseTickle(fixtureTickle({ ssoExpires: Number.POSITIVE_INFINITY }))).code).toBe('BROKER_RESPONSE_INVALID');
+  });
+
+  it('an expiry of zero or less is an expired session: BROKER_AUTH_REQUIRED, and the session identifier is not in the error', () => {
+    for (const expires of [0, -5]) {
+      const error = invalidOf(() => parseTickle(fixtureTickle({ ssoExpires: expires })));
+      expect(error.code).toBe('BROKER_AUTH_REQUIRED');
+      expect(error.message).not.toContain(FIXTURE_SESSION_TOKEN);
+    }
   });
 
   it('a tickle body that is not an object is refused', () => {
@@ -118,5 +137,73 @@ describe('O19 IBKR validation: open orders are read, never acted on', () => {
   it('the session token never appears in any validation message', () => {
     const error = invalidOf(() => parsePositions([fixturePosition({ conid: FIXTURE_SESSION_TOKEN })], FIXTURE_ACCOUNT));
     expect(error.message).not.toContain(FIXTURE_SESSION_TOKEN);
+  });
+});
+
+describe('O19 IBKR validation: official brokerage status', () => {
+  it('reads the four flags as they are', () => {
+    expect(parseBrokerageStatus({ authenticated: true, connected: true, competing: false, established: true, message: '' })).toEqual({
+      authenticated: true,
+      connected: true,
+      competing: false,
+      established: true,
+    });
+  });
+
+  it('fail closed: each missing required flag is refused, and the error names the field only', () => {
+    const complete = { authenticated: true, connected: true, competing: false, established: true };
+    for (const key of Object.keys(complete)) {
+      const incomplete: Record<string, unknown> = { ...complete };
+      delete incomplete[key];
+      const error = invalidOf(() => parseBrokerageStatus(incomplete));
+      expect(error.code).toBe('BROKER_RESPONSE_INVALID');
+      expect(error.message).toContain('brokerage status.' + key);
+    }
+  });
+
+  it('fail closed: a mistyped flag is refused, never coerced (strings, numbers, null and missing are not booleans)', () => {
+    for (const bad of ['true', 1, 0, null, {}]) {
+      expect(invalidOf(() => parseBrokerageStatus({ authenticated: bad, connected: true, competing: false, established: true })).code).toBe('BROKER_RESPONSE_INVALID');
+      expect(invalidOf(() => parseBrokerageStatus({ authenticated: true, connected: true, competing: false, established: bad })).code).toBe('BROKER_RESPONSE_INVALID');
+    }
+  });
+
+  it('a status body that is not an object, or is null, is refused', () => {
+    expect(invalidOf(() => parseBrokerageStatus(['authenticated'])).code).toBe('BROKER_RESPONSE_INVALID');
+    expect(invalidOf(() => parseBrokerageStatus(null)).code).toBe('BROKER_RESPONSE_INVALID');
+  });
+
+  it('a competing session is reported as competing, so the caller can stop; it is not refused as malformed', () => {
+    expect(parseBrokerageStatus({ authenticated: true, connected: true, competing: true, established: true }).competing).toBe(true);
+  });
+
+  it('message and fail are optional; when present they must be bounded strings, and their content is never returned', () => {
+    const base = { authenticated: true, connected: true, competing: false, established: true };
+    expect(parseBrokerageStatus({ ...base })).toEqual(base);
+    expect(parseBrokerageStatus({ ...base, message: null, fail: undefined })).toEqual(base);
+    expect(parseBrokerageStatus({ ...base, message: 'Not authenticated', fail: '' })).toEqual(base);
+    expect(invalidOf(() => parseBrokerageStatus({ ...base, message: 'x'.repeat(257) })).message).toContain('brokerage status.message');
+    expect(invalidOf(() => parseBrokerageStatus({ ...base, fail: 42 })).message).toContain('brokerage status.fail');
+  });
+
+  it('the session token never appears in a refusal', () => {
+    const error = invalidOf(() => parseBrokerageStatus({ authenticated: FIXTURE_SESSION_TOKEN, connected: true, competing: false, established: true }));
+    expect(error.message).not.toContain(FIXTURE_SESSION_TOKEN);
+  });
+});
+
+describe('O19 IBKR validation: the single readiness rule', () => {
+  const flags = (authenticated: boolean, connected: boolean, competing: boolean, established: boolean) => ({ authenticated, connected, competing, established });
+
+  it('ready only when authenticated, connected and established, and not competing', () => {
+    expect(isBrokerageReady(flags(true, true, false, true))).toBe(true);
+  });
+
+  it('every other combination is not ready, including each inconsistent state', () => {
+    expect(isBrokerageReady(flags(true, false, false, true))).toBe(false);
+    expect(isBrokerageReady(flags(true, true, false, false))).toBe(false);
+    expect(isBrokerageReady(flags(false, true, false, true))).toBe(false);
+    expect(isBrokerageReady(flags(false, false, false, false))).toBe(false);
+    expect(isBrokerageReady(flags(true, true, true, true))).toBe(false);
   });
 });

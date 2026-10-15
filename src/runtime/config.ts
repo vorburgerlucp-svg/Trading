@@ -44,6 +44,8 @@ export interface RuntimeConfig {
     readonly accountId: string | null;
     /** A PEM file with the gateway certificate. Verification stays on; this only adds trust for that one certificate. */
     readonly caCertPath: string | null;
+    /** IBKR_ALLOW_BROKERAGE_INIT=1 only. Default false: a sync never starts a brokerage session by itself. */
+    readonly allowBrokerageInit: boolean;
   };
 }
 
@@ -120,6 +122,8 @@ export function loadRuntimeConfig(env: Environment): RuntimeConfig {
   if (rawAccount !== undefined && !IBKR_ACCOUNT_ID.test(rawAccount)) invalid('IBKR_ACCOUNT_ID must be 1 to 32 letters or digits');
   const caCertPath = text(env, 'IBKR_CA_CERT_PATH');
   if (caCertPath !== undefined && (caCertPath.length > 512 || caCertPath.includes('\0'))) invalid('IBKR_CA_CERT_PATH is not a valid path');
+  const allowBrokerageInit = text(env, 'IBKR_ALLOW_BROKERAGE_INIT');
+  if (allowBrokerageInit !== undefined && allowBrokerageInit !== '1' && allowBrokerageInit !== '0') invalid('IBKR_ALLOW_BROKERAGE_INIT must be 1 or 0');
 
   return Object.freeze({
     version: RUNTIME_CONFIG_VERSION,
@@ -138,6 +142,7 @@ export function loadRuntimeConfig(env: Environment): RuntimeConfig {
       baseUrl: ibkrBaseUrl,
       accountId: rawAccount ?? null,
       caCertPath: caCertPath ?? null,
+      allowBrokerageInit: allowBrokerageInit === '1',
     }),
   });
 }

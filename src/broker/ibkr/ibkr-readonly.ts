@@ -1,5 +1,5 @@
-// The complete, fixed set of IBKR operations this build may call: reads, the session keepalive (tickle), and one brokerage
-// session start with a fixed body. Order routes do not appear here, and there is no generic request function: a path outside
+// The complete, fixed set of IBKR operations this build may call: reads, the session keepalive (tickle), the official brokerage
+// status, and one brokerage session start with a fixed body. Order routes do not appear here, and there is no generic request function: a path outside
 // this table cannot be built, and no caller can supply a body. Paths follow the official Client Portal Web API endpoint
 // reference (interactivebrokers.github.io/cpwebapi/endpoints). minIntervalMs follows the official pacing table; the
 // open-orders operation uses the stricter 5 s of /iserver/orders because its reference path is not listed in that table.
@@ -12,6 +12,7 @@ export const IBKR_BROKERAGE_INIT_BODY = Object.freeze({ publish: true, compete: 
 
 export const IBKR_ALLOWED_OPERATIONS = Object.freeze({
   'session.tickle': { method: 'POST', path: '/tickle', kind: 'session', body: 'none', minIntervalMs: 0 },
+  'brokerage.status': { method: 'POST', path: '/iserver/auth/status', kind: 'session', body: 'none', minIntervalMs: 0 },
   'brokerage.init': { method: 'POST', path: '/iserver/auth/ssodh/init', kind: 'session', body: 'brokerage-init', minIntervalMs: 0 },
   'brokerage.accounts': { method: 'GET', path: '/iserver/accounts', kind: 'read', body: 'none', minIntervalMs: 0 },
   'accounts.list': { method: 'GET', path: '/portfolio/accounts', kind: 'read', body: 'none', minIntervalMs: 5_000 },

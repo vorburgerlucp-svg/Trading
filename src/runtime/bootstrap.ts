@@ -138,6 +138,7 @@ async function openIbkr(pool: PgPool, config: RuntimeConfig, options: StartOptio
     transport,
     accountId: config.ibkr.accountId,
     accountRef: config.ibkr.accountId === null ? null : maskAccountId(config.ibkr.accountId),
+    allowBrokerageInit: config.ibkr.allowBrokerageInit,
     ledger,
     snapshots: await AppendOnlyLog.open<SnapshotRecord>('broker-snapshots', await PostgresAppendOnlyStore.open<SnapshotRecord>(pool, 'broker-snapshots'), { clock }),
     syncs: await AppendOnlyLog.open<SyncRecord>('broker-sync-events', await PostgresAppendOnlyStore.open<SyncRecord>(pool, 'broker-sync-events'), { clock }),

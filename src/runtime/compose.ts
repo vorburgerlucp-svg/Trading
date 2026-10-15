@@ -32,6 +32,8 @@ export interface ComposeInput {
     transport: IbkrTransport;
     accountId: string | null;
     accountRef: string | null;
+    /** From IBKR_ALLOW_BROKERAGE_INIT. Required: the composition root always states it. */
+    allowBrokerageInit: boolean;
     ledger: LedgerView;
     snapshots: AppendOnlyLog<SnapshotRecord>;
     syncs: AppendOnlyLog<SyncRecord>;
@@ -62,6 +64,7 @@ export async function composeRuntime(input: ComposeInput): Promise<RuntimeServic
           accountId: input.ibkr.accountId,
           clock,
           resolveInstrument: (brokerInstrumentId, at) => registry.resolve(IBKR_PROVIDER, brokerInstrumentId, at),
+          allowBrokerageInit: input.ibkr.allowBrokerageInit,
         }),
         enabled: true,
         accountRef: input.ibkr.accountRef,
