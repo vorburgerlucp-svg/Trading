@@ -19,7 +19,6 @@ const INSTRUMENT_COLUMNS: Readonly<Record<string, string>> = {
 function instrumentIdOf(e: InstrumentEvent): string {
   switch (e.type) {
     case 'instrument_registered':
-    case 'instrument_registered_with_mapping':
       return e.instrument.instrumentId;
     case 'mapping_added':
       return e.mapping.instrumentId;
@@ -48,20 +47,13 @@ export const instrumentProjector: Projector<InstrumentEvent> = async (client, re
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
         [i.instrumentId, i.assetClass, i.symbol, i.name ?? null, i.currency, i.exchange ?? null, i.mic ?? null, i.timezone, i.tickSize ?? null, i.lotSize ?? null, i.tradingCalendar ?? null, i.active, i.allowsNegativePrices ?? false, e.eventId, e.at],
       );
-      return;
-    }
-    case 'instrument_registered_with_mapping': {
-      const i = e.instrument;
-      const m = e.mapping;
-      await client.query(
-        `INSERT INTO instruments (instrument_id, asset_class, symbol, name, currency, exchange, mic, timezone, tick_size, lot_size, trading_calendar, active, allows_negative_prices, last_event_id, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-        [i.instrumentId, i.assetClass, i.symbol, i.name ?? null, i.currency, i.exchange ?? null, i.mic ?? null, i.timezone, i.tickSize ?? null, i.lotSize ?? null, i.tradingCalendar ?? null, i.active, i.allowsNegativePrices ?? false, e.eventId, e.at],
-      );
-      await client.query(
-        'INSERT INTO provider_instrument_mappings (instrument_id, provider, provider_symbol, provider_instrument_id, exchange, valid_from, valid_to) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-        [m.instrumentId, m.provider, m.providerSymbol, m.providerInstrumentId ?? null, m.exchange ?? null, m.validFrom, m.validTo ?? null],
-      );
+      if (e.initialMapping !== undefined) {
+        const m = e.initialMapping;
+        await client.query(
+          'INSERT INTO provider_instrument_mappings (instrument_id, provider, provider_symbol, provider_instrument_id, exchange, valid_from, valid_to) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+          [m.instrumentId, m.provider, m.providerSymbol, m.providerInstrumentId ?? null, m.exchange ?? null, m.validFrom, m.validTo ?? null],
+        );
+      }
       return;
     }
     case 'instrument_updated': {
