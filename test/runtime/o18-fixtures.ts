@@ -54,7 +54,7 @@ export function fixtureProvider(): MarketDataProvider {
       source: FIXTURE_SOURCE,
       requests: 1,
       bars: dailyBars(CALENDAR, '2026-08-03', randomOhlcv(40, 7, 100), {
-        instrument: AAPL,
+        instrument: request.instrument,
         source: FIXTURE_SOURCE.sourceId,
         interval: '1d',
         session: 'regular',
