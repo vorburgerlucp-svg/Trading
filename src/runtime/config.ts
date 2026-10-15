@@ -5,6 +5,8 @@
 // TRADING_MODE=live and ALLOW_LIVE_TRADING=true make the start fail, and every other value that is not the exact safe one is refused.
 // Error messages never contain a secret or the database URL.
 
+import { IBKR_DEFAULT_BASE_URL, IbkrBaseUrlError, parseLoopbackBaseUrl } from '../broker/ibkr/ibkr-base-url.js';
+
 export const RUNTIME_CONFIG_VERSION = 'nexus-runtime-config:v1' as const;
 
 export class RuntimeConfigError extends Error {
@@ -33,9 +35,19 @@ export interface RuntimeConfig {
   };
   readonly tradingMode: 'paper';
   readonly allowLiveTrading: false;
+  readonly ibkr: {
+    /** IBKR_ENABLED=1. Off by default: NEXUS starts and runs without IBKR and reports broker = not_connected. */
+    readonly enabled: boolean;
+    /** The local Client Portal Gateway (loopback HTTPS). Null when IBKR is disabled and no URL was given. */
+    readonly baseUrl: string | null;
+    /** IBKR_ACCOUNT_ID, or null: then exactly one readable account is required. */
+    readonly accountId: string | null;
+    /** A PEM file with the gateway certificate. Verification stays on; this only adds trust for that one certificate. */
+    readonly caCertPath: string | null;
+  };
 }
 
-/** The loggable view: every secret is replaced by its state. */
+/** The loggable view: every secret is replaced by its state. The IBKR account id is never part of it. */
 export interface RuntimeConfigSummary {
   host: string;
   port: number;
@@ -43,11 +55,13 @@ export interface RuntimeConfigSummary {
   liveTrading: 'locked';
   database: 'configured';
   marketData: 'production' | 'demo' | 'not_configured';
+  ibkr: 'read_only_enabled' | 'not_configured';
 }
 
 const API_KEY = /^[A-Za-z0-9]{8,128}$/;
 const DATABASE_URL = /^postgres(ql)?:\/\/\S+$/;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const IBKR_ACCOUNT_ID = /^[A-Za-z0-9]{1,32}$/;
 
 function invalid(message: string): never {
   throw new RuntimeConfigError('CONFIG_INVALID', message);
@@ -91,6 +105,22 @@ export function loadRuntimeConfig(env: Environment): RuntimeConfig {
   const demo = text(env, 'NEXUS_TWELVE_DATA_DEMO');
   if (demo !== undefined && demo !== '1' && demo !== '0') invalid('NEXUS_TWELVE_DATA_DEMO must be 1 or 0');
 
+  const ibkrEnabled = text(env, 'IBKR_ENABLED');
+  if (ibkrEnabled !== undefined && ibkrEnabled !== '1' && ibkrEnabled !== '0') invalid('IBKR_ENABLED must be 1 or 0');
+  const rawBaseUrl = text(env, 'IBKR_BASE_URL');
+  let ibkrBaseUrl: string | null = null;
+  if (rawBaseUrl !== undefined || ibkrEnabled === '1') {
+    try {
+      ibkrBaseUrl = parseLoopbackBaseUrl(rawBaseUrl ?? IBKR_DEFAULT_BASE_URL).toString();
+    } catch (error) {
+      invalid(error instanceof IbkrBaseUrlError ? error.message : 'IBKR_BASE_URL is invalid');
+    }
+  }
+  const rawAccount = text(env, 'IBKR_ACCOUNT_ID');
+  if (rawAccount !== undefined && !IBKR_ACCOUNT_ID.test(rawAccount)) invalid('IBKR_ACCOUNT_ID must be 1 to 32 letters or digits');
+  const caCertPath = text(env, 'IBKR_CA_CERT_PATH');
+  if (caCertPath !== undefined && (caCertPath.length > 512 || caCertPath.includes('\0'))) invalid('IBKR_CA_CERT_PATH is not a valid path');
+
   return Object.freeze({
     version: RUNTIME_CONFIG_VERSION,
     host,
@@ -103,6 +133,12 @@ export function loadRuntimeConfig(env: Environment): RuntimeConfig {
     }),
     tradingMode: 'paper' as const,
     allowLiveTrading: false as const,
+    ibkr: Object.freeze({
+      enabled: ibkrEnabled === '1',
+      baseUrl: ibkrBaseUrl,
+      accountId: rawAccount ?? null,
+      caCertPath: caCertPath ?? null,
+    }),
   });
 }
 
@@ -114,5 +150,6 @@ export function summarizeRuntimeConfig(config: RuntimeConfig): RuntimeConfigSumm
     liveTrading: 'locked',
     database: 'configured',
     marketData: config.twelveData.apiKey !== null ? 'production' : config.twelveData.demo ? 'demo' : 'not_configured',
+    ibkr: config.ibkr.enabled ? 'read_only_enabled' : 'not_configured',
   };
 }

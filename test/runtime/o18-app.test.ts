@@ -17,6 +17,7 @@ function services(overrides: Partial<RuntimeServices> = {}): RuntimeServices {
       tradingMode: 'paper',
       liveTrading: 'locked',
       buildLocks: { liveTrading: true, brokerOrders: true, physicalPurchase: true },
+      broker: { ibkr: { configured: false, connection: 'not_connected', access: 'read_only' } },
       version: 'test',
     }),
     searchInstruments: async () => [],
@@ -35,6 +36,11 @@ function services(overrides: Partial<RuntimeServices> = {}): RuntimeServices {
     quote: async () => ({ quote: null }),
     runQuant: async () => ({ status: 'insufficient_data' }),
     safetyStatus: async () => ({ liveTradingAllowed: false }),
+    brokerIbkrStatus: async () => ({ ibkr: { configured: false, connection: 'not_connected', access: 'read_only' } }),
+    brokerIbkrSync: async () => { throw new Error('not configured in this test'); },
+    brokerIbkrSnapshot: async () => ({ snapshot: null }),
+    brokerIbkrReconciliation: async () => ({ reconciliation: null }),
+    brokerIbkrMapInstrument: async () => ({ status: 'MAPPED' }),
     ...overrides,
   };
 }

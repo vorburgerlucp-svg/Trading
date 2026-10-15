@@ -2,21 +2,31 @@
 // The order is fixed. The configuration refuses live trading before anything is opened. The database must answer and must
 // carry exactly the repository's migrations. Only then does the server listen. Nothing here migrates, repairs or falls back.
 
+import { readFileSync } from 'node:fs';
 import { createPool, type PgPool } from '../persistence/postgres/pool.js';
 import { MigrationError, loadMigrations, verifyMigrations } from '../persistence/postgres/migrator.js';
 import { openPostgresMarketDataStores } from '../persistence/postgres/postgres-stores.js';
 import { PostgresAppendOnlyStore } from '../persistence/postgres/postgres-append-only-store.js';
+import { PostgresLedgerStore } from '../persistence/postgres/postgres-ledger-store.js';
+import { AppendOnlyLog } from '../persistence/append-only-log.js';
+import { CapitalLedger } from '../capital/capital-ledger.js';
 import type { MarketDataProvider } from '../market-data/market-data-provider.js';
 import { TwelveDataMarketDataProvider } from '../market-data/providers/twelve-data.js';
 import type { KillSwitchState } from '../safety/portfolio-safety-envelope.js';
+import { IBKR_DEFAULT_BASE_URL, parseLoopbackBaseUrl } from '../broker/ibkr/ibkr-base-url.js';
+import type { ReconciliationRecord, SnapshotRecord, SyncRecord } from '../broker/ibkr/ibkr-broker-service.js';
+import { HttpsIbkrTransport, type IbkrTransport } from '../broker/ibkr/ibkr-transport.js';
+import { maskAccountId } from '../broker/broker-snapshot-model.js';
 import { createRuntimeHandler } from './app.js';
 import { RuntimeConfigError, loadRuntimeConfig, summarizeRuntimeConfig, type Environment, type RuntimeConfig, type RuntimeConfigSummary } from './config.js';
-import { composeRuntime } from './compose.js';
+import { composeRuntime, type ComposeInput } from './compose.js';
 import { startHttpServer, type RunningServer } from './server.js';
 
 export const RUNTIME_VERSION = 'nexus-runtime:v1' as const;
+/** The Capital Ledger the runtime reads for reconciliation. Read only: the runtime never books into it. */
+export const NEXUS_LEDGER_ID = 'main' as const;
 
-export type RuntimeStartCode = 'DATABASE_UNAVAILABLE' | 'MIGRATIONS_PENDING' | 'MIGRATIONS_MISMATCH';
+export type RuntimeStartCode = 'DATABASE_UNAVAILABLE' | 'MIGRATIONS_PENDING' | 'MIGRATIONS_MISMATCH' | 'IBKR_CA_UNREADABLE';
 
 export class RuntimeStartError extends Error {
   override readonly name = 'RuntimeStartError';
@@ -38,6 +48,8 @@ export interface RuntimeHandle {
 export interface StartOptions {
   /** Tests inject a fixture provider here. The entry point never passes one: the provider comes from the environment. */
   provider?: MarketDataProvider | null;
+  /** Tests inject a fixture IBKR transport here. The entry point never passes one: IBKR is reached through the local gateway. */
+  ibkrTransport?: IbkrTransport;
   clock?: () => Date;
 }
 
@@ -49,6 +61,7 @@ export async function startRuntime(env: Environment, options: StartOptions = {})
     const stores = await openPostgresMarketDataStores(pool);
     const killSwitch = await PostgresAppendOnlyStore.open<KillSwitchState>(pool, 'portfolio-kill-switch');
     const summary = summarizeRuntimeConfig(config);
+    const ibkr = config.ibkr.enabled ? await openIbkr(pool, config, options) : undefined;
     const services = await composeRuntime({
       instruments: stores.instruments,
       marketData: stores.marketData,
@@ -59,6 +72,7 @@ export async function startRuntime(env: Environment, options: StartOptions = {})
       ping: () => ping(pool),
       version: RUNTIME_VERSION,
       ...(options.clock ? { clock: options.clock } : {}),
+      ...(ibkr ? { ibkr } : {}),
     });
     const server = await startHttpServer(createRuntimeHandler(services), { host: config.host, port: config.port });
     return {
@@ -111,6 +125,33 @@ async function requireMigratedDatabase(pool: PgPool): Promise<void> {
   }
   if (!status.upToDate) {
     throw new RuntimeStartError('MIGRATIONS_PENDING', 'migrations ' + status.pending.join(', ') + ' are not applied: run npm run db:migrate (the runtime never migrates by itself)');
+  }
+}
+
+/** The IBKR read-only wiring: the local gateway transport, the read-only ledger view, and the three append-only logs. */
+async function openIbkr(pool: PgPool, config: RuntimeConfig, options: StartOptions): Promise<NonNullable<ComposeInput['ibkr']>> {
+  const clock = options.clock ?? (() => new Date());
+  const baseUrl = parseLoopbackBaseUrl(config.ibkr.baseUrl ?? IBKR_DEFAULT_BASE_URL);
+  const transport = options.ibkrTransport ?? new HttpsIbkrTransport({ baseUrl, caCertPem: readCaCertificate(config.ibkr.caCertPath) });
+  const ledger = await CapitalLedger.open(await PostgresLedgerStore.open(pool, { ledgerId: NEXUS_LEDGER_ID }), { clock });
+  return {
+    transport,
+    accountId: config.ibkr.accountId,
+    accountRef: config.ibkr.accountId === null ? null : maskAccountId(config.ibkr.accountId),
+    ledger,
+    snapshots: await AppendOnlyLog.open<SnapshotRecord>('broker-snapshots', await PostgresAppendOnlyStore.open<SnapshotRecord>(pool, 'broker-snapshots'), { clock }),
+    syncs: await AppendOnlyLog.open<SyncRecord>('broker-sync-events', await PostgresAppendOnlyStore.open<SyncRecord>(pool, 'broker-sync-events'), { clock }),
+    reconciliations: await AppendOnlyLog.open<ReconciliationRecord>('broker-reconciliations', await PostgresAppendOnlyStore.open<ReconciliationRecord>(pool, 'broker-reconciliations'), { clock }),
+  };
+}
+
+/** The gateway's own certificate, if one is configured. Trust is added for exactly that file; verification stays on. */
+function readCaCertificate(path: string | null): string | null {
+  if (path === null) return null;
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    throw new RuntimeStartError('IBKR_CA_UNREADABLE', 'IBKR_CA_CERT_PATH cannot be read');
   }
 }
 
