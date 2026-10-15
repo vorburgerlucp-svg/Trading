@@ -133,7 +133,7 @@ describe('O19 IBKR transport: hostile responses fail closed', () => {
 
   it('[7] an expired or missing session is reported as authentication required, not as a generic failure', async () => {
     const { transport } = transportWith({ kind: 'respond', status: 401, body: '{"error":"' + MARKER + '"}' });
-    const error = await codeOf(transport.call('orders.open'));
+    const error = await codeOf(transport.call('orders.open', { accountId: 'U1234567' }));
     expect(error.code).toBe('BROKER_AUTH_REQUIRED');
     expect(error.message).not.toContain(MARKER);
   });
