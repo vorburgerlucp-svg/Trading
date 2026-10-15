@@ -27,8 +27,7 @@ interface EventBase {
 }
 
 export type InstrumentEvent =
-  | (EventBase & { type: 'instrument_registered'; instrument: Instrument })
-  | (EventBase & { type: 'instrument_registered_with_mapping'; instrument: Instrument; mapping: ProviderInstrumentMapping })
+  | (EventBase & { type: 'instrument_registered'; instrument: Instrument; initialMapping?: ProviderInstrumentMapping })
   | (EventBase & { type: 'instrument_updated'; instrumentId: string; changes: InstrumentChanges })
   | (EventBase & { type: 'mapping_added'; mapping: ProviderInstrumentMapping })
   | (EventBase & { type: 'mapping_closed'; instrumentId: string; provider: string; providerSymbol: string; validFrom: string; validTo: string })
@@ -142,7 +141,7 @@ export class InstrumentRegistry {
   ): Promise<Instrument> {
     const instrument: Instrument = { ...input, instrumentId: input.instrumentId ?? 'ins_' + this.newId() };
     const completeMapping: ProviderInstrumentMapping = { ...mapping, instrumentId: instrument.instrumentId };
-    await this.emit({ type: 'instrument_registered_with_mapping', eventId: this.newId(), ...this.changeOf(change), instrument, mapping: completeMapping });
+    await this.emit({ type: 'instrument_registered', eventId: this.newId(), ...this.changeOf(change), instrument, initialMapping: completeMapping });
     return this.require(instrument.instrumentId);
   }
 
@@ -268,13 +267,11 @@ export class InstrumentRegistry {
       case 'instrument_registered':
         validateInstrument(e.instrument);
         if (this.instruments.has(e.instrument.instrumentId)) throw new InstrumentRegistryError('conflict', 'instrument ' + e.instrument.instrumentId + ' already exists');
-        return;
-      case 'instrument_registered_with_mapping':
-        validateInstrument(e.instrument);
-        if (this.instruments.has(e.instrument.instrumentId)) throw new InstrumentRegistryError('conflict', 'instrument ' + e.instrument.instrumentId + ' already exists');
-        if (e.mapping.instrumentId !== e.instrument.instrumentId) throw new InstrumentRegistryError('invalid', 'mapping instrumentId must match the registered instrument');
-        this.validateMapping(e.mapping, e.instrument.instrumentId);
-        this.checkMappingFree(e.mapping);
+        if (e.initialMapping !== undefined) {
+          if (e.initialMapping.instrumentId !== e.instrument.instrumentId) throw new InstrumentRegistryError('invalid', 'mapping instrumentId must match the registered instrument');
+          this.validateMapping(e.initialMapping, e.instrument.instrumentId);
+          this.checkMappingFree(e.initialMapping);
+        }
         return;
       case 'instrument_updated': {
         if (!this.instruments.has(e.instrumentId)) throw new InstrumentRegistryError('not_found', 'unknown instrument ' + e.instrumentId);
@@ -333,10 +330,9 @@ export class InstrumentRegistry {
     switch (e.type) {
       case 'instrument_registered':
         this.instruments.set(e.instrument.instrumentId, { ...e.instrument });
-        return;
-      case 'instrument_registered_with_mapping':
-        this.instruments.set(e.instrument.instrumentId, { ...e.instrument });
-        this.mappingList.push({ ...e.mapping, validFrom: toUtcIso(parseUtc(e.mapping.validFrom)), ...(e.mapping.validTo !== undefined ? { validTo: toUtcIso(parseUtc(e.mapping.validTo)) } : {}) });
+        if (e.initialMapping !== undefined) {
+          this.mappingList.push({ ...e.initialMapping, validFrom: toUtcIso(parseUtc(e.initialMapping.validFrom)), ...(e.initialMapping.validTo !== undefined ? { validTo: toUtcIso(parseUtc(e.initialMapping.validTo)) } : {}) });
+        }
         return;
       case 'instrument_updated':
         this.instruments.set(e.instrumentId, { ...this.instruments.get(e.instrumentId)!, ...e.changes });
