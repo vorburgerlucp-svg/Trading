@@ -197,7 +197,7 @@ export class RuntimeServiceImpl implements RuntimeServices {
     }
     if (item.instrumentId !== null) return item;
 
-    const instrument = await this.deps.registry.register({
+    const instrument = await this.deps.registry.registerWithMapping({
       assetClass: candidate.assetClass!,
       symbol: item.providerSymbol,
       name: item.name,
@@ -206,14 +206,12 @@ export class RuntimeServiceImpl implements RuntimeServices {
       active: true,
       ...(item.exchange !== null ? { exchange: item.exchange } : {}),
       ...(item.mic !== null ? { mic: item.mic } : {}),
-    }, { at: now, by: { kind: 'system', id: 'nexus-runtime' }, reason: 'explicit local runtime instrument registration' });
-    await this.deps.registry.addMapping({
-      instrumentId: instrument.instrumentId,
+    }, {
       provider: provider.providerId,
       providerSymbol: item.providerSymbol,
       validFrom: request.validFrom,
       ...(item.exchange !== null ? { exchange: item.exchange } : {}),
-    }, { at: now, by: { kind: 'system', id: 'nexus-runtime' }, reason: 'explicit local runtime provider mapping registration' });
+    }, { at: now, by: { kind: 'system', id: 'nexus-runtime' }, reason: 'explicit local runtime instrument registration with provider mapping' });
     return { ...item, instrumentId: instrument.instrumentId };
   }
 
