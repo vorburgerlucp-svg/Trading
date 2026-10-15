@@ -105,6 +105,11 @@ export function normalizeBrokerSnapshot(snapshot: BrokerSnapshot): BrokerSnapsho
   };
 }
 
-export function brokerSnapshotFingerprint(content: BrokerSnapshotContent): string {
-  return hashOf(content);
+/** Pseudonymous stable account identity. The raw broker account id is never persisted. */
+export function brokerAccountKey(snapshot: Pick<BrokerSnapshot, 'broker' | 'accountId'>): string {
+  return 'bacct_' + hashOf({ broker: snapshot.broker, accountId: snapshot.accountId }).slice(0, 40);
+}
+
+export function brokerSnapshotFingerprint(content: BrokerSnapshotContent, accountKey: string): string {
+  return hashOf({ accountKey, content });
 }
