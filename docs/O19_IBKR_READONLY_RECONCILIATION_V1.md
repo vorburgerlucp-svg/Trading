@@ -34,7 +34,7 @@ Every call NEXUS can make is listed in one frozen table (`src/broker/ibkr/ibkr-r
 | `account.meta` | `GET /portfolio/{accountId}/meta` | global 10 req/s | Account currency and clearing status (`O` = open). |
 | `account.ledger` | `GET /portfolio/{accountId}/ledger` | global | Cash per currency (`cashbalance`). |
 | `positions.page` | `GET /portfolio/{accountId}/positions/{pageId}` | global | Positions, 100 per page, at most 5 pages. |
-| `orders.open` | `GET /iserver/account/orders` | 1 req/5 s (conservative) | Open and recently filled or cancelled orders, read only. |
+| `orders.open` | `GET /iserver/account/orders?accountId={accountId}` | 1 req/5 s (conservative) | Open and recently filled or cancelled orders for the explicitly selected account, read only. |
 
 Not in the table, on purpose: every `POST /iserver/...` order route, modify, cancel, reply, what-if, transfer, cash, exercise, FX, rebalance, and every `/gw` and `/oauth` path.
 
@@ -42,7 +42,7 @@ Not in the table, on purpose: every `POST /iserver/...` order route, modify, can
 
 ## 4. Documentation discrepancies found (verified against the official pages)
 
-- The quick start "Requesting Positions" uses `/v1/api/portfolio2/:accountId/positions`. The endpoint reference uses `/portfolio/{accountId}/positions/{pageId}`. NEXUS follows the **reference** path. A live run must confirm it.
+- IBKR documents both the older paginated `/portfolio/{accountId}/positions/{pageId}` endpoint and the newer uncached `/portfolio2/{accountId}/positions` endpoint. O19 keeps the paginated endpoint because its response shape is covered by the current validator; a real gateway run should determine whether a later milestone switches to the uncached path.
 - The pacing table lists `/iserver/orders` (1 req/5 s). The endpoint reference lists `/iserver/account/orders`. NEXUS uses the reference path with the stricter 5 s.
 - The `ibkrcampus.com` Markdown mirror of the docs was not reachable (Cloudflare error 1000) and was not used. The HTML pages were read directly.
 - Sample payloads disagree on types: `conid` and `totalSize` appear as both numbers and strings. The parser accepts both forms and rejects anything else.
@@ -88,7 +88,7 @@ Persistence uses the existing `AppendOnlyLog` on PostgreSQL (`append_only_logs` 
 
 | Log | Record id | Content |
 |---|---|---|
-| `broker-snapshots` | `bsnap_` + fingerprint | The normalized, time-free content. The fingerprint is `hashOf(normalized content)`. Positions and orders are sorted, so response order never changes it. |
+| `broker-snapshots` | `bsnap_` + fingerprint | The normalized, time-free content plus a pseudonymous `accountKey`. The snapshot fingerprint binds `accountKey + normalized content`, so two different accounts that happen to share the same masked display reference cannot collapse into one snapshot. Positions and orders are sorted, so response order never changes it. |
 | `broker-sync-events` | `bsync_` + hash | One observation (`observedAt`, `retrievedAt`, the snapshot id), or a failed attempt with its error code. |
 | `broker-reconciliations` | `brec_` + hash(snapshot, ledger fingerprint) | The comparison result. |
 
@@ -145,7 +145,7 @@ Existing `DATABASE_ERROR` is returned when a store fails.
 ## 11. Security
 
 - Credentials: none in NEXUS. The gateway holds the login. The session token is a marker in tests and is never returned, logged or stored (tests [7], [8], [9]).
-- Account ids: masked in every stored record, every response and the configuration summary. The full id lives in memory for the lifetime of the process (it is needed to match the gateway's accounts) and is never written anywhere.
+- Account ids: the clear account id is masked in responses and is never persisted. Stored snapshots carry only a deterministic pseudonymous account key derived from `broker + accountId`, so audit identity stays account-specific without writing the raw id. The full id lives in memory for the lifetime of the process because the gateway requires it.
 - Secrets never appear in errors: transport and validation messages are fixed text or name a field.
 - The database URL, the configuration values and the gateway certificate path are not printed.
 - The API has no authentication. The runtime still refuses any non-loopback `HOST` (O18). Broker data is read only through the loopback gateway.
@@ -203,7 +203,7 @@ Note: the runtime opens the ledger store for reconciliation. On a database where
 - **Single brokerage session per username.** An open TWS or other platform session can make this session "competing": the brokerage state is then reported as not authenticated.
 - **Multi-currency.** Only CHF cash is reconciled. Other currencies are reported as unsupported.
 - **No fill import.** Fills are not read as trades in this milestone.
-- **Duplicate mapping race.** Two concurrent mapping requests for the same conid could both pass the check. The registry's own conflict check is the second line; a single-writer guard for mappings is an open item.
+- **Concurrent mapping requests are serialized by the append-only store.** The registry precondition runs inside the store's exclusive critical section after newer records are applied; a conflicting second mapping is therefore rejected rather than silently duplicated.
 
 ## 16. Decisions to review
 
