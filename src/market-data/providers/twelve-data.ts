@@ -266,7 +266,11 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
 
   async getInstrument(providerSymbol: string, hint: { mic?: string; exchange?: string } = {}): Promise<InstrumentCandidate | null> {
     const candidates = await this.searchInstruments(providerSymbol);
-    return candidates.find((c) => c.providerSymbol.toUpperCase() === providerSymbol.toUpperCase() && (!hint.mic || c.mic === hint.mic) && (!hint.exchange || c.exchange === hint.exchange)) ?? null;
+    return candidates.find((c) =>
+      c.providerSymbol.toUpperCase() === providerSymbol.toUpperCase()
+      && (!hint.mic || (c.mic !== undefined && operatingMic(c.mic) === operatingMic(hint.mic)))
+      && (!hint.exchange || c.exchange === hint.exchange)
+    ) ?? null;
   }
 
   // -------------------------------------------------------------------------

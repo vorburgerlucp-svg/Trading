@@ -23,6 +23,19 @@ describe('Instrument Registry: Symbol ist keine Identität', () => {
     expect(r.mappingAt(AAPL.instrumentId, 'twelvedata', '2026-10-07T00:00:00Z')?.providerSymbol).toBe('AAPL');
   });
 
+  it('atomare Registrierung mit erstem Mapping hinterlässt bei Konflikt kein verwaistes Instrument', async () => {
+    const { r } = await registry();
+    const before = r.list().length;
+    await expect(r.registerWithMapping(
+      { ...BTC, instrumentId: 'ins_conflict' },
+      { provider: 'twelvedata', providerSymbol: 'AAPL', validFrom: '2020-01-01T00:00:00Z' },
+      at('2026-01-02T00:00:00Z'),
+    )).rejects.toMatchObject({ code: 'conflict' });
+    expect(r.list()).toHaveLength(before);
+    expect(r.get('ins_conflict')).toBeUndefined();
+    expect(r.mappings().some((m) => m.instrumentId === 'ins_conflict')).toBe(false);
+  });
+
   it('überlappende Zuordnungen werden abgewiesen (ein Symbol, zwei Instrumente / zwei Symbole, ein Instrument)', async () => {
     const { r } = await registry();
     await r.register({ ...BTC }, at('2026-01-02T00:00:00Z'));

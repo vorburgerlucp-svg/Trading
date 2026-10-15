@@ -9,6 +9,10 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "npm run build && node dist/runtime/main.js",
+    "start": "node dist/runtime/main.js",
+    "db:migrate": "npm run build && node dist/runtime/migrate.js",
     "test": "vitest run --project unit --project pg",
     "test:unit": "vitest run --project unit",
     "test:pg": "vitest run --project pg",
