@@ -44,6 +44,11 @@ export interface RuntimeConfig {
     readonly apiKey: string | null;
     readonly userKey: string | null;
   };
+  /**
+   * The local operator of the O21 control plane (NEXUS_OPERATOR_ID, NEXUS_OPERATOR_TOKEN), or null. Without it every mutating demo
+   * intent route is refused. The token is server-side only: never logged, returned or persisted.
+   */
+  readonly operator: { readonly id: string; readonly token: string } | null;
   readonly etoroDemoExecution: {
     /**
      * ETORO_DEMO_EXECUTION_ENABLED=1 (O21). Off by default. It needs ETORO_ENABLED=1 and ETORO_TRADING_MODE=demo, and it does not
@@ -63,10 +68,14 @@ export interface RuntimeConfigSummary {
   marketData: 'production' | 'demo' | 'not_configured';
   etoro: 'demo_read_only' | 'not_configured';
   etoroDemoExecution: 'enabled' | 'disabled';
+  operatorAuth: 'configured' | 'not_configured';
 }
 
 const API_KEY = /^[A-Za-z0-9]{8,128}$/;
 const DATABASE_URL = /^postgres(ql)?:\/\/\S+$/;
+const OPERATOR_ID = /^[A-Za-z0-9_.@-]{1,64}$/;
+/** A long random secret: printable ASCII without space, 32 to 512 characters. There is no default. */
+const OPERATOR_TOKEN = /^[\x21-\x7e]{32,512}$/;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
 function invalid(message: string): never {
@@ -136,6 +145,16 @@ export function loadRuntimeConfig(env: Environment): RuntimeConfig {
     invalid('ETORO_DEMO_EXECUTION_ENABLED=1 requires ETORO_ENABLED=1 and ETORO_TRADING_MODE=demo');
   }
 
+  // Operator authentication (O21). Both variables or neither; no default; the token must not be one of the broker keys.
+  const operatorId = text(env, 'NEXUS_OPERATOR_ID');
+  const operatorToken = text(env, 'NEXUS_OPERATOR_TOKEN');
+  if ((operatorId === undefined) !== (operatorToken === undefined)) invalid('NEXUS_OPERATOR_ID and NEXUS_OPERATOR_TOKEN must be set together');
+  if (operatorId !== undefined && !OPERATOR_ID.test(operatorId)) invalid('NEXUS_OPERATOR_ID has an invalid format');
+  if (operatorToken !== undefined) {
+    if (!OPERATOR_TOKEN.test(operatorToken)) invalid('NEXUS_OPERATOR_TOKEN must be 32 to 512 printable characters without spaces');
+    if (operatorToken === etoroApiKey || operatorToken === etoroUserKey) invalid('NEXUS_OPERATOR_TOKEN must not be a broker key');
+  }
+
   return Object.freeze({
     version: RUNTIME_CONFIG_VERSION,
     host,
@@ -154,6 +173,7 @@ export function loadRuntimeConfig(env: Environment): RuntimeConfig {
       apiKey: etoroEnabled && etoroApiKey !== undefined ? etoroApiKey : null,
       userKey: etoroEnabled && etoroUserKey !== undefined ? etoroUserKey : null,
     }),
+    operator: operatorId !== undefined && operatorToken !== undefined ? Object.freeze({ id: operatorId, token: operatorToken }) : null,
     etoroDemoExecution: Object.freeze({ enabled: demoExecutionEnabled }),
   });
 }
@@ -168,5 +188,6 @@ export function summarizeRuntimeConfig(config: RuntimeConfig): RuntimeConfigSumm
     marketData: config.twelveData.apiKey !== null ? 'production' : config.twelveData.demo ? 'demo' : 'not_configured',
     etoro: config.etoro.enabled ? 'demo_read_only' : 'not_configured',
     etoroDemoExecution: config.etoroDemoExecution.enabled ? 'enabled' : 'disabled',
+    operatorAuth: config.operator !== null ? 'configured' : 'not_configured',
   };
 }

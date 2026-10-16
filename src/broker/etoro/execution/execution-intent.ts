@@ -149,7 +149,7 @@ function actor(value: unknown, name: string): IntentActor {
 
 const INPUT_FIELDS = new Set([
   'action', 'instrumentId', 'etoroInstrumentId', 'side', 'orderType', 'amount', 'units', 'currency', 'leverage', 'stopLoss', 'takeProfit',
-  'triggerRate', 'closesIntentId', 'createdAt', 'expiresAt', 'strategyRunId', 'createdBy',
+  'triggerRate', 'closesIntentId', 'createdAt', 'expiresAt', 'strategyRunId',
 ]);
 
 /** The stable intent id: a hash of the complete validated content. The same input always yields the same id. */
@@ -161,12 +161,20 @@ export function isIntentId(value: unknown): value is string {
   return typeof value === 'string' && INTENT_ID.test(value);
 }
 
+/** A human or strategy actor with a valid id. Used for the creator, which is always given by trusted code, never by input. */
+export function parseActor(value: unknown, name = 'actor'): IntentActor {
+  return actor(value, name);
+}
+
 /**
  * Validates untrusted input into an ExecutionIntent. Fail closed: an unknown field, a missing field, a wrong type, an
  * inconsistent combination or a value outside the bounds is INTENT_INVALID. Only what the eToro reference supports is accepted:
  * open with buy or sell (sent as sellShort), mkt or mit; close by position, market only.
+ *
+ * The creator is not part of the input: createdBy is given by the caller from trusted state (the authenticated operator in the
+ * runtime). An input that names a creator is refused as an unknown field.
  */
-export function parseExecutionIntent(input: unknown): ExecutionIntent {
+export function parseExecutionIntent(input: unknown, createdByActor: unknown): ExecutionIntent {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) bad('intent must be an object');
   const v = input as Record<string, unknown>;
   const unknown = Object.keys(v).filter((k) => !INPUT_FIELDS.has(k));
@@ -191,7 +199,7 @@ export function parseExecutionIntent(input: unknown): ExecutionIntent {
   const stopLoss = optionalDecimal(v.stopLoss, 'stopLoss', 8);
   const takeProfit = optionalDecimal(v.takeProfit, 'takeProfit', 8);
   const triggerRate = optionalDecimal(v.triggerRate, 'triggerRate', 8);
-  const createdBy = actor(v.createdBy, 'createdBy');
+  const createdBy = actor(createdByActor, 'createdBy');
 
   let closesIntentId: string | null = null;
   if (v.action === 'open') {

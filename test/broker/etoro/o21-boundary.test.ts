@@ -12,7 +12,7 @@ import {
 import { HttpsDemoExecutionTransport } from '../../../src/broker/etoro/execution/etoro-demo-execution-transport.js';
 import { DemoExecutionError } from '../../../src/broker/etoro/execution/etoro-demo-execution-errors.js';
 import { closePositionBody, openOrderBody, parseExecutionIntent, bindClosePosition } from '../../../src/broker/etoro/execution/execution-intent.js';
-import { API_KEY_MARKER, ETORO_AAPL_ID, ScriptedBroker, closeInput, openInput } from './o21-fixture.js';
+import { CREATOR, API_KEY_MARKER, ETORO_AAPL_ID, ScriptedBroker, closeInput, openInput } from './o21-fixture.js';
 
 const DIR = join('src', 'broker', 'etoro', 'execution');
 const SOURCES = readdirSync(DIR).filter((f) => f.endsWith('.ts')).map((f) => ({ file: f, text: readFileSync(join(DIR, f), 'utf8') }));
@@ -103,7 +103,7 @@ describe('O21 boundary: no real path, no generic request', () => {
 
 describe('O21 boundary: request bodies exactly as in the reference', () => {
   it('a market buy uses only documented fields: action, transaction, instrumentId, orderType, leverage, amount, orderCurrency, SL/TP', () => {
-    expect(openOrderBody(parseExecutionIntent(openInput()))).toEqual({
+    expect(openOrderBody(parseExecutionIntent(openInput(), CREATOR))).toEqual({
       action: 'open',
       transaction: 'buy',
       instrumentId: ETORO_AAPL_ID,
@@ -118,24 +118,24 @@ describe('O21 boundary: request bodies exactly as in the reference', () => {
   });
 
   it('a sell is opened as sellShort (the reference supports buy and sellShort for an open), with units and no orderCurrency', () => {
-    const body = openOrderBody(parseExecutionIntent(openInput({ side: 'sell', amount: undefined, units: '2.5', stopLoss: '220', takeProfit: '180' })));
+    const body = openOrderBody(parseExecutionIntent(openInput({ side: 'sell', amount: undefined, units: '2.5', stopLoss: '220', takeProfit: '180' }), CREATOR));
     expect(body).toMatchObject({ transaction: 'sellShort', units: 2.5, stopLossRate: 220 });
     expect(body).not.toHaveProperty('amount');
     expect(body).not.toHaveProperty('orderCurrency');
   });
 
   it('a mit open carries triggerRate; settlementType is optional on v2 and is not guessed', () => {
-    const body = openOrderBody(parseExecutionIntent(openInput({ orderType: 'mit', triggerRate: '195' })));
+    const body = openOrderBody(parseExecutionIntent(openInput({ orderType: 'mit', triggerRate: '195' }), CREATOR));
     expect(body).toMatchObject({ orderType: 'mit', triggerRate: 195 });
     expect(body).not.toHaveProperty('settlementType');
     expect(body).not.toHaveProperty('positionIds');
   });
 
   it('the close body uses the reference names InstrumentID and UnitsToDeduct, null for a full close', () => {
-    const unbound = parseExecutionIntent(closeInput('eint_' + 'a'.repeat(40)));
+    const unbound = parseExecutionIntent(closeInput('eint_' + 'a'.repeat(40)), CREATOR);
     const full = bindClosePosition(unbound, 2150941015);
     expect(closePositionBody(full)).toEqual({ InstrumentID: ETORO_AAPL_ID, UnitsToDeduct: null });
-    const partial = bindClosePosition(parseExecutionIntent(closeInput('eint_' + 'a'.repeat(40), { units: '1.5' })), 2150941015);
+    const partial = bindClosePosition(parseExecutionIntent(closeInput('eint_' + 'a'.repeat(40), { units: '1.5' }), CREATOR), 2150941015);
     expect(closePositionBody(partial)).toEqual({ InstrumentID: ETORO_AAPL_ID, UnitsToDeduct: 1.5 });
     expect(Object.keys(closePositionBody(full))).not.toContain('InstrumentId');
   });

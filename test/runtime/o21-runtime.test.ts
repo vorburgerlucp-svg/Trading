@@ -1,6 +1,6 @@
 // O21 runtime: the demo intent routes over real HTTP and the production composition (in-memory stores). Off by default; when on,
-// every write is still refused by BUILD_LOCKS.etoroDemoExecution, and no broker request is made. No real route exists. Body and
-// path input is validated strictly, and no secret reaches a response.
+// every mutating route needs the authenticated operator (loopback is not authentication), the operator identity comes from the
+// server, and every write is still refused by BUILD_LOCKS.etoroDemoExecution: no broker request is made. No real route exists.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -16,10 +16,15 @@ import type { AttemptRecord, ConfirmationRecord, IntentEvent, ReconciliationReco
 import { BUILD_LOCKS } from '../../src/nexus/safety.js';
 import { createRuntimeHandler } from '../../src/runtime/app.js';
 import { composeRuntime, type ComposeInput } from '../../src/runtime/compose.js';
+import { OperatorAuthenticator } from '../../src/runtime/operator-auth.js';
 import { startHttpServer, type RunningServer } from '../../src/runtime/server.js';
 import { AAPL } from '../market-data/fixtures.js';
 import { FixtureEtoroTransport } from '../broker/etoro/o20-fixture.js';
 import { API_KEY_MARKER, ETORO_AAPL_ID, O21_NOW, ScriptedBroker, USER_KEY_MARKER, closeInput, freshQuote, normalSafety, openInput } from '../broker/etoro/o21-fixture.js';
+
+const OPERATOR_ID = 'operator-real';
+const OPERATOR_TOKEN = 'O21-OPERATOR-TOKEN-MARKER-0123456789abcdef';
+const AUTH = { authorization: 'Bearer ' + OPERATOR_TOKEN };
 
 let server: RunningServer | null = null;
 
@@ -34,9 +39,10 @@ interface Runtime {
   readOnly: FixtureEtoroTransport;
   ledger: CapitalLedger;
   intents: AppendOnlyLog<IntentEvent> | null;
+  attempts: AppendOnlyLog<AttemptRecord> | null;
 }
 
-async function runtime(options: { execution: boolean; injectSafety?: boolean }): Promise<Runtime> {
+async function runtime(options: { execution: boolean; injectSafety?: boolean; auth?: boolean }): Promise<Runtime> {
   const now = () => new Date(O21_NOW);
   const instruments = new InMemoryAppendOnlyStore<InstrumentEvent>();
   const registry = await InstrumentRegistry.open(instruments, { clock: now });
@@ -55,13 +61,15 @@ async function runtime(options: { execution: boolean; injectSafety?: boolean }):
     syncs: await AppendOnlyLog.inMemory<EtoroSyncRecord>('etoro-sync-events', { clock: now }),
   };
   let intents: AppendOnlyLog<IntentEvent> | null = null;
+  let attempts: AppendOnlyLog<AttemptRecord> | null = null;
   let execution: ComposeInput['etoroDemoExecution'];
   if (options.execution) {
     intents = await AppendOnlyLog.inMemory<IntentEvent>('etoro-demo-execution-intents', { clock: now });
+    attempts = await AppendOnlyLog.inMemory<AttemptRecord>('etoro-demo-execution-attempts', { clock: now });
     execution = {
       transport: new HttpsDemoExecutionTransport({ credentials: { apiKey: API_KEY_MARKER, userKey: USER_KEY_MARKER }, fetch: broker.fetch }),
       intents,
-      attempts: await AppendOnlyLog.inMemory<AttemptRecord>('etoro-demo-execution-attempts', { clock: now }),
+      attempts,
       confirmations: await AppendOnlyLog.inMemory<ConfirmationRecord>('etoro-demo-broker-confirmations', { clock: now }),
       reconciliations: await AppendOnlyLog.inMemory<ReconciliationRecord>('etoro-demo-execution-reconciliations', { clock: now }),
       ...(options.injectSafety ? { safetyForTests: { current: async () => normalSafety() }, quotesForTests: { latest: async () => freshQuote() } } : {}),
@@ -80,17 +88,28 @@ async function runtime(options: { execution: boolean; injectSafety?: boolean }):
     etoro,
     ...(execution ? { etoroDemoExecution: execution } : {}),
   });
-  server = await startHttpServer(createRuntimeHandler(services), { host: '127.0.0.1', port: 0 });
-  return { base: server.url, broker, readOnly, ledger, intents };
+  const operatorAuth = options.auth === false ? null : new OperatorAuthenticator({ id: OPERATOR_ID, token: OPERATOR_TOKEN });
+  server = await startHttpServer(createRuntimeHandler(services, { operatorAuth }), { host: '127.0.0.1', port: 0 });
+  return { base: server.url, broker, readOnly, ledger, intents, attempts };
 }
 
 const texts: string[] = [];
 
-async function call(r: Runtime, method: string, path: string, body?: unknown, raw?: string): Promise<{ status: number; json: Record<string, any> }> {
+interface CallOptions {
+  body?: unknown;
+  raw?: string;
+  headers?: Record<string, string>;
+  /** Default true: send the operator token. */
+  auth?: boolean;
+}
+
+async function call(r: Runtime, method: string, path: string, options: CallOptions = {}): Promise<{ status: number; json: Record<string, any> }> {
+  const headers: Record<string, string> = { ...(options.auth === false ? {} : AUTH) };
   const init: RequestInit = { method };
-  if (raw !== undefined) init.body = raw;
-  else if (body !== undefined) init.body = JSON.stringify(body);
-  if (init.body !== undefined) init.headers = { 'content-type': 'application/json' };
+  if (options.raw !== undefined) init.body = options.raw;
+  else if (options.body !== undefined) init.body = JSON.stringify(options.body);
+  if (init.body !== undefined) headers['content-type'] = 'application/json';
+  init.headers = { ...headers, ...(options.headers ?? {}) };
   const res = await fetch(r.base + path, init);
   const text = await res.text();
   texts.push(text);
@@ -98,119 +117,203 @@ async function call(r: Runtime, method: string, path: string, body?: unknown, ra
 }
 
 const INTENTS = '/api/broker/etoro/demo/intents';
-const HUMAN = { approvedBy: { kind: 'human', id: 'operator-1' } };
+
+/** The route takes the intent without createdBy: the creator is the authenticated operator. */
+function routeIntent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const { createdBy: _ignored, ...intent } = openInput(overrides);
+  void _ignored;
+  return intent;
+}
+
+async function createdAndApproved(r: Runtime): Promise<string> {
+  const created = await call(r, 'POST', INTENTS, { body: routeIntent() });
+  expect(created.json.intent?.state, JSON.stringify(created.json)).toBe('RISK_APPROVED');
+  const id = created.json.intent.intentId as string;
+  expect((await call(r, 'POST', INTENTS + '/' + id + '/approve')).json.intent.state).toBe('APPROVED');
+  return id;
+}
 
 describe('O21 runtime: disabled by default', () => {
   it('without ETORO_DEMO_EXECUTION_ENABLED every intent route answers EXECUTION_DISABLED and nothing is sent', async () => {
     const r = await runtime({ execution: false });
-    expect(await call(r, 'POST', INTENTS, openInput())).toMatchObject({ status: 403, json: { error: { code: 'EXECUTION_DISABLED' } } });
+    expect(await call(r, 'POST', INTENTS, { body: routeIntent() })).toMatchObject({ status: 403, json: { error: { code: 'EXECUTION_DISABLED' } } });
     const id = 'eint_' + 'a'.repeat(40);
     expect((await call(r, 'GET', INTENTS + '/' + id)).json.error.code).toBe('EXECUTION_DISABLED');
     expect((await call(r, 'POST', INTENTS + '/' + id + '/execute')).json.error.code).toBe('EXECUTION_DISABLED');
     expect(r.broker.requests).toHaveLength(0);
   });
 
-  it('/health still reports paper and live trading locked', async () => {
+  it('/health and /api/health report paper, live trading locked, and every build lock including etoroDemoExecution', async () => {
     const r = await runtime({ execution: true });
-    expect((await call(r, 'GET', '/health')).json).toMatchObject({
-      tradingMode: 'paper',
-      liveTrading: 'locked',
-      buildLocks: { liveTrading: true, brokerOrders: true, physicalPurchase: true },
-    });
+    for (const path of ['/health', '/api/health']) {
+      expect((await call(r, 'GET', path, { auth: false })).json).toMatchObject({
+        tradingMode: 'paper',
+        liveTrading: 'locked',
+        buildLocks: { liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true },
+      });
+    }
     expect(BUILD_LOCKS.etoroDemoExecution).toBe(true);
   });
 });
 
-describe('O21 runtime: enabled, and still locked in build', () => {
+describe('O21 runtime: enabled, authenticated, and still locked in build', () => {
   it('create, risk approval and approval work; execute and cancel are EXECUTION_LOCKED_IN_BUILD with 0 broker requests', async () => {
     const r = await runtime({ execution: true, injectSafety: true });
-    expect((await call(r, 'POST', '/api/broker/etoro/sync')).status).toBe(200);
-    const created = await call(r, 'POST', INTENTS, openInput());
-    expect(created.status).toBe(201);
-    expect(created.json.intent.state).toBe('RISK_APPROVED');
-    const id = created.json.intent.intentId as string;
-    const approved = await call(r, 'POST', INTENTS + '/' + id + '/approve', HUMAN);
-    expect(approved.status).toBe(200);
-    expect(approved.json.intent.state).toBe('APPROVED');
-
-    const executed = await call(r, 'POST', INTENTS + '/' + id + '/execute');
-    expect(executed).toMatchObject({ status: 403, json: { error: { code: 'EXECUTION_LOCKED_IN_BUILD' } } });
-    const cancelled = await call(r, 'POST', INTENTS + '/' + id + '/cancel', {});
-    expect(cancelled).toMatchObject({ status: 403, json: { error: { code: 'EXECUTION_LOCKED_IN_BUILD' } } });
+    expect((await call(r, 'POST', '/api/broker/etoro/sync', { auth: false })).status).toBe(200);
+    const id = await createdAndApproved(r);
+    expect(await call(r, 'POST', INTENTS + '/' + id + '/execute')).toMatchObject({ status: 403, json: { error: { code: 'EXECUTION_LOCKED_IN_BUILD' } } });
+    expect(await call(r, 'POST', INTENTS + '/' + id + '/cancel', { body: {} })).toMatchObject({ status: 403, json: { error: { code: 'EXECUTION_LOCKED_IN_BUILD' } } });
     expect(r.broker.requests).toHaveLength(0);
-    expect((await call(r, 'GET', INTENTS + '/' + id)).json.intent.state).toBe('APPROVED');
-    // No SUBMITTING record was written: the lock refuses before the at-most-once step.
+    expect((await call(r, 'GET', INTENTS + '/' + id, { auth: false })).json.intent.state).toBe('APPROVED');
     expect(r.intents?.get(id + ':SUBMITTING')).toBeUndefined();
+  });
+
+  it('the creator and the approver are the authenticated operator; nothing in the body can name them', async () => {
+    const r = await runtime({ execution: true, injectSafety: true });
+    const id = await createdAndApproved(r);
+    const view = (await call(r, 'GET', INTENTS + '/' + id, { auth: false })).json.intent;
+    expect(view.intent.createdBy).toEqual({ kind: 'human', id: OPERATOR_ID });
+    expect(view.approvedBy).toEqual({ kind: 'human', id: OPERATOR_ID });
+    expect(r.intents?.get(id + ':APPROVED')?.payload.approvedBy).toEqual({ kind: 'human', id: OPERATOR_ID });
   });
 
   it('a refresh of an intent that was never submitted is refused without a broker request', async () => {
     const r = await runtime({ execution: true, injectSafety: true });
-    const id = (await call(r, 'POST', INTENTS, openInput())).json.intent.intentId as string;
+    const id = (await call(r, 'POST', INTENTS, { body: routeIntent() })).json.intent.intentId as string;
     expect((await call(r, 'POST', INTENTS + '/' + id + '/refresh')).json.error.code).toBe('INTENT_STATE_INVALID');
     expect(r.broker.requests).toHaveLength(0);
   });
 
   it('the production composition has no eToro demo safety source: every open is refused PORTFOLIO_SAFETY_NOT_CONNECTED', async () => {
     const r = await runtime({ execution: true });
-    const created = await call(r, 'POST', INTENTS, openInput());
+    const created = await call(r, 'POST', INTENTS, { body: routeIntent() });
     expect(created.status).toBe(201);
     expect(created.json.intent.state).toBe('REJECTED');
     expect(created.json.intent.gateReasons).toContain('PORTFOLIO_SAFETY_NOT_CONNECTED');
-    // No stored quote exists either: the runtime quote source reports none and does not invent one.
     expect(created.json.intent.gateReasons).toContain('QUOTE_STALE_OR_MISSING');
     expect(r.broker.requests).toHaveLength(0);
+  });
+});
+
+describe('O21 runtime: operator authentication (loopback is not authentication)', () => {
+  const steps = ['approve', 'execute', 'refresh', 'cancel'];
+
+  it('without operator configuration every mutating route is refused; reads keep working', async () => {
+    const r = await runtime({ execution: true, injectSafety: true, auth: false });
+    expect(await call(r, 'POST', INTENTS, { body: routeIntent() })).toMatchObject({ status: 403, json: { error: { code: 'OPERATOR_AUTH_NOT_CONFIGURED' } } });
+    for (const step of steps) {
+      expect((await call(r, 'POST', INTENTS + '/eint_' + 'a'.repeat(40) + '/' + step)).json.error.code).toBe('OPERATOR_AUTH_NOT_CONFIGURED');
+    }
+    expect((await call(r, 'GET', INTENTS + '/eint_' + 'a'.repeat(40), { auth: false })).json.error.code).toBe('INTENT_NOT_FOUND');
+    expect((await call(r, 'GET', '/api/broker/etoro/status', { auth: false })).status).toBe(200);
+    expect(r.broker.requests).toHaveLength(0);
+  });
+
+  it.each([
+    ['no Authorization header', {}],
+    ['a wrong token', { authorization: 'Bearer O21-WRONG-TOKEN-0000000000000000000000000' }],
+    ['a token prefix', { authorization: 'Bearer ' + OPERATOR_TOKEN.slice(0, -1) }],
+    ['the token with a suffix', { authorization: 'Bearer ' + OPERATOR_TOKEN + 'x' }],
+    ['another scheme', { authorization: 'Basic ' + OPERATOR_TOKEN }],
+    ['the token without a scheme', { authorization: OPERATOR_TOKEN }],
+    ['a lower-case scheme', { authorization: 'bearer ' + OPERATOR_TOKEN }],
+  ])('%s is OPERATOR_AUTH_REQUIRED (401) on create and on every step, with 0 broker requests', async (_label, headers) => {
+    const r = await runtime({ execution: true, injectSafety: true });
+    const id = await createdAndApproved(r);
+    expect(await call(r, 'POST', INTENTS, { body: routeIntent({ strategyRunId: 'run-x' }), auth: false, headers })).toMatchObject({ status: 401, json: { error: { code: 'OPERATOR_AUTH_REQUIRED' } } });
+    for (const step of steps) {
+      expect((await call(r, 'POST', INTENTS + '/' + id + '/' + step, { auth: false, headers })).status, step).toBe(401);
+    }
+    expect(r.broker.requests).toHaveLength(0);
+    expect((await call(r, 'GET', INTENTS + '/' + id, { auth: false })).json.intent.state).toBe('APPROVED');
+  });
+
+  it('a claimed approvedBy or createdBy in the body is refused, and another name cannot override the operator', async () => {
+    const r = await runtime({ execution: true, injectSafety: true });
+    expect((await call(r, 'POST', INTENTS, { body: { ...routeIntent(), createdBy: { kind: 'human', id: 'someone-else' } } })).json.error.code).toBe('REQUEST_INVALID');
+    expect((await call(r, 'POST', INTENTS, { body: { ...routeIntent(), approvedBy: { kind: 'human', id: 'someone-else' } } })).json.error.code).toBe('REQUEST_INVALID');
+    const id = (await call(r, 'POST', INTENTS, { body: routeIntent() })).json.intent.intentId as string;
+    for (const body of [{ approvedBy: { kind: 'human', id: 'someone-else' } }, { approvedBy: { kind: 'human', id: OPERATOR_ID } }, { operator: 'x' }]) {
+      expect((await call(r, 'POST', INTENTS + '/' + id + '/approve', { body })).json.error.code).toBe('REQUEST_INVALID');
+    }
+    expect((await call(r, 'GET', INTENTS + '/' + id, { auth: false })).json.intent.state).toBe('RISK_APPROVED');
+    expect((await call(r, 'POST', INTENTS + '/' + id + '/approve', { body: {} })).json.intent.approvedBy).toEqual({ kind: 'human', id: OPERATOR_ID });
+  });
+
+  it('a browser request from a foreign origin is refused before authentication; a loopback origin is allowed', async () => {
+    const r = await runtime({ execution: true, injectSafety: true });
+    for (const origin of ['https://evil.example', 'null', 'http://localhost.evil.example', 'file://', 'http://192.168.1.10:3000']) {
+      expect((await call(r, 'POST', INTENTS, { body: routeIntent(), headers: { origin } })).json.error.code, origin).toBe('ORIGIN_REFUSED');
+    }
+    for (const origin of ['http://localhost:3000', 'http://127.0.0.1:5173', 'http://[::1]:8080']) {
+      expect((await call(r, 'POST', INTENTS, { body: routeIntent({ strategyRunId: 'run-' + origin.length }), headers: { origin } })).status, origin).toBe(201);
+    }
+    expect(r.broker.requests).toHaveLength(0);
+  });
+
+  it('a body that is not declared application/json is refused (no text/plain or form request)', async () => {
+    const r = await runtime({ execution: true, injectSafety: true });
+    for (const type of ['text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data; boundary=x', 'application/json-patch+json']) {
+      expect((await call(r, 'POST', INTENTS, { raw: JSON.stringify(routeIntent()), headers: { 'content-type': type } })).json.error.code, type).toBe('UNSUPPORTED_MEDIA_TYPE');
+    }
+    const id = (await call(r, 'POST', INTENTS, { body: routeIntent() })).json.intent.intentId as string;
+    expect((await call(r, 'POST', INTENTS + '/' + id + '/approve', { raw: '{}', headers: { 'content-type': 'text/plain' } })).status).toBe(415);
+    expect((await call(r, 'GET', INTENTS + '/' + id, { auth: false })).json.intent.state).toBe('RISK_APPROVED');
+  });
+
+  it('the operator token appears in no response and no stored record', async () => {
+    const r = await runtime({ execution: true, injectSafety: true });
+    const id = await createdAndApproved(r);
+    await call(r, 'POST', INTENTS + '/' + id + '/execute');
+    await call(r, 'POST', INTENTS + '/' + id + '/execute', { auth: false, headers: { authorization: 'Bearer ' + OPERATOR_TOKEN + 'z' } });
+    const stored = JSON.stringify([r.intents?.all(), r.attempts?.all()]);
+    expect(stored + texts.join('\n')).not.toContain(OPERATOR_TOKEN);
+    expect(stored + texts.join('\n')).not.toContain('Bearer');
   });
 });
 
 describe('O21 runtime: strict input', () => {
   it('a malformed intent is INTENT_INVALID; invalid JSON is REQUEST_INVALID', async () => {
     const r = await runtime({ execution: true });
-    expect((await call(r, 'POST', INTENTS, openInput({ settlementType: 'cfd' }))).json.error.code).toBe('INTENT_INVALID');
-    expect((await call(r, 'POST', INTENTS, openInput({ amount: 500 }))).json.error.code).toBe('INTENT_INVALID');
-    expect((await call(r, 'POST', INTENTS, undefined, '{not json'))).toMatchObject({ status: 400, json: { error: { code: 'REQUEST_INVALID' } } });
-    expect((await call(r, 'POST', INTENTS, [1]))).toMatchObject({ status: 400 });
+    expect((await call(r, 'POST', INTENTS, { body: routeIntent({ settlementType: 'cfd' }) })).json.error.code).toBe('INTENT_INVALID');
+    expect((await call(r, 'POST', INTENTS, { body: routeIntent({ amount: 500 }) })).json.error.code).toBe('INTENT_INVALID');
+    expect(await call(r, 'POST', INTENTS, { raw: '{not json' })).toMatchObject({ status: 400, json: { error: { code: 'REQUEST_INVALID' } } });
+    expect((await call(r, 'POST', INTENTS, { body: [1] })).status).toBe(400);
+    expect((await call(r, 'POST', INTENTS)).status).toBe(400);
   });
 
   it('a close cannot carry a position id: the field is refused', async () => {
     const r = await runtime({ execution: true });
-    const res = await call(r, 'POST', INTENTS, closeInput('eint_' + 'a'.repeat(40), { positionId: 2150941015 }));
-    expect(res).toMatchObject({ status: 400, json: { error: { code: 'INTENT_INVALID' } } });
+    const { createdBy: _c, ...close } = closeInput('eint_' + 'a'.repeat(40), { positionId: 2150941015 });
+    void _c;
+    expect(await call(r, 'POST', INTENTS, { body: close })).toMatchObject({ status: 400, json: { error: { code: 'INTENT_INVALID' } } });
   });
 
   it('a malformed intent id is REQUEST_INVALID; an unknown one is INTENT_NOT_FOUND (404)', async () => {
     const r = await runtime({ execution: true });
     for (const id of ['abc', 'eint_' + 'A'.repeat(40), 'eint_' + 'a'.repeat(39), '..%2F..%2Freal']) {
-      expect((await call(r, 'GET', INTENTS + '/' + id)).status).toBe(400);
+      expect((await call(r, 'GET', INTENTS + '/' + id, { auth: false })).status).toBe(400);
     }
-    expect(await call(r, 'GET', INTENTS + '/eint_' + 'f'.repeat(40))).toMatchObject({ status: 404, json: { error: { code: 'INTENT_NOT_FOUND' } } });
+    expect(await call(r, 'GET', INTENTS + '/eint_' + 'f'.repeat(40), { auth: false })).toMatchObject({ status: 404, json: { error: { code: 'INTENT_NOT_FOUND' } } });
     expect((await call(r, 'POST', INTENTS + '/eint_' + 'f'.repeat(40) + '/execute')).status).toBe(403);
-  });
-
-  it('approve needs exactly { approvedBy: { kind: "human", id } }', async () => {
-    const r = await runtime({ execution: true, injectSafety: true });
-    const id = (await call(r, 'POST', INTENTS, openInput())).json.intent.intentId as string;
-    for (const body of [{}, { approvedBy: { kind: 'strategy', id: 's' } }, { approvedBy: { kind: 'human' } }, { ...HUMAN, extra: 1 }, { approvedBy: { kind: 'human', id: 'x', role: 'admin' } }]) {
-      expect((await call(r, 'POST', INTENTS + '/' + id + '/approve', body)).status).toBe(400);
-    }
-    expect((await call(r, 'GET', INTENTS + '/' + id)).json.intent.state).toBe('RISK_APPROVED');
   });
 
   it('execute, refresh and cancel take no input: no broker payload, no order id, no position id, no query', async () => {
     const r = await runtime({ execution: true, injectSafety: true });
-    const id = (await call(r, 'POST', INTENTS, openInput())).json.intent.intentId as string;
-    expect((await call(r, 'POST', INTENTS + '/' + id + '/execute', { body: { action: 'open' } })).json.error.code).toBe('REQUEST_INVALID');
-    expect((await call(r, 'POST', INTENTS + '/' + id + '/cancel', { orderId: 13902598 })).json.error.code).toBe('REQUEST_INVALID');
-    expect((await call(r, 'POST', INTENTS + '/' + id + '/cancel', { positionId: 2150941015 })).json.error.code).toBe('REQUEST_INVALID');
-    expect((await call(r, 'POST', INTENTS + '/' + id + '/refresh', { referenceId: '00000000-0000-4000-8000-000000000000' })).json.error.code).toBe('REQUEST_INVALID');
+    const id = (await call(r, 'POST', INTENTS, { body: routeIntent() })).json.intent.intentId as string;
+    expect((await call(r, 'POST', INTENTS + '/' + id + '/execute', { body: { body: { action: 'open' } } })).json.error.code).toBe('REQUEST_INVALID');
+    expect((await call(r, 'POST', INTENTS + '/' + id + '/cancel', { body: { orderId: 13902598 } })).json.error.code).toBe('REQUEST_INVALID');
+    expect((await call(r, 'POST', INTENTS + '/' + id + '/cancel', { body: { positionId: 2150941015 } })).json.error.code).toBe('REQUEST_INVALID');
+    expect((await call(r, 'POST', INTENTS + '/' + id + '/refresh', { body: { referenceId: '00000000-0000-4000-8000-000000000000' } })).json.error.code).toBe('REQUEST_INVALID');
     expect((await call(r, 'POST', INTENTS + '/' + id + '/execute?requestId=1')).json.error.code).toBe('REQUEST_INVALID');
     expect(r.broker.requests).toHaveLength(0);
   });
 
   it('an invalid transition is refused (409): a rejected intent cannot be approved', async () => {
     const r = await runtime({ execution: true });
-    const rejected = await call(r, 'POST', INTENTS, openInput());
+    const rejected = await call(r, 'POST', INTENTS, { body: routeIntent() });
     expect(rejected.json.intent.state).toBe('REJECTED');
-    expect(await call(r, 'POST', INTENTS + '/' + rejected.json.intent.intentId + '/approve', HUMAN)).toMatchObject({ status: 409, json: { error: { code: 'INTENT_STATE_INVALID' } } });
+    expect(await call(r, 'POST', INTENTS + '/' + rejected.json.intent.intentId + '/approve')).toMatchObject({ status: 409, json: { error: { code: 'INTENT_STATE_INVALID' } } });
   });
 
   it('a wrong method is 405, an unknown step is 404', async () => {
@@ -248,10 +351,10 @@ describe('O21 runtime: no real route, no generic order route', () => {
 describe('O21 runtime: O20 unchanged, no ledger mutation, no secret', () => {
   it('the O20 read-only routes answer as before', async () => {
     const r = await runtime({ execution: true });
-    expect((await call(r, 'GET', '/api/broker/etoro/status')).json.etoro).toMatchObject({ configured: true, access: 'read_only' });
-    expect((await call(r, 'POST', '/api/broker/etoro/sync')).status).toBe(200);
-    expect((await call(r, 'GET', '/api/broker/etoro/snapshot')).json.snapshot.content.positionCount).toBe(0);
-    expect((await call(r, 'GET', '/api/broker/etoro/reconciliation')).json.reconciliation.matched).toBe(true);
+    expect((await call(r, 'GET', '/api/broker/etoro/status', { auth: false })).json.etoro).toMatchObject({ configured: true, access: 'read_only' });
+    expect((await call(r, 'POST', '/api/broker/etoro/sync', { auth: false })).status).toBe(200);
+    expect((await call(r, 'GET', '/api/broker/etoro/snapshot', { auth: false })).json.snapshot.content.positionCount).toBe(0);
+    expect((await call(r, 'GET', '/api/broker/etoro/reconciliation', { auth: false })).json.reconciliation.matched).toBe(true);
     expect(r.readOnly.calls).toEqual(['portfolio.demo']);
     expect(r.broker.requests).toHaveLength(0);
   });
@@ -259,18 +362,18 @@ describe('O21 runtime: O20 unchanged, no ledger mutation, no secret', () => {
   it('the intent routes never touch the ledger', async () => {
     const r = await runtime({ execution: true, injectSafety: true });
     const before = r.ledger.head();
-    const id = (await call(r, 'POST', INTENTS, openInput())).json.intent.intentId as string;
-    await call(r, 'POST', INTENTS + '/' + id + '/approve', HUMAN);
+    const id = await createdAndApproved(r);
     await call(r, 'POST', INTENTS + '/' + id + '/execute');
     expect(r.ledger.head()).toEqual(before);
     expect(r.ledger.size).toBe(0);
   });
 
-  it('no response of any test in this file contains a key or an auth header', () => {
+  it('no response of any test in this file contains a broker key, the operator token or an auth header', () => {
     const all = texts.join('\n');
-    expect(texts.length).toBeGreaterThan(20);
+    expect(texts.length).toBeGreaterThan(40);
     expect(all).not.toContain(API_KEY_MARKER);
     expect(all).not.toContain(USER_KEY_MARKER);
+    expect(all).not.toContain(OPERATOR_TOKEN);
     expect(all.toLowerCase()).not.toContain('x-api-key');
     expect(all.toLowerCase()).not.toContain('x-user-key');
   });
@@ -285,7 +388,7 @@ describe('O21 runtime: no bypass of the service', () => {
   const source = files('src').map((path) => ({ path: path.replace(/\\/g, '/'), text: readFileSync(path, 'utf8') }));
 
   it('routes and runtime services reach neither the adapter nor the transport', () => {
-    for (const file of ['src/runtime/app.ts', 'src/runtime/services.ts', 'src/runtime/errors.ts']) {
+    for (const file of ['src/runtime/app.ts', 'src/runtime/services.ts', 'src/runtime/errors.ts', 'src/runtime/operator-auth.ts']) {
       const text = source.find((s) => s.path === file)!.text;
       expect(text, file).not.toMatch(/etoro-demo-execution-adapter|etoro-demo-execution-transport|EToroDemoExecutionAdapter|HttpsDemoExecutionTransport/);
     }
@@ -307,11 +410,12 @@ describe('O21 runtime: no bypass of the service', () => {
     }
   });
 
-  it('the entry point never injects a safety source, a quote source or the build lock', () => {
+  it('the entry point never injects a safety source, a quote source or a lock; no source declares a lock option', () => {
     const bootstrap = source.find((s) => s.path === 'src/runtime/bootstrap.ts')!.text;
     expect(bootstrap).not.toMatch(/safetyForTests|quotesForTests|buildLocked/);
     const compose = source.find((s) => s.path === 'src/runtime/compose.ts')!.text;
     expect(compose).not.toMatch(/buildLocked/);
     expect(compose).toMatch(/NO_DEMO_SAFETY_SOURCE/);
+    for (const { path, text } of source) expect(text, path).not.toMatch(/buildLocked\?:|etoroDemoExecution\s*=\s*false|etoroDemoExecution:\s*false/);
   });
 });

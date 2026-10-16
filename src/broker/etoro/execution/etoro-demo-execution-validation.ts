@@ -140,6 +140,15 @@ export interface BrokerOrderStatus {
   readonly instrumentId: number;
   /** Positions the order opened (open) or closes (close). */
   readonly positionIds: readonly number[];
+  /** The order action and transaction of the reference enums, when the response states them (orders:lookup does). */
+  readonly action: 'open' | 'close' | null;
+  readonly transaction: 'buy' | 'sell' | 'sellShort' | 'buyToCover' | null;
+}
+
+function optionalEnum<T extends string>(value: unknown, allowed: readonly T[], path: string): T | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) throw invalid(path + ' is not a documented value');
+  return value as T;
 }
 
 /** 200 of GET .../demo/orders:lookup. */
@@ -159,6 +168,8 @@ export function parseOrderLookup(body: unknown): BrokerOrderStatus {
     errorCode: errorCode === 0 ? null : errorCode,
     instrumentId: idAt(asset.instrumentId, 'asset.instrumentId'),
     positionIds: [...new Set([...positionIds, ...idList(root.positionsToClose, 'positionsToClose')])],
+    action: optionalEnum(root.action, ['open', 'close'] as const, 'action'),
+    transaction: optionalEnum(root.transaction, ['buy', 'sell', 'sellShort', 'buyToCover'] as const, 'transaction'),
   };
 }
 
@@ -177,5 +188,7 @@ export function parseCloseOrderInfo(body: unknown): BrokerOrderStatus {
     errorCode: errorCode === 0 ? null : errorCode,
     instrumentId: idAt(root.instrumentID, 'instrumentID'),
     positionIds,
+    action: 'close',
+    transaction: null,
   };
 }

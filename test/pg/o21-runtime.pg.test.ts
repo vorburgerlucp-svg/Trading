@@ -40,6 +40,14 @@ async function rows(database: string, text: string): Promise<Record<string, unkn
 }
 
 const databases: TestDatabase[] = [];
+const OPERATOR_TOKEN = 'O21-PG-OPERATOR-TOKEN-0123456789abcdef-xyz';
+
+/** The route takes the intent without createdBy: the creator is the authenticated operator. */
+function routeIntent(): Record<string, unknown> {
+  const { createdBy: _ignored, ...intent } = openInput();
+  void _ignored;
+  return intent;
+}
 
 describe.skipIf(!pgAvailable)('O21 runtime on PostgreSQL' + (pgAvailable ? '' : ' (NOT RUN: ' + pgSkipReason + ')'), () => {
   afterEach(async () => {
@@ -61,6 +69,8 @@ describe.skipIf(!pgAvailable)('O21 runtime on PostgreSQL' + (pgAvailable ? '' : 
       ETORO_API_KEY: API_KEY_MARKER,
       ETORO_USER_KEY: USER_KEY_MARKER,
       ETORO_DEMO_EXECUTION_ENABLED: '1',
+      NEXUS_OPERATOR_ID: 'operator-pg',
+      NEXUS_OPERATOR_TOKEN: OPERATOR_TOKEN,
     };
     const runtime = await startRuntime(env, {
       provider: null,
@@ -69,21 +79,24 @@ describe.skipIf(!pgAvailable)('O21 runtime on PostgreSQL' + (pgAvailable ? '' : 
       clock: () => new Date(O21_NOW),
     });
     const responses: string[] = [];
-    const post = async (path: string, body?: unknown) => {
-      const res = await fetch(runtime.url + path, { method: 'POST', ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    const post = async (path: string, body?: unknown, auth = true) => {
+      const headers: Record<string, string> = { ...(auth ? { authorization: 'Bearer ' + OPERATOR_TOKEN } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }) };
+      const res = await fetch(runtime.url + path, { method: 'POST', headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       const text = await res.text();
       responses.push(text);
       return { status: res.status, json: JSON.parse(text) as Record<string, any> };
     };
     let intentId = '';
     try {
-      expect(runtime.config).toMatchObject({ etoro: 'demo_read_only', etoroDemoExecution: 'enabled', tradingMode: 'paper', liveTrading: 'locked' });
-      expect((await post('/api/broker/etoro/sync')).status).toBe(200);
+      expect(runtime.config).toMatchObject({ etoro: 'demo_read_only', etoroDemoExecution: 'enabled', operatorAuth: 'configured', tradingMode: 'paper', liveTrading: 'locked' });
+      expect((await post('/api/broker/etoro/sync', undefined, false)).status).toBe(200);
+      expect((await post('/api/broker/etoro/demo/intents', routeIntent(), false)).json.error.code).toBe('OPERATOR_AUTH_REQUIRED');
 
-      const created = await post('/api/broker/etoro/demo/intents', openInput());
+      const created = await post('/api/broker/etoro/demo/intents', routeIntent());
       expect(created.status).toBe(201);
       expect(created.json.intent.state).toBe('REJECTED');
       expect(created.json.intent.gateReasons).toContain('PORTFOLIO_SAFETY_NOT_CONNECTED');
+      expect(created.json.intent.intent.createdBy).toEqual({ kind: 'human', id: 'operator-pg' });
       intentId = created.json.intent.intentId;
 
       expect((await post('/api/broker/etoro/demo/intents/' + intentId + '/execute')).json.error.code).toBe('EXECUTION_LOCKED_IN_BUILD');
@@ -109,6 +122,7 @@ describe.skipIf(!pgAvailable)('O21 runtime on PostgreSQL' + (pgAvailable ? '' : 
     expect(everything).toContain(intentId);
     expect(everything).not.toContain(API_KEY_MARKER);
     expect(everything).not.toContain(USER_KEY_MARKER);
+    expect(everything).not.toContain(OPERATOR_TOKEN);
     expect(everything.toLowerCase()).not.toContain('x-api-key');
   });
 
@@ -122,7 +136,7 @@ describe.skipIf(!pgAvailable)('O21 runtime on PostgreSQL' + (pgAvailable ? '' : 
     );
     try {
       expect(runtime.config.etoroDemoExecution).toBe('disabled');
-      const res = await fetch(runtime.url + '/api/broker/etoro/demo/intents', { method: 'POST', body: JSON.stringify(openInput()) });
+      const res = await fetch(runtime.url + '/api/broker/etoro/demo/intents', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(routeIntent()) });
       expect(res.status).toBe(403);
       expect(((await res.json()) as { error: { code: string } }).error.code).toBe('EXECUTION_DISABLED');
     } finally {

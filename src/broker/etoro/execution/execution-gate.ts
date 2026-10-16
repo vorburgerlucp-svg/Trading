@@ -97,6 +97,34 @@ export interface GateVerdict {
   readonly policyVersion: typeof DEMO_EXECUTION_POLICY_VERSION;
 }
 
+interface BookCheck {
+  readonly name: string;
+  readonly reason: string;
+  readonly applies: (opens: boolean) => boolean;
+  readonly ok: (book: GateBook, exposureUsd: Decimal | null, policy: DemoExecutionPolicy, intent: ExecutionIntent) => boolean;
+}
+
+/** The checks that depend on the book of NEXUS intents. One table, used by the gate and by the atomic reservation. */
+const BOOK_CHECKS: readonly BookCheck[] = Object.freeze([
+  { name: 'maxExposure', reason: 'GROSS_EXPOSURE_ABOVE_LIMIT', applies: (o) => o, ok: (b, e, p) => e !== null && b.grossExposureUsd.plus(e).lte(p.maxGrossExposureUsd) },
+  { name: 'maxOpenPositions', reason: 'OPEN_POSITIONS_ABOVE_LIMIT', applies: (o) => o, ok: (b, _e, p) => b.liveIntentCount + 1 <= p.maxOpenPositions },
+  { name: 'existingPositionOrOrder', reason: 'INSTRUMENT_HAS_LIVE_POSITION_OR_ORDER', applies: (o) => o, ok: (b) => !b.instrumentHasLiveIntent },
+  { name: 'noAmbiguousIntent', reason: 'AMBIGUOUS_INTENT_UNRESOLVED', applies: (o) => o, ok: (b) => !b.anyAmbiguous },
+  { name: 'duplicateIntent', reason: 'DUPLICATE_INTENT', applies: () => true, ok: (b) => !b.activeDuplicate },
+  // A close needs a position NEXUS proved from broker-confirmed state, and no other close for it. Identity checks still apply.
+  { name: 'closeTargetKnown', reason: 'CLOSE_TARGET_UNKNOWN', applies: (o) => !o, ok: (b) => b.closeTargetKnown },
+  { name: 'closeTargetNotClosing', reason: 'CLOSE_TARGET_ALREADY_CLOSING', applies: (o) => !o, ok: (b) => !b.closeTargetAlreadyClosing },
+]);
+
+/**
+ * The book checks alone, for the reservation step: the service runs them inside the critical section of the intent log, after it
+ * caught up with every other process, so two intents cannot both pass against the same old book.
+ */
+export function bookRefusals(intent: ExecutionIntent, book: GateBook, exposureUsd: Decimal | null, policy: DemoExecutionPolicy): string[] {
+  const opens = intent.action === 'open';
+  return BOOK_CHECKS.filter((c) => c.applies(opens) && !c.ok(book, exposureUsd, policy, intent)).map((c) => c.reason);
+}
+
 function ageMs(now: string, at: string | null): number | null {
   if (at === null) return null;
   const ms = Date.parse(now) - Date.parse(at);
@@ -175,8 +203,6 @@ export function evaluateDemoExecutionGate(input: GateInput): GateVerdict {
   check('positionSizing', investment !== null && investment.isPositive() && investment.lte(policy.maxOrderInvestmentUsd), 'ORDER_SIZE_ABOVE_LIMIT', opens);
   check('leverage', intent.leverage >= 1 && intent.leverage <= policy.maxLeverage, 'LEVERAGE_ABOVE_LIMIT', opens);
   const exposure = investment === null ? null : investment.times(intent.leverage);
-  check('maxExposure', exposure !== null && input.book.grossExposureUsd.plus(exposure).lte(policy.maxGrossExposureUsd), 'GROSS_EXPOSURE_ABOVE_LIMIT', opens);
-  check('maxOpenPositions', input.book.liveIntentCount + 1 <= policy.maxOpenPositions, 'OPEN_POSITIONS_ABOVE_LIMIT', opens);
   // Cash and margin: clientPortfolio.credit is not verified (O20), so they cannot be checked. The exposure limit applies instead.
   checks.cashMargin = opens ? 'not_available' : 'not_applicable';
 
@@ -198,13 +224,9 @@ export function evaluateDemoExecutionGate(input: GateInput): GateVerdict {
     checks.triggerDistance = 'not_applicable';
   }
 
-  // The book: one live intent per instrument, no new risk while anything is ambiguous, no duplicate.
-  check('existingPositionOrOrder', !input.book.instrumentHasLiveIntent, 'INSTRUMENT_HAS_LIVE_POSITION_OR_ORDER', opens);
-  check('noAmbiguousIntent', !input.book.anyAmbiguous, 'AMBIGUOUS_INTENT_UNRESOLVED', opens);
-  check('duplicateIntent', !input.book.activeDuplicate, 'DUPLICATE_INTENT');
-  // A close needs a position NEXUS proved from broker-confirmed state, and no other close for it. Identity checks above still apply.
-  check('closeTargetKnown', input.book.closeTargetKnown, 'CLOSE_TARGET_UNKNOWN', !opens);
-  check('closeTargetNotClosing', !input.book.closeTargetAlreadyClosing, 'CLOSE_TARGET_ALREADY_CLOSING', !opens);
+  // The book: exposure and position limits, one live intent per instrument, no new risk while anything is ambiguous, no duplicate,
+  // and for a close a proved target that nothing else is closing. The same checks run again in the reservation step (bookRefusals).
+  for (const c of BOOK_CHECKS) check(c.name, c.ok(input.book, exposure, policy, intent), c.reason, c.applies(opens));
 
   // Broker connectivity: the last read-only sync succeeded recently. Checked before an open is written. A close does not depend on
   // it: the O20 sync refuses a non-empty portfolio, and a known position must stay closable.

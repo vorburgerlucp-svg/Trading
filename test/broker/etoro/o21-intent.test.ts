@@ -12,11 +12,11 @@ import {
   parseExecutionIntent,
   type IntentState,
 } from '../../../src/broker/etoro/execution/execution-intent.js';
-import { closeInput, openInput } from './o21-fixture.js';
+import { CREATOR, closeInput, openInput } from './o21-fixture.js';
 
 function refusal(input: unknown): string {
   try {
-    parseExecutionIntent(input);
+    parseExecutionIntent(input, CREATOR);
   } catch (error) {
     if (error instanceof DemoExecutionError && error.code === 'INTENT_INVALID') return error.message;
     throw error;
@@ -26,18 +26,18 @@ function refusal(input: unknown): string {
 
 describe('O21 intent: the minimum fields and a stable id', () => {
   it('an open intent carries every required field and a content-derived id', () => {
-    const intent = parseExecutionIntent(openInput());
+    const intent = parseExecutionIntent(openInput(), CREATOR);
     expect(intent).toMatchObject({
       action: 'open', side: 'buy', orderType: 'mkt', amount: '500', units: null, currency: 'USD', leverage: 1,
       stopLoss: '180', takeProfit: '230', createdAt: '2026-10-16T13:59:00.000Z', expiresAt: '2026-10-16T14:10:00.000Z', strategyRunId: 'run-o21-1',
     });
     expect(intent.intentId).toMatch(/^eint_[0-9a-f]{40}$/);
-    expect(parseExecutionIntent(openInput()).intentId).toBe(intent.intentId);
-    expect(parseExecutionIntent(openInput({ strategyRunId: 'run-o21-2' })).intentId).not.toBe(intent.intentId);
+    expect(parseExecutionIntent(openInput(), CREATOR).intentId).toBe(intent.intentId);
+    expect(parseExecutionIntent(openInput({ strategyRunId: 'run-o21-2' }), CREATOR).intentId).not.toBe(intent.intentId);
   });
 
   it('is frozen', () => {
-    expect(Object.isFrozen(parseExecutionIntent(openInput()))).toBe(true);
+    expect(Object.isFrozen(parseExecutionIntent(openInput(), CREATOR))).toBe(true);
   });
 });
 
@@ -83,13 +83,13 @@ describe('O21 intent: fail closed on input', () => {
   });
 
   it('a parsed close has no position until the service binds a broker-confirmed one, and the id covers the position', () => {
-    const unbound = parseExecutionIntent(closeInput('eint_' + 'a'.repeat(40)));
+    const unbound = parseExecutionIntent(closeInput('eint_' + 'a'.repeat(40)), CREATOR);
     expect(unbound.positionId).toBeNull();
     const bound = bindClosePosition(unbound, 2150941015);
     expect(bound.positionId).toBe(2150941015);
     expect(bound.intentId).not.toBe(unbound.intentId);
     expect(() => bindClosePosition(bound, 1)).toThrow(DemoExecutionError);
-    expect(() => bindClosePosition(parseExecutionIntent(openInput()), 1)).toThrow(DemoExecutionError);
+    expect(() => bindClosePosition(parseExecutionIntent(openInput(), CREATOR), 1)).toThrow(DemoExecutionError);
   });
 });
 
@@ -156,5 +156,24 @@ describe('O21 state machine', () => {
 
   it('the broker-confirmed states are the ones entered on broker knowledge', () => {
     expect([...BROKER_CONFIRMED_STATES].sort()).toEqual(['ACCEPTED', 'FILLED', 'PARTIALLY_FILLED', 'SUBMITTED']);
+  });
+});
+
+describe('O21 intent: the creator is trusted input, never part of the intent', () => {
+  it('an input that names createdBy is refused as an unknown field', () => {
+    expect(refusal({ ...openInput(), createdBy: { kind: 'human', id: 'someone' } })).toContain('unknown field createdBy');
+  });
+
+  it.each([
+    ['no creator', undefined],
+    ['a model', { kind: 'model', id: 'llm' }],
+    ['an invalid id', { kind: 'human', id: 'has space' }],
+    ['an extra field', { kind: 'human', id: 'operator-1', role: 'admin' }],
+  ])('a creator with %s is refused', (_label, creator) => {
+    expect(() => parseExecutionIntent(openInput(), creator)).toThrow(DemoExecutionError);
+  });
+
+  it('the creator is part of the content: the same input by another creator is another intent', () => {
+    expect(parseExecutionIntent(openInput(), { kind: 'human', id: 'operator-1' }).intentId).not.toBe(parseExecutionIntent(openInput(), CREATOR).intentId);
   });
 });

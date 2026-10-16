@@ -6,11 +6,13 @@
 //   execute  -> the risk gate again with fresh input; then SUBMITTING is persisted (with the request id) BEFORE the one write;
 //               the answer decides SUBMITTED, REJECTED or AMBIGUOUS
 //   refresh  -> reads the broker status (a read, retried): ACCEPTED, FILLED, PARTIALLY_FILLED, REJECTED, CANCELLED; an AMBIGUOUS
-//               intent is reconciled by its referenceId and is never resent
+//               intent is reconciled by its referenceId and is never resent; only positive broker evidence resolves it
 //   cancel   -> one cancel write for a pending order of an accepted open intent
 //
-// Every step is appended to four append-only logs. A state is entered at most once per intent (record id intentId:STATE), and the
-// SUBMITTING append runs with a precondition inside the log's critical section, so two processes cannot both submit one intent.
+// Every step is appended to four append-only logs. A state is entered at most once per intent (record id intentId:STATE). The
+// SUBMITTING append is the reservation step: its precondition runs inside the intent log's storage-backed critical section, after
+// catching up with every other process, and re-checks both the state and the book limits. So neither one intent twice nor two
+// intents against the same old book can be submitted, in one process or in several.
 // Nothing here writes to the ledger, books anything, or maps an instrument. No key, header or raw broker response is stored.
 
 import { randomUUID } from 'node:crypto';
@@ -27,6 +29,7 @@ import { CANCELLABLE_STATUS_IDS, ETORO_ORDER_STATUS, type BrokerOrderOutcome, ty
 import {
   DEFAULT_DEMO_EXECUTION_POLICY,
   ETORO_MAPPING_PROVIDER,
+  bookRefusals,
   evaluateDemoExecutionGate,
   type DemoExecutionPolicy,
   type GateBook,
@@ -46,8 +49,6 @@ import {
   type IntentState,
 } from './execution-intent.js';
 
-/** An AMBIGUOUS submission is only concluded "not received" when the broker has no order for its referenceId this long after it. */
-export const AMBIGUITY_NOT_FOUND_MIN_AGE_MS = 2 * 60_000;
 /** A SUBMITTING intent without a recorded answer this long after the write (a crash) is AMBIGUOUS. */
 export const SUBMITTING_STALE_AFTER_MS = 30_000;
 
@@ -80,6 +81,11 @@ export interface AttemptRecord {
   readonly requestId: string | null;
   readonly at: string;
   readonly outcome?: 'accepted' | 'rejected' | 'ambiguous' | 'not_sent' | 'gate_refused';
+  /**
+   * Who triggered the write: the validated human operator. Always present on a started execute or cancel attempt; absent only on a
+   * gate refusal, which sends nothing.
+   */
+  readonly by?: IntentActor;
   readonly httpStatus?: number | null;
   readonly code?: string;
   readonly reasons?: readonly string[];
@@ -106,7 +112,8 @@ export interface ReconciliationRecord {
   readonly intentId: string;
   /** The referenceId searched: the x-request-id of the ambiguous submission. */
   readonly referenceId: string;
-  readonly result: 'found' | 'not_found_decided' | 'not_found_pending';
+  /** not_found is never a conclusion: the intent stays AMBIGUOUS. */
+  readonly result: 'found' | 'not_found';
   readonly brokerOrderId: number | null;
   readonly statusId: number | null;
   readonly at: string;
@@ -136,8 +143,6 @@ export interface DemoExecutionServiceDeps {
   executionEnabled: boolean;
   clock: () => Date;
   policy?: DemoExecutionPolicy;
-  /** The build lock. The runtime always passes BUILD_LOCKS.etoroDemoExecution; there is no configuration for it. */
-  buildLocked?: boolean;
   requestId?: () => string;
 }
 
@@ -188,6 +193,15 @@ async function guarded<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Positive broker evidence for an AMBIGUOUS open (found by its referenceId): instrument, action open and transaction all match.
+ * A close never matches: close reconciliation by referenceId is not verified (see reconcileAmbiguous).
+ */
+function evidenceMatches(intent: ExecutionIntent, status: BrokerOrderStatus): boolean {
+  if (intent.action !== 'open' || status.instrumentId !== intent.etoroInstrumentId) return false;
+  return status.action === 'open' && status.transaction === (intent.side === 'buy' ? 'buy' : 'sellShort');
+}
+
 function statusName(statusId: number | null): string | null {
   if (statusId === null) return null;
   return (ETORO_ORDER_STATUS as Record<number, string>)[statusId] ?? null;
@@ -195,13 +209,16 @@ function statusName(statusId: number | null): string | null {
 
 export class EtoroDemoExecutionService {
   private readonly policy: DemoExecutionPolicy;
-  private readonly buildLocked: boolean;
   private readonly nextRequestId: () => string;
 
   constructor(private readonly deps: DemoExecutionServiceDeps) {
     this.policy = deps.policy ?? DEFAULT_DEMO_EXECUTION_POLICY;
-    this.buildLocked = deps.buildLocked ?? BUILD_LOCKS.etoroDemoExecution;
     this.nextRequestId = deps.requestId ?? randomUUID;
+  }
+
+  /** The compile-time build lock, read directly each time. There is no constructor option, configuration or setter for it. */
+  private get locked(): boolean {
+    return BUILD_LOCKS.etoroDemoExecution;
   }
 
   private now(): string {
@@ -226,7 +243,7 @@ export class EtoroDemoExecutionService {
       etoroDemoExecution: {
         environment: 'demo' as const,
         enabled: this.deps.executionEnabled,
-        buildLocked: this.buildLocked,
+        buildLocked: this.locked,
         approval: 'manual' as const,
         autonomous: false as const,
         policyVersion: this.policy.version,
@@ -236,10 +253,13 @@ export class EtoroDemoExecutionService {
 
   // ------------------------------------------------------------------------------------------------------------- create
 
-  /** Validates the input, stores CREATED, and runs the risk gate. Idempotent: the same input returns the existing intent. */
-  async create(input: unknown): Promise<IntentView> {
+  /**
+   * Validates the input, stores CREATED, and runs the risk gate. Idempotent: the same input returns the existing intent. The creator
+   * is a separate argument from trusted code (the runtime passes the authenticated operator); the input cannot name it.
+   */
+  async create(input: unknown, createdBy: IntentActor): Promise<IntentView> {
     await this.syncAll();
-    const parsed = parseExecutionIntent(input);
+    const parsed = parseExecutionIntent(input, createdBy);
     const intent = parsed.action === 'close' ? bindClosePosition(parsed, this.closePositionOf(parsed)) : parsed;
     const existing = this.projections().get(intent.intentId);
     if (existing) return this.view(existing);
@@ -290,9 +310,11 @@ export class EtoroDemoExecutionService {
    * intent APPROVED. SUBMITTING is persisted with the request id before the write, so a second execute, here or in another
    * process, is refused. The answer decides SUBMITTED, REJECTED or AMBIGUOUS. There is no retry.
    */
-  async execute(intentId: string): Promise<IntentView> {
+  async execute(intentId: string, by: IntentActor): Promise<IntentView> {
+    // The write boundary does not trust its caller: a validated human operator is required here, before anything else.
+    const operator = this.requireHumanOperator(by);
     if (!this.deps.executionEnabled) throw new DemoExecutionError('EXECUTION_DISABLED');
-    if (this.buildLocked) throw new DemoExecutionError('EXECUTION_LOCKED_IN_BUILD');
+    if (this.locked) throw new DemoExecutionError('EXECUTION_LOCKED_IN_BUILD');
     await this.syncAll();
     const p = this.require(intentId);
     if (p.state !== 'APPROVED') throw new DemoExecutionError('INTENT_STATE_INVALID', p.state);
@@ -301,32 +323,37 @@ export class EtoroDemoExecutionService {
       throw new DemoExecutionError('INTENT_STATE_INVALID', 'EXPIRED');
     }
 
-    const { verdict } = await this.runGate(p.intent, 'execute');
+    const { verdict, exposure } = await this.runGate(p.intent, 'execute');
     const nowMs = this.deps.clock().getTime();
     if (!verdict.passed || !this.deps.adapter.pacer.tryAcquire(nowMs)) {
-      const reasons = verdict.passed ? ['BROKER_WRITE_PACING'] : verdict.reasons;
-      const at = this.now();
-      const refusalId = 'eatt_' + hashOf({ intentId, gate: at, reasons }).slice(0, 40);
-      await this.deps.attempts.append(refusalId + ':refused', {
-        schema: 'etoro-demo-execution-attempt:v1', attemptId: refusalId, intentId, operation: 'gate', phase: 'refused', requestId: null, at, outcome: 'gate_refused', reasons,
-      });
+      const reasons = verdict.passed ? ['BROKER_WRITE_PACING'] : [...verdict.reasons];
+      await this.recordGateRefusal(intentId, reasons);
       throw new DemoExecutionError('GATE_REFUSED', reasons.join(','), reasons);
     }
 
     const requestId = this.nextRequestId().toLowerCase();
     const operation = p.intent.action === 'open' ? 'demo.order.open' : 'demo.position.close';
     const attemptId = 'eatt_' + hashOf({ intentId, operation, requestId }).slice(0, 40);
-    // The at-most-once guard: SUBMITTING is entered once, and only from APPROVED as seen inside the critical section.
-    const submitting = await guarded(() => this.deps.intents.append(intentId + ':SUBMITTING', {
-      schema: 'etoro-demo-intent-event:v1', intentId, state: 'SUBMITTING', from: 'APPROVED', at: this.now(), reason: 'SUBMISSION_STARTED', requestId, attemptId,
-    }, {
-      precondition: () => {
-        const current = this.projections().get(intentId);
-        if (!current || current.state !== 'APPROVED') throw new DemoExecutionError('INTENT_STATE_INVALID', current?.state ?? 'missing');
-      },
-    }));
+    // The reservation step and the at-most-once guard. SUBMITTING is entered once, only from APPROVED, and only if the book limits
+    // still hold for the book as it is inside the critical section, after every other process's records were applied.
+    let submitting;
+    try {
+      submitting = await guarded(() => this.deps.intents.append(intentId + ':SUBMITTING', {
+        schema: 'etoro-demo-intent-event:v1', intentId, state: 'SUBMITTING', from: 'APPROVED', at: this.now(), reason: 'SUBMISSION_STARTED', requestId, attemptId,
+      }, {
+        precondition: () => {
+          const current = this.projections().get(intentId);
+          if (!current || current.state !== 'APPROVED') throw new DemoExecutionError('INTENT_STATE_INVALID', current?.state ?? 'missing');
+          const refusals = bookRefusals(p.intent, this.book(p.intent), p.intent.action === 'open' ? exposure : null, this.policy);
+          if (refusals.length > 0) throw new DemoExecutionError('GATE_REFUSED', refusals.join(','), refusals);
+        },
+      }));
+    } catch (error) {
+      if (error instanceof DemoExecutionError && error.code === 'GATE_REFUSED') await this.recordGateRefusal(intentId, error.reasons);
+      throw error;
+    }
     if (submitting.status !== 'APPLIED') throw new DemoExecutionError('INTENT_STATE_INVALID', 'SUBMITTING');
-    await this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation, phase: 'started', requestId, at: this.now() });
+    await this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation, phase: 'started', requestId, at: this.now(), by: operator });
 
     let outcome: WriteOutcome<{ brokerOrderId?: number; closeOrderId?: number; statusId?: number }>;
     try {
@@ -394,19 +421,20 @@ export class EtoroDemoExecutionService {
   private async reconcileAmbiguous(p: Projection): Promise<IntentView> {
     const referenceId = p.submitRequestId;
     if (referenceId === null) throw new DemoExecutionError('INTENT_STATE_INVALID', 'no request id');
+    // An AMBIGUOUS close is not reconciled at all in O21: it is not verified that orders:lookup by referenceId finds close orders,
+    // so neither a negative nor a positive answer of it may decide a close. It stays AMBIGUOUS; no broker request is made.
+    if (p.intent.action === 'close') throw new DemoExecutionError('RECONCILIATION_PENDING', 'close reconciliation is not verified: the close stays AMBIGUOUS');
     const at = this.now();
     const read: ReadOutcome = await this.deps.adapter.lookupOrder({ referenceId });
     if (read.kind === 'not_found') {
-      const age = Date.parse(at) - Date.parse(p.submittingAt ?? at);
-      const decided = age >= AMBIGUITY_NOT_FOUND_MIN_AGE_MS;
-      const reconciliationId = await this.reconcile(p.intent.intentId, { referenceId, result: decided ? 'not_found_decided' : 'not_found_pending', brokerOrderId: null, statusId: null, at });
-      if (!decided) throw new DemoExecutionError('RECONCILIATION_PENDING', 'no order for the referenceId yet');
-      await this.transition(p.intent.intentId, 'RECONCILED', 'BROKER_HAS_NO_ORDER_FOR_REFERENCE', { reconciliationId });
-      await this.transition(p.intent.intentId, 'REJECTED', 'NOT_RECEIVED_BY_BROKER', { reconciliationId });
-      return this.get(p.intent.intentId);
+      // A negative lookup does not prove that the write never reached the broker, however long ago it was (and for a close it is
+      // not verified that this lookup finds close orders at all). It is recorded and decides nothing: the intent stays AMBIGUOUS.
+      await this.reconcile(p.intent.intentId, { referenceId, result: 'not_found', brokerOrderId: null, statusId: null, at });
+      throw new DemoExecutionError('RECONCILIATION_PENDING', 'no order found for the referenceId: the intent stays AMBIGUOUS');
     }
     const status = read.status;
-    if (status.instrumentId !== p.intent.etoroInstrumentId) throw new DemoExecutionError('BROKER_RESPONSE_INVALID', 'instrument does not match the intent');
+    // Only positive evidence that unambiguously belongs to this intent resolves it.
+    if (!evidenceMatches(p.intent, status)) throw new DemoExecutionError('BROKER_RESPONSE_INVALID', 'the order found does not match the intent');
     const reconciliationId = await this.reconcile(p.intent.intentId, { referenceId, result: 'found', brokerOrderId: status.brokerOrderId, statusId: status.statusId, at });
     await this.transition(p.intent.intentId, 'RECONCILED', 'BROKER_ORDER_FOUND_BY_REFERENCE', { reconciliationId });
     await this.applyStatus(this.require(p.intent.intentId), status, 'order_status');
@@ -436,18 +464,28 @@ export class EtoroDemoExecutionService {
   // ------------------------------------------------------------------------------------------------------------- cancel
 
   /** One cancel write for a pending order of an accepted open intent. The cancellation is confirmed by a later refresh. */
-  async cancel(intentId: string): Promise<IntentView> {
+  async cancel(intentId: string, by: IntentActor): Promise<IntentView> {
+    const operator = this.requireHumanOperator(by);
     if (!this.deps.executionEnabled) throw new DemoExecutionError('EXECUTION_DISABLED');
-    if (this.buildLocked) throw new DemoExecutionError('EXECUTION_LOCKED_IN_BUILD');
+    if (this.locked) throw new DemoExecutionError('EXECUTION_LOCKED_IN_BUILD');
     await this.syncAll();
     const p = this.require(intentId);
     if (p.intent.action !== 'open' || p.state !== 'ACCEPTED' || p.brokerOrderId === null) throw new DemoExecutionError('INTENT_STATE_INVALID', p.state);
     if (p.lastStatusId === null || !CANCELLABLE_STATUS_IDS.has(p.lastStatusId)) throw new DemoExecutionError('INTENT_STATE_INVALID', 'the order is not pending');
     if (!this.deps.adapter.pacer.tryAcquire(this.deps.clock().getTime())) throw new DemoExecutionError('GATE_REFUSED', 'BROKER_WRITE_PACING', ['BROKER_WRITE_PACING']);
+    // A new cancel is allowed only when every earlier cancel of this intent was conclusively refused by the broker (it did not act).
+    // An accepted, ambiguous or unfinished cancel blocks every further one: a cancel is never resent automatically or blindly.
+    const earlier = this.cancelAttempts(intentId);
+    if (earlier.some((outcome) => outcome !== 'rejected')) throw new DemoExecutionError('INTENT_STATE_INVALID', 'a cancel was sent and not conclusively refused');
     const requestId = this.nextRequestId().toLowerCase();
-    const attemptId = 'eatt_' + hashOf({ intentId, operation: 'demo.order.cancel' }).slice(0, 40);
-    // One cancel per intent: the started record id is fixed, so a second cancel is refused before it is sent.
-    const started = await guarded(() => this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation: 'demo.order.cancel', phase: 'started', requestId, at: this.now() }));
+    const attemptId = 'eatt_' + hashOf({ intentId, operation: 'demo.order.cancel', n: earlier.length }).slice(0, 40);
+    // The started record id is fixed per attempt number, and the precondition re-checks inside the critical section.
+    const started = await guarded(() => this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation: 'demo.order.cancel', phase: 'started', requestId, at: this.now(), by: operator }, {
+      precondition: () => {
+        const current = this.cancelAttempts(intentId);
+        if (current.length !== earlier.length || current.some((outcome) => outcome !== 'rejected')) throw new DemoExecutionError('INTENT_STATE_INVALID', 'a cancel is in progress');
+      },
+    }));
     if (started.status !== 'APPLIED') throw new DemoExecutionError('INTENT_STATE_INVALID', 'cancel already sent');
     const outcome = await this.deps.adapter.cancelOrder(p.brokerOrderId, requestId);
     if (outcome.kind === 'accepted') {
@@ -464,6 +502,15 @@ export class EtoroDemoExecutionService {
   }
 
   // -------------------------------------------------------------------------------------------------------- internals
+
+  /** A broker write needs a human operator with a valid id. Anything else is OPERATOR_INVALID, and nothing is sent. */
+  private requireHumanOperator(value: unknown): IntentActor {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new DemoExecutionError('OPERATOR_INVALID');
+    const v = value as Record<string, unknown>;
+    if (Object.keys(v).some((k) => k !== 'kind' && k !== 'id')) throw new DemoExecutionError('OPERATOR_INVALID');
+    if (v.kind !== 'human' || typeof v.id !== 'string' || !/^[A-Za-z0-9_.@-]{1,64}$/.test(v.id)) throw new DemoExecutionError('OPERATOR_INVALID');
+    return Object.freeze({ kind: 'human' as const, id: v.id });
+  }
 
   private parseApprover(value: unknown): IntentActor {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new DemoExecutionError('APPROVAL_INVALID');
@@ -505,6 +552,27 @@ export class EtoroDemoExecutionService {
       for (const id of c.brokerPositionIds) ids.add(id);
     }
     return [...ids];
+  }
+
+  /** The outcome of every cancel attempt of an intent, in order: accepted, rejected, ambiguous, or unfinished (a crash). */
+  private cancelAttempts(intentId: string): string[] {
+    const started: string[] = [];
+    const finished = new Map<string, string>();
+    for (const record of this.deps.attempts.all()) {
+      const a = record.payload;
+      if (a.intentId !== intentId || a.operation !== 'demo.order.cancel') continue;
+      if (a.phase === 'started') started.push(a.attemptId);
+      if (a.phase === 'finished' && a.outcome !== undefined) finished.set(a.attemptId, a.outcome);
+    }
+    return started.map((id) => finished.get(id) ?? 'unfinished');
+  }
+
+  private async recordGateRefusal(intentId: string, reasons: readonly string[]): Promise<void> {
+    const at = this.now();
+    const refusalId = 'eatt_' + hashOf({ intentId, gate: at, reasons }).slice(0, 40);
+    await this.deps.attempts.append(refusalId + ':refused', {
+      schema: 'etoro-demo-execution-attempt:v1', attemptId: refusalId, intentId, operation: 'gate', phase: 'refused', requestId: null, at, outcome: 'gate_refused', reasons,
+    });
   }
 
   private expired(intent: ExecutionIntent): boolean {
@@ -675,7 +743,7 @@ export class EtoroDemoExecutionService {
       intent,
       now,
       policy: this.policy,
-      buildLocked: this.buildLocked,
+      buildLocked: this.locked,
       executionEnabled: this.deps.executionEnabled,
       killSwitch: this.deps.killSwitch.current(),
       safety,

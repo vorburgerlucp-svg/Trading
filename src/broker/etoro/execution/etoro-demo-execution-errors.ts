@@ -9,6 +9,7 @@ export type DemoExecutionErrorCode =
   | 'INTENT_DUPLICATE'
   | 'INTENT_STATE_INVALID'
   | 'APPROVAL_INVALID'
+  | 'OPERATOR_INVALID'
   | 'GATE_REFUSED'
   | 'BROKER_AUTH_REQUIRED'
   | 'BROKER_RATE_LIMITED'
@@ -26,6 +27,7 @@ const FIXED_MESSAGE: Readonly<Record<DemoExecutionErrorCode, string>> = Object.f
   INTENT_DUPLICATE: 'an equivalent execution intent is already active',
   INTENT_STATE_INVALID: 'the execution intent is not in a state that allows this step',
   APPROVAL_INVALID: 'the approval is invalid: a named human must approve',
+  OPERATOR_INVALID: 'a broker write needs an authenticated human operator: nothing was sent to the broker',
   GATE_REFUSED: 'the execution gate refused the request: nothing was sent to the broker',
   BROKER_AUTH_REQUIRED: 'the broker rejected the credentials or the scope: demo write permission is required',
   BROKER_RATE_LIMITED: 'the broker rate limit applies: no retry is made',

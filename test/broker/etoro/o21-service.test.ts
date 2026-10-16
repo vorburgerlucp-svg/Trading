@@ -1,26 +1,17 @@
 // O21 eToro demo execution service: the gate, manual approval, at-most-once submission, ambiguous outcomes, reconciliation by read
 // only, cancel and close, broker confirmations, and no secret anywhere. No network: every broker answer is scripted and counted.
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// TEST ONLY: this file exercises the write path, so it replaces the compile-time lock for this test module. Production code has no
+// option, configuration or setter for the lock; the locked behaviour is tested without any mock in o21-build-lock.test.ts.
+vi.mock('../../../src/nexus/safety.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/nexus/safety.js')>();
+  return { ...actual, BUILD_LOCKS: Object.freeze({ ...actual.BUILD_LOCKS, etoroDemoExecution: false }) };
+});
 import { CapitalLedger } from '../../../src/capital/capital-ledger.js';
 import { DemoExecutionError } from '../../../src/broker/etoro/execution/etoro-demo-execution-errors.js';
 import { AAPL } from '../../market-data/fixtures.js';
-import {
-  API_KEY_MARKER,
-  ETORO_AAPL_ID,
-  HUMAN,
-  USER_KEY_MARKER,
-  approvedOpen,
-  closeInput,
-  filledOpen,
-  freshQuote,
-  lookupAnswer,
-  normalSafety,
-  o21Fixture,
-  openInput,
-  orderAccepted,
-  trippedKillSwitch,
-  type Fixture,
-} from './o21-fixture.js';
+import { CREATOR, API_KEY_MARKER, ETORO_AAPL_ID, HUMAN, O21_NOW, ScriptedBroker, USER_KEY_MARKER, approvedOpen, closeInput, filledOpen, freshQuote, inMemoryStores, lookupAnswer, normalSafety, o21Fixture, openInput, orderAccepted, trippedKillSwitch, type Fixture } from './o21-fixture.js';
 
 async function codeOf(promise: Promise<unknown>): Promise<{ code: string; reasons: readonly string[] }> {
   try {
@@ -39,7 +30,7 @@ function stored(f: Fixture): string {
 describe('O21 service: create and risk approval send nothing to the broker', () => {
   it('a valid open is RISK_APPROVED, and approval needs a named human', async () => {
     const f = await o21Fixture();
-    const created = await f.service.create(openInput());
+    const created = await f.service.create(openInput(), CREATOR);
     expect(created.state).toBe('RISK_APPROVED');
     expect((await codeOf(f.service.approve(created.intentId, { kind: 'strategy', id: 'strategy-a' }))).code).toBe('APPROVAL_INVALID');
     expect((await codeOf(f.service.approve(created.intentId, { kind: 'model', id: 'llm' }))).code).toBe('APPROVAL_INVALID');
@@ -52,23 +43,23 @@ describe('O21 service: create and risk approval send nothing to the broker', () 
 
   it('manual approval is required: an unapproved intent cannot execute', async () => {
     const f = await o21Fixture();
-    const created = await f.service.create(openInput());
-    expect((await codeOf(f.service.execute(created.intentId))).code).toBe('INTENT_STATE_INVALID');
+    const created = await f.service.create(openInput(), CREATOR);
+    expect((await codeOf(f.service.execute(created.intentId, HUMAN))).code).toBe('INTENT_STATE_INVALID');
     expect(f.broker.requests).toHaveLength(0);
   });
 
   it('creating the same input twice is idempotent: one intent, one CREATED record', async () => {
     const f = await o21Fixture();
-    const a = await f.service.create(openInput());
-    const b = await f.service.create(openInput());
+    const a = await f.service.create(openInput(), CREATOR);
+    const b = await f.service.create(openInput(), CREATOR);
     expect(b.intentId).toBe(a.intentId);
     expect(f.intents.all().filter((r) => r.payload.state === 'CREATED')).toHaveLength(1);
   });
 
   it('a duplicate intent (same trade, other timestamps) is refused while the first is active', async () => {
     const f = await o21Fixture();
-    await f.service.create(openInput());
-    expect((await codeOf(f.service.create(openInput({ createdAt: '2026-10-16T13:59:30.000Z' })))).code).toBe('INTENT_DUPLICATE');
+    await f.service.create(openInput(), CREATOR);
+    expect((await codeOf(f.service.create(openInput({ createdAt: '2026-10-16T13:59:30.000Z' }), CREATOR))).code).toBe('INTENT_DUPLICATE');
   });
 
   it('creation produces no ledger entry: the execution layer has no ledger access', async () => {
@@ -77,7 +68,7 @@ describe('O21 service: create and risk approval send nothing to the broker', () 
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next(orderAccepted());
-    await f.service.execute(id);
+    await f.service.execute(id, HUMAN);
     expect(ledger.head()).toEqual(before);
     expect(ledger.size).toBe(0);
   });
@@ -85,7 +76,7 @@ describe('O21 service: create and risk approval send nothing to the broker', () 
 
 describe('O21 service: the risk gate refuses, fail closed', () => {
   const rejectedWith = async (f: Fixture, input = openInput()) => {
-    const view = await f.service.create(input);
+    const view = await f.service.create(input, CREATOR);
     expect(view.state).toBe('REJECTED');
     expect(f.broker.requests).toHaveLength(0);
     return view.gateReasons;
@@ -132,7 +123,7 @@ describe('O21 service: the risk gate refuses, fail closed', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.setQuote(freshQuote({ observedAt: '2026-10-16T13:50:00.000Z' }));
-    const refused = await codeOf(f.service.execute(id));
+    const refused = await codeOf(f.service.execute(id, HUMAN));
     expect(refused.code).toBe('GATE_REFUSED');
     expect(refused.reasons).toContain('QUOTE_STALE_OR_MISSING');
     expect((await f.service.get(id)).state).toBe('APPROVED');
@@ -144,14 +135,14 @@ describe('O21 service: the risk gate refuses, fail closed', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     await f.killSwitch.latch(trippedKillSwitch());
-    expect((await codeOf(f.service.execute(id))).reasons).toContain('KILL_SWITCH_TRIPPED');
+    expect((await codeOf(f.service.execute(id, HUMAN))).reasons).toContain('KILL_SWITCH_TRIPPED');
     expect(f.broker.requests).toHaveLength(0);
   });
 
   it('a stale O20 broker sync refuses an open at execute', async () => {
     const f = await o21Fixture({ broker: { connection: 'error', lastSuccessfulSync: '2026-10-16T12:00:00.000Z' } });
     const id = await approvedOpen(f);
-    expect((await codeOf(f.service.execute(id))).reasons).toContain('BROKER_NOT_CONNECTED_OR_STALE');
+    expect((await codeOf(f.service.execute(id, HUMAN))).reasons).toContain('BROKER_NOT_CONNECTED_OR_STALE');
     expect(f.broker.requests).toHaveLength(0);
   });
 
@@ -159,32 +150,22 @@ describe('O21 service: the risk gate refuses, fail closed', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.advance(11 * 60_000);
-    expect((await codeOf(f.service.execute(id))).code).toBe('INTENT_STATE_INVALID');
+    expect((await codeOf(f.service.execute(id, HUMAN))).code).toBe('INTENT_STATE_INVALID');
     expect((await f.service.get(id)).state).toBe('EXPIRED');
     expect(f.broker.requests).toHaveLength(0);
   });
 });
 
-describe('O21 service: execution disabled and build lock', () => {
+describe('O21 service: execution disabled', () => {
+  it('the lock is replaced only in this test module', async () => {
+    const f = await o21Fixture();
+    expect(f.service.status().etoroDemoExecution.buildLocked).toBe(false);
+  });
+
   it('execution is refused when ETORO_DEMO_EXECUTION_ENABLED is off', async () => {
     const f = await o21Fixture({ executionEnabled: false });
     const id = await approvedOpen(f);
-    expect((await codeOf(f.service.execute(id))).code).toBe('EXECUTION_DISABLED');
-    expect(f.broker.requests).toHaveLength(0);
-  });
-
-  it('without an explicit lock the service uses BUILD_LOCKS.etoroDemoExecution, which is closed: no write is possible', async () => {
-    const f = await o21Fixture({ buildLocked: 'default' });
-    const id = await approvedOpen(f);
-    expect(f.service.status().etoroDemoExecution.buildLocked).toBe(true);
-    expect((await codeOf(f.service.execute(id))).code).toBe('EXECUTION_LOCKED_IN_BUILD');
-    expect(f.broker.requests).toHaveLength(0);
-  });
-
-  it('a closed lock also refuses a cancel', async () => {
-    const f = await o21Fixture({ buildLocked: true });
-    const id = await approvedOpen(f);
-    expect((await codeOf(f.service.cancel(id))).code).toBe('EXECUTION_LOCKED_IN_BUILD');
+    expect((await codeOf(f.service.execute(id, HUMAN))).code).toBe('EXECUTION_DISABLED');
     expect(f.broker.requests).toHaveLength(0);
   });
 });
@@ -194,7 +175,7 @@ describe('O21 service: the one write', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next(orderAccepted());
-    const view = await f.service.execute(id);
+    const view = await f.service.execute(id, HUMAN);
     expect(view.state).toBe('SUBMITTED');
     expect(view.brokerOrderId).toBe(13902598);
     expect(f.broker.requests).toHaveLength(1);
@@ -215,7 +196,7 @@ describe('O21 service: the one write', () => {
       seenAtWrite = f.intents.get(id + ':SUBMITTING')?.payload.requestId ?? 'missing';
       return { status: 200, body: { orderId: 13902598, referenceId: request.headers['x-request-id'] } };
     });
-    await f.service.execute(id);
+    await f.service.execute(id, HUMAN);
     expect(seenAtWrite).toBe(f.broker.requests[0]?.headers['x-request-id']);
     expect(f.attempts.get(f.intents.get(id + ':SUBMITTING')!.payload.attemptId + ':started')?.payload.requestId).toBe(seenAtWrite);
   });
@@ -224,15 +205,15 @@ describe('O21 service: the one write', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next({ status: 200, body: { orderId: 13902598, referenceId: '11111111-1111-4111-8111-111111111111' } });
-    expect((await f.service.execute(id)).state).toBe('AMBIGUOUS');
+    expect((await f.service.execute(id, HUMAN)).state).toBe('AMBIGUOUS');
   });
 
   it('a second execute of the same intent sends 0 broker requests', async () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next(orderAccepted());
-    await f.service.execute(id);
-    expect((await codeOf(f.service.execute(id))).code).toBe('INTENT_STATE_INVALID');
+    await f.service.execute(id, HUMAN);
+    expect((await codeOf(f.service.execute(id, HUMAN))).code).toBe('INTENT_STATE_INVALID');
     expect(f.broker.requests).toHaveLength(1);
   });
 
@@ -240,7 +221,7 @@ describe('O21 service: the one write', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next(orderAccepted(), orderAccepted());
-    const results = await Promise.allSettled([f.service.execute(id), f.service.execute(id)]);
+    const results = await Promise.allSettled([f.service.execute(id, HUMAN), f.service.execute(id, HUMAN)]);
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     expect(f.broker.writes).toHaveLength(1);
   });
@@ -249,7 +230,7 @@ describe('O21 service: the one write', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next({ status });
-    const view = await f.service.execute(id);
+    const view = await f.service.execute(id, HUMAN);
     expect(view.state).toBe('REJECTED');
     expect(view.history.at(-1)?.reason).toBe('BROKER_AUTH_REQUIRED');
     expect(f.broker.requests).toHaveLength(1);
@@ -259,17 +240,17 @@ describe('O21 service: the one write', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next({ status: 400, body: { title: 'validation failed' } });
-    expect((await f.service.execute(id)).history.at(-1)?.reason).toBe('BROKER_REJECTED');
+    expect((await f.service.execute(id, HUMAN)).history.at(-1)?.reason).toBe('BROKER_REJECTED');
   });
 
   it('a 429 is REJECTED with no retry, and Retry-After blocks the next write locally until it has passed', async () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next({ status: 429, headers: { 'retry-after': '60' } });
-    expect((await f.service.execute(id)).history.at(-1)?.reason).toBe('BROKER_RATE_LIMITED');
+    expect((await f.service.execute(id, HUMAN)).history.at(-1)?.reason).toBe('BROKER_RATE_LIMITED');
     expect(f.broker.requests).toHaveLength(1);
     const second = await approvedOpen(f, { strategyRunId: 'run-o21-2' });
-    expect((await codeOf(f.service.execute(second))).reasons).toContain('BROKER_WRITE_PACING');
+    expect((await codeOf(f.service.execute(second, HUMAN))).reasons).toContain('BROKER_WRITE_PACING');
     expect(f.broker.requests).toHaveLength(1);
     expect((await f.service.get(second)).state).toBe('APPROVED');
   });
@@ -278,7 +259,7 @@ describe('O21 service: the one write', () => {
     const f = await o21Fixture();
     for (let i = 0; i < 10; i++) expect(f.service['deps'].adapter.pacer.tryAcquire(Date.parse('2026-10-16T14:00:00.000Z'))).toBe(true);
     const id = await approvedOpen(f);
-    expect((await codeOf(f.service.execute(id))).reasons).toContain('BROKER_WRITE_PACING');
+    expect((await codeOf(f.service.execute(id, HUMAN))).reasons).toContain('BROKER_WRITE_PACING');
     expect(f.broker.requests).toHaveLength(0);
   });
 });
@@ -288,7 +269,7 @@ describe('O21 service: AMBIGUOUS execution, never retried', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next(answer);
-    const view = await f.service.execute(id);
+    const view = await f.service.execute(id, HUMAN);
     return { f, id, view };
   };
 
@@ -321,13 +302,13 @@ describe('O21 service: AMBIGUOUS execution, never retried', () => {
 
   it('after AMBIGUOUS there is 0 automatic write retry: execute is refused and sends nothing', async () => {
     const { f, id } = await ambiguousAfter({ throws: 'timeout' });
-    expect((await codeOf(f.service.execute(id))).code).toBe('INTENT_STATE_INVALID');
+    expect((await codeOf(f.service.execute(id, HUMAN))).code).toBe('INTENT_STATE_INVALID');
     expect(f.broker.writes).toHaveLength(1);
   });
 
   it('while an intent is AMBIGUOUS no new open is risk-approved', async () => {
     const { f } = await ambiguousAfter({ throws: 'timeout' });
-    const other = await f.service.create(openInput({ strategyRunId: 'run-o21-2', amount: '400' }));
+    const other = await f.service.create(openInput({ strategyRunId: 'run-o21-2', amount: '400' }), CREATOR);
     expect(other.state).toBe('REJECTED');
     expect(other.gateReasons).toContain('AMBIGUOUS_INTENT_UNRESOLVED');
   });
@@ -347,16 +328,77 @@ describe('O21 service: AMBIGUOUS execution, never retried', () => {
     expect(f.reconciliations.all().map((r) => r.payload.result)).toEqual(['found']);
   });
 
-  it('no order for the referenceId stays AMBIGUOUS at first, and is concluded "not received" only after the minimum age', async () => {
+  it.each([
+    ['immediately', 0],
+    ['after 2 minutes', 2 * 60_000],
+    ['after 1 hour', 60 * 60_000],
+  ])('a negative lookup (404) %s never resolves AMBIGUOUS: it stays AMBIGUOUS, RECONCILIATION_PENDING', async (_label, delay) => {
     const { f, id } = await ambiguousAfter({ throws: 'timeout' });
+    f.advance(delay);
+    f.broker.next({ status: 404 });
+    expect((await codeOf(f.service.refresh(id))).code).toBe('RECONCILIATION_PENDING');
+    const view = await f.service.get(id);
+    expect(view.state).toBe('AMBIGUOUS');
+    expect(view.history.map((h) => h.state)).not.toContain('REJECTED');
+    expect(view.history.map((h) => h.state)).not.toContain('RECONCILED');
+    expect(f.reconciliations.all().map((r) => r.payload.result)).toEqual(['not_found']);
+    expect(f.broker.writes).toHaveLength(1);
+  });
+
+  it('repeated refreshes with negative lookups send 0 writes and never conclude', async () => {
+    const { f, id } = await ambiguousAfter({ status: 502 });
+    for (let i = 0; i < 5; i++) {
+      f.advance(30 * 60_000);
+      f.broker.next({ status: 404 });
+      expect((await codeOf(f.service.refresh(id))).code).toBe('RECONCILIATION_PENDING');
+    }
+    expect((await f.service.get(id)).state).toBe('AMBIGUOUS');
+    expect(f.broker.writes).toHaveLength(1);
+    expect(f.broker.requests.filter((r) => r.method === 'GET')).toHaveLength(5);
+  });
+
+  it('while AMBIGUOUS, an economically equal new intent stays blocked, and so does any other open', async () => {
+    const { f, id } = await ambiguousAfter({ throws: 'timeout' });
+    f.advance(60 * 60_000);
     f.broker.next({ status: 404 });
     expect((await codeOf(f.service.refresh(id))).code).toBe('RECONCILIATION_PENDING');
     expect((await f.service.get(id)).state).toBe('AMBIGUOUS');
-    f.advance(2 * 60_000);
-    f.broker.next({ status: 404 });
-    const view = await f.service.refresh(id);
-    expect(view.state).toBe('REJECTED');
-    expect(view.history.at(-1)?.reason).toBe('NOT_RECEIVED_BY_BROKER');
+    const later = { createdAt: '2026-10-16T15:00:00.000Z', expiresAt: '2026-10-16T15:10:00.000Z' };
+    expect((await codeOf(f.service.create(openInput(later), CREATOR))).code).toBe('INTENT_DUPLICATE');
+    const other = await f.service.create(openInput({ ...later, strategyRunId: 'run-o21-other', amount: '300' }), CREATOR);
+    expect(other.state).toBe('REJECTED');
+    expect(other.gateReasons).toContain('AMBIGUOUS_INTENT_UNRESOLVED');
+    expect(f.broker.writes).toHaveLength(1);
+  });
+
+  it('an AMBIGUOUS close is not reconciled by orders:lookup at all (not verified for closes): it stays AMBIGUOUS, and the position cannot be closed again meanwhile', async () => {
+    const f = await o21Fixture();
+    const openId = await filledOpen(f);
+    const close = await f.service.create(closeInput(openId), CREATOR);
+    await f.service.approve(close.intentId, HUMAN);
+    f.broker.next({ throws: 'timeout' });
+    expect((await f.service.execute(close.intentId, HUMAN)).state).toBe('AMBIGUOUS');
+    const requestsAfterWrite = f.broker.requests.length;
+    for (const delay of [0, 2 * 60_000, 60 * 60_000]) {
+      f.advance(delay);
+      expect((await codeOf(f.service.refresh(close.intentId))).code).toBe('RECONCILIATION_PENDING');
+      expect((await f.service.get(close.intentId)).state).toBe('AMBIGUOUS');
+    }
+    // No read was made: neither a negative nor a positive lookup answer could decide the close.
+    expect(f.broker.requests).toHaveLength(requestsAfterWrite);
+    const again = await f.service.create(closeInput(openId, { strategyRunId: 'run-o21-close-2', createdAt: '2026-10-16T15:00:00.000Z', expiresAt: '2026-10-16T15:10:00.000Z' }), CREATOR);
+    expect(again.state).toBe('REJECTED');
+    expect(again.gateReasons).toContain('CLOSE_TARGET_ALREADY_CLOSING');
+    expect(f.broker.writes).toHaveLength(2);
+  });
+
+  it('positive evidence that does not belong to the intent (other action or transaction) is refused and resolves nothing', async () => {
+    const { f, id } = await ambiguousAfter({ throws: 'timeout' });
+    const mismatch = lookupAnswer(3, { positionIds: [1] }) as { status: number; body: Record<string, unknown> };
+    f.broker.next({ status: 200, body: { ...mismatch.body, transaction: 'sellShort' } }, { status: 200, body: { ...mismatch.body, action: 'close' } });
+    expect((await codeOf(f.service.refresh(id))).code).toBe('BROKER_RESPONSE_INVALID');
+    expect((await codeOf(f.service.refresh(id))).code).toBe('BROKER_RESPONSE_INVALID');
+    expect((await f.service.get(id)).state).toBe('AMBIGUOUS');
     expect(f.broker.writes).toHaveLength(1);
   });
 
@@ -388,7 +430,7 @@ describe('O21 service: broker confirmation and status', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next(orderAccepted(), lookupAnswer(2), lookupAnswer(3, { positionIds: [2150941015] }));
-    await f.service.execute(id);
+    await f.service.execute(id, HUMAN);
     await f.service.refresh(id);
     const view = await f.service.refresh(id);
     expect(view.state).toBe('FILLED');
@@ -404,7 +446,7 @@ describe('O21 service: broker confirmation and status', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next(orderAccepted(), lookupAnswer(3, { instrumentId: 4242 }), lookupAnswer(99));
-    await f.service.execute(id);
+    await f.service.execute(id, HUMAN);
     expect((await codeOf(f.service.refresh(id))).code).toBe('BROKER_RESPONSE_INVALID');
     expect((await codeOf(f.service.refresh(id))).code).toBe('BROKER_RESPONSE_INVALID');
     expect((await f.service.get(id)).state).toBe('SUBMITTED');
@@ -414,7 +456,7 @@ describe('O21 service: broker confirmation and status', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next(orderAccepted(), lookupAnswer(5, { positionIds: [1] }), lookupAnswer(9, { positionIds: [1] }));
-    await f.service.execute(id);
+    await f.service.execute(id, HUMAN);
     expect((await f.service.refresh(id)).state).toBe('PARTIALLY_FILLED');
     expect((await f.service.refresh(id)).state).toBe('PARTIALLY_FILLED');
   });
@@ -425,14 +467,14 @@ describe('O21 service: cancel only a pending order', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f, { orderType: 'mit', triggerRate: '195' });
     f.broker.next(orderAccepted(), lookupAnswer(12), { status: 200, body: { token: '5fe065bc-f6f9-4897-a2ce-c4fccef73ff8' } });
-    await f.service.execute(id);
+    await f.service.execute(id, HUMAN);
     expect((await f.service.refresh(id)).state).toBe('ACCEPTED');
-    await f.service.cancel(id);
+    await f.service.cancel(id, HUMAN);
     const cancel = f.broker.requests[2]!;
     expect(cancel.method).toBe('DELETE');
     expect(cancel.url).toBe('https://public-api.etoro.com/api/v2/trading/execution/demo/orders/13902598');
     expect(cancel.body).toBeUndefined();
-    expect((await codeOf(f.service.cancel(id))).code).toBe('INTENT_STATE_INVALID');
+    expect((await codeOf(f.service.cancel(id, HUMAN))).code).toBe('INTENT_STATE_INVALID');
     expect(f.broker.writes).toHaveLength(2);
     f.broker.next(lookupAnswer(7));
     expect((await f.service.refresh(id)).state).toBe('CANCELLED');
@@ -442,7 +484,7 @@ describe('O21 service: cancel only a pending order', () => {
     const f = await o21Fixture();
     const id = await filledOpen(f);
     const writes = f.broker.writes.length;
-    expect((await codeOf(f.service.cancel(id))).code).toBe('INTENT_STATE_INVALID');
+    expect((await codeOf(f.service.cancel(id, HUMAN))).code).toBe('INTENT_STATE_INVALID');
     expect(f.broker.writes).toHaveLength(writes);
   });
 
@@ -450,9 +492,9 @@ describe('O21 service: cancel only a pending order', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next(orderAccepted(), lookupAnswer(6));
-    await f.service.execute(id);
+    await f.service.execute(id, HUMAN);
     await f.service.refresh(id);
-    expect((await codeOf(f.service.cancel(id))).code).toBe('INTENT_STATE_INVALID');
+    expect((await codeOf(f.service.cancel(id, HUMAN))).code).toBe('INTENT_STATE_INVALID');
     expect(f.broker.writes).toHaveLength(1);
   });
 });
@@ -461,12 +503,12 @@ describe('O21 service: close only a known position', () => {
   it('closes the broker-confirmed position of a filled open, on the v1 demo close path with the reference body', async () => {
     const f = await o21Fixture();
     const openId = await filledOpen(f, 2150941015);
-    const close = await f.service.create(closeInput(openId));
+    const close = await f.service.create(closeInput(openId), CREATOR);
     expect(close.state).toBe('RISK_APPROVED');
     expect(close.intent.positionId).toBe(2150941015);
     await f.service.approve(close.intentId, HUMAN);
     f.broker.next({ status: 200, body: { orderForClose: { positionID: 2150941015, instrumentID: ETORO_AAPL_ID, unitsToDeduct: 2, orderID: 13904638, orderType: 19, statusID: 1, CID: 1 }, token: '5fe065bc-f6f9-4897-a2ce-c4fccef73ff8' } });
-    expect((await f.service.execute(close.intentId)).state).toBe('SUBMITTED');
+    expect((await f.service.execute(close.intentId, HUMAN)).state).toBe('SUBMITTED');
     const write = f.broker.requests.at(-1)!;
     expect(write.method).toBe('POST');
     expect(write.url).toBe('https://public-api.etoro.com/api/v1/trading/execution/demo/market-close-orders/positions/2150941015');
@@ -483,12 +525,12 @@ describe('O21 service: close only a known position', () => {
     g.setSafety(null);
     // A non-empty demo portfolio makes the O20 sync fail: its status is error and stale. A known position stays closable.
     g.setBroker({ connection: 'error', lastSuccessfulSync: null });
-    const close = await g.service.create(closeInput(id));
+    const close = await g.service.create(closeInput(id), CREATOR);
     expect(close.state).toBe('RISK_APPROVED');
     expect(close.gateReasons).toEqual([]);
     await g.service.approve(close.intentId, HUMAN);
     g.broker.next({ status: 200, body: { orderForClose: { positionID: 2150941015, instrumentID: ETORO_AAPL_ID, orderID: 13904638, statusID: 1 } } });
-    expect((await g.service.execute(close.intentId)).state).toBe('SUBMITTED');
+    expect((await g.service.execute(close.intentId, HUMAN)).state).toBe('SUBMITTED');
   });
 
   it('the identity checks still apply to a close: a removed mapping refuses it', async () => {
@@ -498,22 +540,22 @@ describe('O21 service: close only a known position', () => {
       { instrumentId: AAPL.instrumentId, provider: 'etoro', providerSymbol: String(ETORO_AAPL_ID), validFrom: '2026-10-01T00:00:00.000Z', validTo: '2026-10-16T14:00:00.000Z' },
       { at: '2026-10-16T14:00:00.000Z', by: { kind: 'human', id: 'mapping-owner' }, reason: 'O21 test: mapping closed' },
     );
-    const close = await f.service.create(closeInput(id));
+    const close = await f.service.create(closeInput(id), CREATOR);
     expect(close.state).toBe('REJECTED');
     expect(close.gateReasons).toContain('INSTRUMENT_MAPPING_MISSING_OR_MISMATCH');
   });
 
   it('an unknown close target is refused: a random intent, an open that is not filled, another instrument or side', async () => {
     const f = await o21Fixture();
-    expect((await codeOf(f.service.create(closeInput('eint_' + 'c'.repeat(40))))).code).toBe('INTENT_INVALID');
+    expect((await codeOf(f.service.create(closeInput('eint_' + 'c'.repeat(40)), CREATOR))).code).toBe('INTENT_INVALID');
     const submitted = await approvedOpen(f);
     f.broker.next(orderAccepted());
-    await f.service.execute(submitted);
-    expect((await codeOf(f.service.create(closeInput(submitted)))).code).toBe('INTENT_INVALID');
+    await f.service.execute(submitted, HUMAN);
+    expect((await codeOf(f.service.create(closeInput(submitted), CREATOR))).code).toBe('INTENT_INVALID');
     const g = await o21Fixture();
     const filled = await filledOpen(g);
-    expect((await codeOf(g.service.create(closeInput(filled, { side: 'sell' })))).code).toBe('INTENT_INVALID');
-    expect((await codeOf(g.service.create(closeInput(filled, { etoroInstrumentId: 4242 })))).code).toBe('INTENT_INVALID');
+    expect((await codeOf(g.service.create(closeInput(filled, { side: 'sell' }), CREATOR))).code).toBe('INTENT_INVALID');
+    expect((await codeOf(g.service.create(closeInput(filled, { etoroInstrumentId: 4242 }), CREATOR))).code).toBe('INTENT_INVALID');
     expect(g.broker.writes).toHaveLength(1);
   });
 
@@ -521,17 +563,17 @@ describe('O21 service: close only a known position', () => {
     const f = await o21Fixture();
     const id = await approvedOpen(f);
     f.broker.next(orderAccepted(), lookupAnswer(3, { positionIds: [] }));
-    await f.service.execute(id);
+    await f.service.execute(id, HUMAN);
     expect((await f.service.refresh(id)).state).toBe('FILLED');
-    expect((await codeOf(f.service.create(closeInput(id)))).code).toBe('INTENT_INVALID');
+    expect((await codeOf(f.service.create(closeInput(id), CREATOR))).code).toBe('INTENT_INVALID');
   });
 
   it('a second close of the same position is refused while the first is active', async () => {
     const f = await o21Fixture();
     const id = await filledOpen(f);
-    const first = await f.service.create(closeInput(id));
+    const first = await f.service.create(closeInput(id), CREATOR);
     expect(first.state).toBe('RISK_APPROVED');
-    const second = await f.service.create(closeInput(id, { strategyRunId: 'run-o21-close-2' }));
+    const second = await f.service.create(closeInput(id, { strategyRunId: 'run-o21-close-2' }), CREATOR);
     expect(second.state).toBe('REJECTED');
     expect(second.gateReasons).toContain('CLOSE_TARGET_ALREADY_CLOSING');
   });
@@ -543,12 +585,12 @@ describe('O21 service: no secret anywhere', () => {
     const messages: string[] = [];
     const a = await approvedOpen(f);
     f.broker.next(orderAccepted(), { status: 200, body: { ...((lookupAnswer(4) as { body: Record<string, unknown> }).body), status: { id: 4, name: 'Rejected', errorCode: 77, errorMessage: 'BROKER-FREE-TEXT ' + API_KEY_MARKER } } });
-    await f.service.execute(a);
+    await f.service.execute(a, HUMAN);
     await f.service.refresh(a);
     const b = await approvedOpen(f, { strategyRunId: 'run-o21-2' });
     f.broker.next({ status: 401, body: { detail: 'token ' + USER_KEY_MARKER } });
-    await f.service.execute(b);
-    messages.push((await codeOf(f.service.execute(b))).code);
+    await f.service.execute(b, HUMAN);
+    messages.push((await codeOf(f.service.execute(b, HUMAN))).code);
     const views = JSON.stringify(await f.service.list());
     const all = stored(f) + views + messages.join(' ');
     expect(all).not.toContain(API_KEY_MARKER);
@@ -570,5 +612,150 @@ describe('O21 service: no secret anywhere', () => {
       expect(message).not.toContain(API_KEY_MARKER);
       expect(message).not.toContain(USER_KEY_MARKER);
     }
+  });
+});
+
+describe('O21 service: manual cancel retry only after a conclusive refusal', () => {
+  /** An open whose order eToro reports Placed (status 2): it can be cancelled. */
+  const pendingOpen = async (f: Fixture): Promise<string> => {
+    const id = await approvedOpen(f, { orderType: 'mit', triggerRate: '195' });
+    f.broker.next(orderAccepted(), lookupAnswer(2));
+    await f.service.execute(id, HUMAN);
+    expect((await f.service.refresh(id)).state).toBe('ACCEPTED');
+    return id;
+  };
+  const cancelWrites = (f: Fixture) => f.broker.requests.filter((r) => r.method === 'DELETE').length;
+
+  it('after a 429 a later manual cancel is possible (once the Retry-After has passed), never automatically', async () => {
+    const f = await o21Fixture();
+    const id = await pendingOpen(f);
+    f.broker.next({ status: 429, headers: { 'retry-after': '30' } });
+    expect((await codeOf(f.service.cancel(id, HUMAN))).code).toBe('BROKER_RATE_LIMITED');
+    expect(cancelWrites(f)).toBe(1);
+    expect((await codeOf(f.service.cancel(id, HUMAN))).reasons).toContain('BROKER_WRITE_PACING');
+    expect(cancelWrites(f)).toBe(1);
+    f.advance(31_000);
+    f.broker.next({ status: 200, body: {} });
+    await f.service.cancel(id, HUMAN);
+    expect(cancelWrites(f)).toBe(2);
+  });
+
+  it.each([401, 403, 400])('after a %i a later manual cancel is possible', async (status) => {
+    const f = await o21Fixture();
+    const id = await pendingOpen(f);
+    f.broker.next({ status });
+    await codeOf(f.service.cancel(id, HUMAN));
+    f.broker.next({ status: 200, body: {} });
+    await f.service.cancel(id, HUMAN);
+    expect(cancelWrites(f)).toBe(2);
+  });
+
+  it('after an accepted cancel no further cancel is sent', async () => {
+    const f = await o21Fixture();
+    const id = await pendingOpen(f);
+    f.broker.next({ status: 200, body: {} });
+    await f.service.cancel(id, HUMAN);
+    expect((await codeOf(f.service.cancel(id, HUMAN))).code).toBe('INTENT_STATE_INVALID');
+    expect(cancelWrites(f)).toBe(1);
+  });
+
+  it.each([['a timeout', { throws: 'timeout' as const }], ['a 503', { status: 503 }], ['a malformed 2xx', { status: 200, raw: '<html>' }]])(
+    'after an ambiguous cancel (%s) no further cancel is ever sent',
+    async (_label, answer) => {
+      const f = await o21Fixture();
+      const id = await pendingOpen(f);
+      f.broker.next(answer);
+      await f.service.cancel(id, HUMAN);
+      f.advance(60 * 60_000);
+      expect((await codeOf(f.service.cancel(id, HUMAN))).code).toBe('INTENT_STATE_INVALID');
+      expect(cancelWrites(f)).toBe(1);
+    },
+  );
+
+  it('a cancel that was started without a recorded outcome (a crash) blocks every further cancel', async () => {
+    const f = await o21Fixture();
+    const id = await pendingOpen(f);
+    await f.attempts.append('eatt_crashed:started', { schema: 'etoro-demo-execution-attempt:v1', attemptId: 'eatt_crashed', intentId: id, operation: 'demo.order.cancel', phase: 'started', requestId: '33333333-3333-4333-8333-333333333333', at: O21_NOW });
+    expect((await codeOf(f.service.cancel(id, HUMAN))).code).toBe('INTENT_STATE_INVALID');
+    expect(cancelWrites(f)).toBe(0);
+  });
+
+  it('two concurrent manual cancels send at most 1 write', async () => {
+    const f = await o21Fixture();
+    const id = await pendingOpen(f);
+    f.broker.next({ status: 200, body: {} }, { status: 200, body: {} });
+    const results = await Promise.allSettled([f.service.cancel(id, HUMAN), f.service.cancel(id, HUMAN)]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(cancelWrites(f)).toBe(1);
+  });
+
+  it('two processes cancelling the same order at once send at most 1 write, also after a conclusive refusal', async () => {
+    const stores = inMemoryStores();
+    const broker = new ScriptedBroker();
+    const a = await o21Fixture({ stores, sharedBroker: broker });
+    const b = await o21Fixture({ stores, sharedBroker: broker });
+    const id = await pendingOpen(a);
+    broker.next({ status: 401 });
+    await codeOf(a.service.cancel(id, HUMAN));
+    broker.next({ status: 200, body: {} }, { status: 200, body: {} });
+    const results = await Promise.allSettled([a.service.cancel(id, HUMAN), b.service.cancel(id, HUMAN)]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(broker.requests.filter((r) => r.method === 'DELETE')).toHaveLength(2);
+  });
+});
+
+describe('O21 service: a validated human operator is required at the write boundary itself', () => {
+  const bad: ReadonlyArray<[string, unknown]> = [
+    ['no actor', undefined],
+    ['a strategy actor', { kind: 'strategy', id: 'strategy-a' }],
+    ['a model actor', { kind: 'model', id: 'llm' }],
+    ['a human without id', { kind: 'human' }],
+    ['an invalid id', { kind: 'human', id: 'op erator' }],
+    ['an extra field', { kind: 'human', id: 'operator-1', approvedBy: 'x' }],
+  ];
+
+  it.each(bad)('execute with %s is OPERATOR_INVALID: no reservation, 0 writes', async (_label, actor) => {
+    const f = await o21Fixture();
+    const id = await approvedOpen(f);
+    f.broker.next(orderAccepted());
+    expect((await codeOf(f.service.execute(id, actor as never))).code).toBe('OPERATOR_INVALID');
+    expect(f.broker.requests).toHaveLength(0);
+    expect(f.intents.get(id + ':SUBMITTING')).toBeUndefined();
+    expect((await f.service.get(id)).state).toBe('APPROVED');
+  });
+
+  it.each(bad)('cancel with %s is OPERATOR_INVALID: 0 writes', async (_label, actor) => {
+    const f = await o21Fixture();
+    const id = await approvedOpen(f, { orderType: 'mit', triggerRate: '195' });
+    f.broker.next(orderAccepted(), lookupAnswer(2));
+    await f.service.execute(id, HUMAN);
+    await f.service.refresh(id);
+    const before = f.broker.writes.length;
+    expect((await codeOf(f.service.cancel(id, actor as never))).code).toBe('OPERATOR_INVALID');
+    expect(f.broker.writes).toHaveLength(before);
+    expect(f.attempts.all().filter((r) => r.payload.operation === 'demo.order.cancel')).toHaveLength(0);
+  });
+
+  it('a human operator reaches the write path, and the started attempt records exactly that operator', async () => {
+    const f = await o21Fixture();
+    const id = await approvedOpen(f, { orderType: 'mit', triggerRate: '195' });
+    const operator = { kind: 'human' as const, id: 'operator-7' };
+    f.broker.next(orderAccepted(), lookupAnswer(2), { status: 200, body: {} });
+    expect((await f.service.execute(id, operator)).state).toBe('SUBMITTED');
+    await f.service.refresh(id);
+    await f.service.cancel(id, operator);
+    const started = f.attempts.all().map((r) => r.payload).filter((a) => a.phase === 'started');
+    expect(started.map((a) => a.operation)).toEqual(['demo.order.open', 'demo.order.cancel']);
+    for (const a of started) expect(a.by).toEqual({ kind: 'human', id: 'operator-7' });
+    expect(f.broker.writes).toHaveLength(2);
+  });
+
+  it('create takes the creator as a separate argument; an invalid creator stores nothing', async () => {
+    const f = await o21Fixture();
+    expect((await codeOf(f.service.create(openInput(), { kind: 'model', id: 'llm' } as never))).code).toBe('INTENT_INVALID');
+    expect((await codeOf(f.service.create({ ...openInput(), createdBy: HUMAN }, CREATOR))).code).toBe('INTENT_INVALID');
+    expect(f.intents.all()).toHaveLength(0);
+    const created = await f.service.create(openInput(), HUMAN);
+    expect(created.intent.createdBy).toEqual(HUMAN);
   });
 });

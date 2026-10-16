@@ -16,7 +16,7 @@ function services(overrides: Partial<RuntimeServices> = {}): RuntimeServices {
       providerHealth: 'not_configured',
       tradingMode: 'paper',
       liveTrading: 'locked',
-      buildLocks: { liveTrading: true, brokerOrders: true, physicalPurchase: true },
+      buildLocks: { liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true },
       version: 'test',
     }),
     searchInstruments: async () => [],

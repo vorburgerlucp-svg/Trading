@@ -76,3 +76,36 @@ describe('O21 config: ETORO_DEMO_EXECUTION_ENABLED', () => {
     expect(text).not.toContain('pw-o21-hidden');
   });
 });
+
+describe('O21 config: operator authentication', () => {
+  const TOKEN = 'O21-CONFIG-OPERATOR-TOKEN-0123456789abcdef';
+
+  it('is not configured by default; there is no default operator or token', () => {
+    const config = loadRuntimeConfig({ ...BASE, ...ETORO, ETORO_DEMO_EXECUTION_ENABLED: '1' });
+    expect(config.operator).toBeNull();
+    expect(summarizeRuntimeConfig(config).operatorAuth).toBe('not_configured');
+  });
+
+  it('both variables configure the operator; the summary states it and never contains the token', () => {
+    const config = loadRuntimeConfig({ ...BASE, ...ETORO, NEXUS_OPERATOR_ID: 'operator-1', NEXUS_OPERATOR_TOKEN: TOKEN });
+    expect(config.operator).toEqual({ id: 'operator-1', token: TOKEN });
+    const summary = summarizeRuntimeConfig(config);
+    expect(summary.operatorAuth).toBe('configured');
+    expect(JSON.stringify(summary)).not.toContain(TOKEN);
+  });
+
+  it.each([
+    ['only the id', { NEXUS_OPERATOR_ID: 'operator-1' }],
+    ['only the token', { NEXUS_OPERATOR_TOKEN: TOKEN }],
+    ['a short token', { NEXUS_OPERATOR_ID: 'operator-1', NEXUS_OPERATOR_TOKEN: 'short-token' }],
+    ['a token with a space', { NEXUS_OPERATOR_ID: 'operator-1', NEXUS_OPERATOR_TOKEN: 'O21 TOKEN WITH SPACES 0123456789abcdef' }],
+    ['an invalid id', { NEXUS_OPERATOR_ID: 'op erator', NEXUS_OPERATOR_TOKEN: TOKEN }],
+    ['a token equal to a broker key', { NEXUS_OPERATOR_ID: 'operator-1', NEXUS_OPERATOR_TOKEN: 'O21-CONFIG-API-KEY-padding-to-32-characters' }],
+  ])('%s is CONFIG_INVALID, and the message never contains the token', (_label, env) => {
+    const etoro = _label === 'a token equal to a broker key' ? { ...ETORO, ETORO_API_KEY: 'O21-CONFIG-API-KEY-padding-to-32-characters' } : ETORO;
+    const error = refusal({ ...etoro, ...env });
+    expect(error.code).toBe('CONFIG_INVALID');
+    expect(error.message).not.toContain(TOKEN);
+    expect(error.message).not.toContain('O21-CONFIG-API-KEY-padding');
+  });
+});

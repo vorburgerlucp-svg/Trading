@@ -23,6 +23,7 @@ import type { EtoroBrokerService } from '../broker/etoro/etoro-broker-service.js
 import type { EtoroDemoExecutionService } from '../broker/etoro/execution/etoro-demo-execution-service.js';
 import type { BarsRequest, DemoExecutionRoutes, InstrumentRegisterRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
 import { RuntimeApiError } from './errors.js';
+import type { OperatorIdentity } from './operator-auth.js';
 
 /** A quote older than this is stale and is never usable for trading. */
 export const QUOTE_MAX_AGE_MS = 15 * 60 * 1000;
@@ -145,13 +146,14 @@ export class RuntimeServiceImpl implements RuntimeServices {
   constructor(private readonly deps: RuntimeDeps) {
     const execution = deps.etoroDemoExecution ?? null;
     if (execution !== null) {
+      // The operator is the identity the HTTP layer authenticated; it is the approver, and it is recorded on every write attempt.
       this.demoExecution = Object.freeze({
-        create: (intent: unknown) => execution.create(intent),
+        create: (intent: unknown, operator: OperatorIdentity) => execution.create(intent, { kind: operator.kind, id: operator.id }),
         get: (intentId: string) => execution.get(intentId),
-        approve: (intentId: string, approvedBy: unknown) => execution.approve(intentId, approvedBy),
-        execute: (intentId: string) => execution.execute(intentId),
+        approve: (intentId: string, operator: OperatorIdentity) => execution.approve(intentId, { kind: operator.kind, id: operator.id }),
+        execute: (intentId: string, operator: OperatorIdentity) => execution.execute(intentId, { kind: operator.kind, id: operator.id }),
         refresh: (intentId: string) => execution.refresh(intentId),
-        cancel: (intentId: string) => execution.cancel(intentId),
+        cancel: (intentId: string, operator: OperatorIdentity) => execution.cancel(intentId, { kind: operator.kind, id: operator.id }),
       });
     }
   }
@@ -180,7 +182,12 @@ export class RuntimeServiceImpl implements RuntimeServices {
       providerHealth: this.deps.provider ? this.deps.provider.health().state : 'not_configured',
       tradingMode: 'paper',
       liveTrading: 'locked',
-      buildLocks: { liveTrading: BUILD_LOCKS.liveTrading, brokerOrders: BUILD_LOCKS.brokerOrders, physicalPurchase: BUILD_LOCKS.physicalPurchase },
+      buildLocks: {
+        liveTrading: BUILD_LOCKS.liveTrading,
+        brokerOrders: BUILD_LOCKS.brokerOrders,
+        physicalPurchase: BUILD_LOCKS.physicalPurchase,
+        etoroDemoExecution: BUILD_LOCKS.etoroDemoExecution,
+      },
       version: this.deps.version,
     };
   }

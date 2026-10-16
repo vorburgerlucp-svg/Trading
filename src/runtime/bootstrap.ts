@@ -17,6 +17,7 @@ import { HttpsEtoroTransport, type EtoroCredentials, type EtoroTransport } from 
 import { HttpsDemoExecutionTransport, type DemoExecutionTransport } from '../broker/etoro/execution/etoro-demo-execution-transport.js';
 import type { AttemptRecord, ConfirmationRecord, IntentEvent, ReconciliationRecord } from '../broker/etoro/execution/etoro-demo-execution-service.js';
 import { createRuntimeHandler } from './app.js';
+import { OperatorAuthenticator } from './operator-auth.js';
 import { RuntimeConfigError, loadRuntimeConfig, summarizeRuntimeConfig, type Environment, type RuntimeConfig, type RuntimeConfigSummary } from './config.js';
 import { composeRuntime, type ComposeInput } from './compose.js';
 import { startHttpServer, type RunningServer } from './server.js';
@@ -78,7 +79,9 @@ export async function startRuntime(env: Environment, options: StartOptions = {})
       ...(etoro ? { etoro } : {}),
       ...(etoroDemoExecution ? { etoroDemoExecution } : {}),
     });
-    const server = await startHttpServer(createRuntimeHandler(services), { host: config.host, port: config.port });
+    // Operator authentication of the O21 control plane: from the configuration only. Without it, mutating demo routes are refused.
+    const operatorAuth = config.operator !== null ? new OperatorAuthenticator(config.operator) : null;
+    const server = await startHttpServer(createRuntimeHandler(services, { operatorAuth }), { host: config.host, port: config.port });
     return {
       url: server.url,
       config: summary,
