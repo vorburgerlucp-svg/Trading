@@ -69,6 +69,16 @@ export class PostgresLedgerStore implements LedgerStore {
     return new PostgresLedgerStore(pool, options.ledgerId, Object.freeze([...row.allowed_currencies]), options);
   }
 
+  /**
+   * Opens an existing ledger for reading only. It never creates the ledger row and never writes: a missing ledger is a refusal
+   * (store_unavailable). Use it where the ledger must not be mutated, such as a broker reconciliation.
+   */
+  static async openReadOnly(pool: PgPool, ledgerId: string): Promise<PostgresLedgerStore> {
+    const row = (await pool.query<{ base_currency: string; allowed_currencies: string[] }>('SELECT base_currency, allowed_currencies FROM ledgers WHERE ledger_id = $1', [ledgerId])).rows[0];
+    if (!row) throw new LedgerError('store_unavailable', 'ledger ' + ledgerId + ' does not exist; the read-only view does not create it');
+    return new PostgresLedgerStore(pool, ledgerId, Object.freeze([...row.allowed_currencies]), { ledgerId, baseCurrency: row.base_currency });
+  }
+
   loadAll(): Promise<readonly JournalEntry[]> {
     return this.loadAfterWith(this.pool, 0);
   }

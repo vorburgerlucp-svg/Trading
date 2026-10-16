@@ -32,7 +32,8 @@ export interface BrokerOpenOrder {
 
 export interface BrokerSnapshot {
   broker: string;
-  accountId: string;
+  /** The broker's stable account identifier, validated. Null when the broker exposes none: it is never invented. */
+  accountId: string | null;
   access: 'read_only';
   observedAt: string;
   retrievedAt: string;
@@ -87,7 +88,7 @@ export interface ReconciliationReport {
  */
 export function reconcileBrokerSnapshot(
   snapshot: BrokerSnapshot,
-  ledger: { portfolio: PortfolioSnapshot; balances: ReadonlyMap<AccountKey, AccountBalance> },
+  ledger: { portfolio: Pick<PortfolioSnapshot, 'positions'>; balances: ReadonlyMap<AccountKey, AccountBalance> },
 ): ReconciliationReport {
   const portfolio = ledger.portfolio;
   const issues: ReconciliationIssue[] = [];
