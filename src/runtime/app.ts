@@ -61,6 +61,11 @@ export interface RuntimeServices {
   quote(instrumentId: string): Promise<unknown>;
   runQuant(request: QuantRequest): Promise<unknown>;
   safetyStatus(): Promise<unknown>;
+  /** eToro demo, read-only (O20). There is no order method on this interface, and no route can reach one. */
+  etoroStatus(): Promise<unknown>;
+  etoroSync(): Promise<unknown>;
+  etoroSnapshot(): Promise<unknown>;
+  etoroReconciliation(requireFresh: boolean): Promise<unknown>;
 }
 
 const INSTRUMENT_ID = /^[A-Za-z0-9_.-]{1,128}$/;
@@ -85,6 +90,10 @@ const ROUTES: readonly Route[] = Object.freeze([
   { method: 'POST', path: '/api/quant/run' },
   { method: 'GET', path: '/api/safety/status' },
   { method: 'GET', path: '/api/paper/intents' },
+  { method: 'GET', path: '/api/broker/etoro/status' },
+  { method: 'POST', path: '/api/broker/etoro/sync' },
+  { method: 'GET', path: '/api/broker/etoro/snapshot' },
+  { method: 'GET', path: '/api/broker/etoro/reconciliation' },
 ]);
 
 function invalid(): never {
@@ -95,6 +104,14 @@ function requiredText(params: URLSearchParams, name: string): string {
   const value = params.get(name);
   if (value === null) invalid();
   return value;
+}
+
+/** An optional flag: absent or 0 is false, 1 is true, anything else is refused. */
+function optionalFlag(params: URLSearchParams, name: string): boolean {
+  const value = params.get(name);
+  if (value === null || value === '0') return false;
+  if (value === '1') return true;
+  return invalid();
 }
 
 export function parseInstrumentId(value: string): string {
@@ -218,6 +235,14 @@ export function createRuntimeHandler(services: RuntimeServices): (req: IncomingM
         case '/api/paper/intents':
           // The paper execution gate (O17) is not part of this build's main line yet; the route is reserved, not simulated.
           throw new RuntimeApiError('NOT_IMPLEMENTED');
+        case '/api/broker/etoro/status':
+          return send(res, 200, await services.etoroStatus());
+        case '/api/broker/etoro/sync':
+          return send(res, 200, await services.etoroSync());
+        case '/api/broker/etoro/snapshot':
+          return send(res, 200, await services.etoroSnapshot());
+        case '/api/broker/etoro/reconciliation':
+          return send(res, 200, await services.etoroReconciliation(optionalFlag(params, 'requireFresh')));
         default:
           throw new RuntimeApiError('NOT_FOUND');
       }

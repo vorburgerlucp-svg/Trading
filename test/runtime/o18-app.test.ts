@@ -35,6 +35,10 @@ function services(overrides: Partial<RuntimeServices> = {}): RuntimeServices {
     quote: async () => ({ quote: null }),
     runQuant: async () => ({ status: 'insufficient_data' }),
     safetyStatus: async () => ({ liveTradingAllowed: false }),
+    etoroStatus: async () => ({ etoro: { configured: false } }),
+    etoroSync: async () => ({}),
+    etoroSnapshot: async () => ({ snapshot: null }),
+    etoroReconciliation: async () => ({ reconciliation: null }),
     ...overrides,
   };
 }

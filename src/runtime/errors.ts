@@ -5,6 +5,7 @@ import { IndicatorError } from '../quant/indicators/common.js';
 import { MarketDataError } from '../market-data/market-data-provider.js';
 import { MarketDataIntegrityError, MarketDataStoreError } from '../market-data/market-data-store.js';
 import { InstrumentRegistryError, InstrumentRegistryIntegrityError } from '../market-data/instrument-registry.js';
+import { BrokerError } from '../broker/broker-errors.js';
 
 export type RuntimeErrorCode =
   | 'DATA_NOT_CONNECTED'
@@ -18,7 +19,14 @@ export type RuntimeErrorCode =
   | 'METHOD_NOT_ALLOWED'
   | 'PAYLOAD_TOO_LARGE'
   | 'NOT_IMPLEMENTED'
-  | 'INTERNAL_ERROR';
+  | 'INTERNAL_ERROR'
+  | 'BROKER_NOT_CONNECTED'
+  | 'BROKER_AUTH_REQUIRED'
+  | 'BROKER_RESPONSE_INVALID'
+  | 'BROKER_TIMEOUT'
+  | 'BROKER_RATE_LIMITED'
+  | 'BROKER_SNAPSHOT_STALE'
+  | 'BROKER_RECONCILIATION_FAILURE';
 
 const FIXED_MESSAGE: Readonly<Record<RuntimeErrorCode, string>> = Object.freeze({
   DATA_NOT_CONNECTED: 'market data is not connected; no data is returned in its place',
@@ -33,6 +41,13 @@ const FIXED_MESSAGE: Readonly<Record<RuntimeErrorCode, string>> = Object.freeze(
   PAYLOAD_TOO_LARGE: 'the request body is too large',
   NOT_IMPLEMENTED: 'this capability is not available in this build',
   INTERNAL_ERROR: 'internal error',
+  BROKER_NOT_CONNECTED: 'the broker is not connected or the read-only sync is not enabled: nothing is returned in its place',
+  BROKER_AUTH_REQUIRED: 'the broker rejected the credentials: check the configured demo keys',
+  BROKER_RESPONSE_INVALID: 'the broker response does not match the expected read-only schema',
+  BROKER_TIMEOUT: 'the broker did not answer in time',
+  BROKER_RATE_LIMITED: 'the broker rate limit applies: no retry is made',
+  BROKER_SNAPSHOT_STALE: 'the broker snapshot is stale: it is not current broker state',
+  BROKER_RECONCILIATION_FAILURE: 'the reconciliation could not be computed',
 });
 
 const STATUS: Readonly<Record<RuntimeErrorCode, number>> = Object.freeze({
@@ -48,6 +63,13 @@ const STATUS: Readonly<Record<RuntimeErrorCode, number>> = Object.freeze({
   PAYLOAD_TOO_LARGE: 413,
   NOT_IMPLEMENTED: 501,
   INTERNAL_ERROR: 500,
+  BROKER_NOT_CONNECTED: 503,
+  BROKER_AUTH_REQUIRED: 503,
+  BROKER_RESPONSE_INVALID: 502,
+  BROKER_TIMEOUT: 504,
+  BROKER_RATE_LIMITED: 429,
+  BROKER_SNAPSHOT_STALE: 409,
+  BROKER_RECONCILIATION_FAILURE: 500,
 });
 
 export class RuntimeApiError extends Error {
@@ -69,6 +91,7 @@ const MARKET_DATA_REQUEST = new Set(['invalid_symbol', 'bad_request', 'unsupport
 /** Maps any thrown value to the client-facing error. The original message is never copied into the response. */
 export function toRuntimeApiError(error: unknown): RuntimeApiError {
   if (error instanceof RuntimeApiError) return error;
+  if (error instanceof BrokerError) return new RuntimeApiError(error.code);
   if (error instanceof MarketDataError) {
     if (MARKET_DATA_NOT_CONNECTED.has(error.code)) return new RuntimeApiError('DATA_NOT_CONNECTED');
     if (MARKET_DATA_NOT_FOUND.has(error.code)) return new RuntimeApiError('INSTRUMENT_NOT_FOUND');
