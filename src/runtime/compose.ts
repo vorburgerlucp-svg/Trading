@@ -17,6 +17,18 @@ import type { EtoroReconciliationRecord, EtoroSnapshotRecord, EtoroSyncRecord, E
 import { EtoroBrokerService } from '../broker/etoro/etoro-broker-service.js';
 import { EtoroBrokerSyncAdapter } from '../broker/etoro/etoro-sync-adapter.js';
 import type { EtoroTransport } from '../broker/etoro/etoro-transport.js';
+import { EToroDemoExecutionAdapter } from '../broker/etoro/execution/etoro-demo-execution-adapter.js';
+import type { DemoExecutionTransport } from '../broker/etoro/execution/etoro-demo-execution-transport.js';
+import {
+  EtoroDemoExecutionService,
+  type AttemptRecord,
+  type ConfirmationRecord,
+  type DemoQuoteSource,
+  type DemoSafetySource,
+  type IntentEvent,
+  type ReconciliationRecord,
+} from '../broker/etoro/execution/etoro-demo-execution-service.js';
+import { NO_DEMO_SAFETY_SOURCE, storedQuoteSource } from './demo-execution-sources.js';
 
 export interface ComposeInput {
   instruments: AppendOnlyStore<InstrumentEvent>;
@@ -35,6 +47,20 @@ export interface ComposeInput {
     snapshots: AppendOnlyLog<EtoroSnapshotRecord>;
     reconciliations: AppendOnlyLog<EtoroReconciliationRecord>;
     syncs: AppendOnlyLog<EtoroSyncRecord>;
+  };
+  /**
+   * The eToro demo execution wiring (O21). Present only when ETORO_DEMO_EXECUTION_ENABLED=1. The build lock is never passed: the
+   * service always uses BUILD_LOCKS.etoroDemoExecution.
+   */
+  etoroDemoExecution?: {
+    transport: DemoExecutionTransport;
+    intents: AppendOnlyLog<IntentEvent>;
+    attempts: AppendOnlyLog<AttemptRecord>;
+    confirmations: AppendOnlyLog<ConfirmationRecord>;
+    reconciliations: AppendOnlyLog<ReconciliationRecord>;
+    /** TESTS ONLY. The entry point never passes them: the runtime has no eToro demo safety source, and quotes come from the store. */
+    safetyForTests?: DemoSafetySource;
+    quotesForTests?: DemoQuoteSource;
   };
 }
 
@@ -64,7 +90,29 @@ export async function composeRuntime(input: ComposeInput): Promise<RuntimeServic
         clock,
       })
     : null;
+  const executionInput = input.etoroDemoExecution;
+  const demoExecution = executionInput
+    ? new EtoroDemoExecutionService({
+        adapter: new EToroDemoExecutionAdapter({ transport: executionInput.transport, clock }),
+        intents: executionInput.intents,
+        attempts: executionInput.attempts,
+        confirmations: executionInput.confirmations,
+        reconciliations: executionInput.reconciliations,
+        registry,
+        killSwitch,
+        safety: executionInput.safetyForTests ?? NO_DEMO_SAFETY_SOURCE,
+        quotes: executionInput.quotesForTests ?? storedQuoteSource(input.marketData, input.marketDataMode),
+        brokerStatus: () => {
+          if (etoro === null) return { connection: 'not_connected', lastSuccessfulSync: null };
+          const status = etoro.status().etoro;
+          return { connection: status.connection, lastSuccessfulSync: status.lastSuccessfulSync };
+        },
+        executionEnabled: true,
+        clock,
+      })
+    : null;
   return createRuntimeServices({
+    etoroDemoExecution: demoExecution,
     registry,
     marketData,
     quant,

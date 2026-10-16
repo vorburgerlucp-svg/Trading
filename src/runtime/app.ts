@@ -1,5 +1,7 @@
 // HTTP surface of the NEXUS runtime (node:http, no framework). Read-only except the quant run, which writes an append-only
-// quant run record. Routes are a fixed table: there is no route that resets, unlocks, arms, enables live trading or places an order.
+// quant run record, and the O21 demo intent routes, which write only through the governed EtoroDemoExecutionService. Routes are a
+// fixed table: there is no route that resets, unlocks, arms or enables live trading, no generic order or request route, and no
+// real-account route.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { BAR_INTERVALS, type BarInterval } from '../market-data/market-data-types.js';
@@ -66,7 +68,27 @@ export interface RuntimeServices {
   etoroSync(): Promise<unknown>;
   etoroSnapshot(): Promise<unknown>;
   etoroReconciliation(requireFresh: boolean): Promise<unknown>;
+  /**
+   * eToro demo execution (O21). Absent when ETORO_DEMO_EXECUTION_ENABLED is off: every intent route then answers EXECUTION_DISABLED.
+   * Every method goes through the EtoroDemoExecutionService; a route never reaches the adapter or the transport.
+   */
+  demoExecution?: DemoExecutionRoutes;
 }
+
+/** The O21 intent operations a route can call. No method takes a broker id, a broker payload, a URL or a request id. */
+export interface DemoExecutionRoutes {
+  create(intent: unknown): Promise<unknown>;
+  get(intentId: string): Promise<unknown>;
+  approve(intentId: string, approvedBy: unknown): Promise<unknown>;
+  execute(intentId: string): Promise<unknown>;
+  refresh(intentId: string): Promise<unknown>;
+  cancel(intentId: string): Promise<unknown>;
+}
+
+const DEMO_INTENTS_PATH = '/api/broker/etoro/demo/intents';
+const DEMO_INTENT_ROUTE = /^\/api\/broker\/etoro\/demo\/intents(?:\/([^/]+)(?:\/(approve|execute|refresh|cancel))?)?$/;
+const INTENT_ID = /^eint_[0-9a-f]{40}$/;
+const ACTOR_ID = /^[A-Za-z0-9_.@-]{1,64}$/;
 
 const INSTRUMENT_ID = /^[A-Za-z0-9_.-]{1,128}$/;
 const PROVIDER_SYMBOL = /^[A-Za-z0-9._\-/:]{1,64}$/;
@@ -189,6 +211,82 @@ function registerBody(value: unknown): InstrumentRegisterRequest {
   return request;
 }
 
+/** A step route (execute, refresh, cancel) takes no input: the body is empty or exactly {}. */
+async function readEmptyBody(req: IncomingMessage): Promise<void> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    if (total > MAX_BODY_BYTES) throw new RuntimeApiError('PAYLOAD_TOO_LARGE');
+    chunks.push(buffer);
+  }
+  const text = Buffer.concat(chunks).toString('utf8').trim();
+  if (text === '') return;
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch {
+    invalid();
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value) || Object.keys(value).length > 0) invalid();
+}
+
+/** approve: exactly { approvedBy: { kind: 'human', id } }. */
+function approveBody(value: unknown): { kind: 'human'; id: string } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid();
+  const body = value as Record<string, unknown>;
+  if (Object.keys(body).length !== 1 || !('approvedBy' in body)) invalid();
+  const actor = body.approvedBy;
+  if (typeof actor !== 'object' || actor === null || Array.isArray(actor)) invalid();
+  const a = actor as Record<string, unknown>;
+  if (Object.keys(a).some((k) => k !== 'kind' && k !== 'id') || a.kind !== 'human' || typeof a.id !== 'string' || !ACTOR_ID.test(a.id)) invalid();
+  return { kind: 'human', id: a.id };
+}
+
+function demoExecution(services: RuntimeServices): DemoExecutionRoutes {
+  if (!services.demoExecution) throw new RuntimeApiError('EXECUTION_DISABLED');
+  return services.demoExecution;
+}
+
+/** The O21 intent routes. Returns false when the path is not one of them. */
+async function demoIntentRoute(services: RuntimeServices, req: IncomingMessage, res: ServerResponse, pathname: string, method: string): Promise<boolean> {
+  const match = DEMO_INTENT_ROUTE.exec(pathname);
+  if (!match) return false;
+  const [, id, step] = match;
+  if (id === undefined) {
+    if (method !== 'POST') throw new RuntimeApiError('METHOD_NOT_ALLOWED');
+    const body = await readJsonBody(req);
+    send(res, 201, { intent: await demoExecution(services).create(body) });
+    return true;
+  }
+  if (step === undefined ? method !== 'GET' : method !== 'POST') throw new RuntimeApiError('METHOD_NOT_ALLOWED');
+  if (!INTENT_ID.test(id)) invalid();
+  const routes = demoExecution(services);
+  switch (step) {
+    case undefined:
+      send(res, 200, { intent: await routes.get(id) });
+      return true;
+    case 'approve':
+      send(res, 200, { intent: await routes.approve(id, approveBody(await readJsonBody(req))) });
+      return true;
+    case 'execute':
+      await readEmptyBody(req);
+      send(res, 200, { intent: await routes.execute(id) });
+      return true;
+    case 'refresh':
+      await readEmptyBody(req);
+      send(res, 200, { intent: await routes.refresh(id) });
+      return true;
+    case 'cancel':
+      await readEmptyBody(req);
+      send(res, 200, { intent: await routes.cancel(id) });
+      return true;
+    default:
+      return false;
+  }
+}
+
 function send(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
@@ -204,6 +302,11 @@ export function createRuntimeHandler(services: RuntimeServices): (req: IncomingM
     try {
       const url = new URL(req.url ?? '/', 'http://localhost');
       const method = req.method ?? 'GET';
+      if (url.pathname === DEMO_INTENTS_PATH || url.pathname.startsWith(DEMO_INTENTS_PATH + '/')) {
+        if (url.search !== '') throw new RuntimeApiError('REQUEST_INVALID');
+        if (await demoIntentRoute(services, req, res, url.pathname, method)) return;
+        throw new RuntimeApiError('NOT_FOUND');
+      }
       const sameRoute = ROUTES.filter((route) => route.path === url.pathname);
       if (sameRoute.length === 0) throw new RuntimeApiError('NOT_FOUND');
       if (!sameRoute.some((route) => route.method === method)) throw new RuntimeApiError('METHOD_NOT_ALLOWED');

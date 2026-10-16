@@ -20,7 +20,8 @@ import type { QuantService } from '../quant/quant-service.js';
 import type { PortfolioKillSwitchStore } from '../safety/portfolio-kill-switch-store.js';
 import { BrokerError } from '../broker/broker-errors.js';
 import type { EtoroBrokerService } from '../broker/etoro/etoro-broker-service.js';
-import type { BarsRequest, InstrumentRegisterRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
+import type { EtoroDemoExecutionService } from '../broker/etoro/execution/etoro-demo-execution-service.js';
+import type { BarsRequest, DemoExecutionRoutes, InstrumentRegisterRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
 import { RuntimeApiError } from './errors.js';
 
 /** A quote older than this is stale and is never usable for trading. */
@@ -45,6 +46,8 @@ export interface RuntimeDeps {
   clock?: () => Date;
   /** The eToro demo read-only service. Absent when eToro is not enabled: the broker then reports not connected. */
   etoro?: EtoroBrokerService | null;
+  /** The eToro demo execution service (O21). Absent unless ETORO_DEMO_EXECUTION_ENABLED=1; the routes then answer EXECUTION_DISABLED. */
+  etoroDemoExecution?: EtoroDemoExecutionService | null;
 }
 
 function sanitizeName(value: unknown): string | null {
@@ -136,7 +139,22 @@ function quoteJson(quote: StoredQuote, freshness: 'fresh' | 'stale', mode: Marke
 }
 
 export class RuntimeServiceImpl implements RuntimeServices {
-  constructor(private readonly deps: RuntimeDeps) {}
+  /** O21: every intent route goes through the service; nothing here reaches the adapter or the transport. */
+  readonly demoExecution?: DemoExecutionRoutes;
+
+  constructor(private readonly deps: RuntimeDeps) {
+    const execution = deps.etoroDemoExecution ?? null;
+    if (execution !== null) {
+      this.demoExecution = Object.freeze({
+        create: (intent: unknown) => execution.create(intent),
+        get: (intentId: string) => execution.get(intentId),
+        approve: (intentId: string, approvedBy: unknown) => execution.approve(intentId, approvedBy),
+        execute: (intentId: string) => execution.execute(intentId),
+        refresh: (intentId: string) => execution.refresh(intentId),
+        cancel: (intentId: string) => execution.cancel(intentId),
+      });
+    }
+  }
 
   private now(): string {
     return toUtcIso((this.deps.clock ?? (() => new Date()))().getTime());
