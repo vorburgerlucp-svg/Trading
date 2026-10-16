@@ -2,7 +2,7 @@
 
 Status: demo only, read-only. No real-trading support, no write operation, no demo order, no order, modify or cancel method. Live trading and the build locks are unchanged.
 
-Branch: `feature/o20-etoro-demo-readonly-v1`, based on `origin/main` (ef6d9c3). This build has no live call to eToro: the verification is fixtures, unit tests and PostgreSQL tests. The first live demo smoke test is a later, separate step.
+Branch: `feature/o20-etoro-demo-readonly-v1`, based on `origin/main` (ef6d9c3). The automated verification is fixtures, unit tests and PostgreSQL tests; no test calls eToro. A manual live demo read-only smoke test succeeded on 2026-10-16 (section 16).
 
 ## 1. Purpose
 
@@ -105,7 +105,7 @@ The adapter returns a `BrokerSnapshot` with `broker = "etoro"`, `access = "read_
 |---|---|---|
 | `positions` | `verified_empty` | The demo container is empty in the live payload. Non-empty is refused. |
 | `openOrders` | `verified_empty` | Every order container is empty in the live payload. Non-empty is refused. |
-| `cash` | `not_read` | `clientPortfolio.credit` exists, but its fields and value structure are not observed. No amount is derived from it, so `cash` is `[]`. |
+| `cash` | `not_read` | `clientPortfolio.credit` exists and was a JSON number in the live demo response, but its currency and meaning are not verified. No amount is derived from it, so `cash` is `[]`. |
 | `accountId` | `null` | No stable account identifier is observed in the portfolio. None is invented, and no key-derived hash is used. |
 
 Because `cash` is not read, the reconciliation does not compare cash, and its output states the coverage. A `matched: true` result does not mean cash was checked.
@@ -162,9 +162,29 @@ Broker error codes map to the API with their stable code and a fixed message; th
 
 ## 15. Known open points
 
-- The first live demo read is not done. A live response with a non-empty portfolio is needed before any position, cash or order field is parsed.
+- The live demo read is done (section 16), but the portfolio was empty. A live response with a non-empty portfolio is needed before any position, cash or order field is parsed.
 - The open-orders authority (section 10) is not chosen.
-- The cash structure of `clientPortfolio.credit` is not observed.
+- `clientPortfolio.credit` was a JSON number in the live demo response. Its currency and meaning are not verified, so it is not read.
 - No stable account identifier is observed. The snapshot states `accountIdentity: not_observed`.
 - The `BrokerSnapshot.accountId` type is now nullable, for eToro. The IBKR work on the O19 branch uses its own types and is not changed by this build.
 - The instrument endpoints are not in the allowlist. If a mapping is later needed, they are added as separate GET operations, each with its own test.
+
+## 16. Live demo smoke (2026-10-16)
+
+A manual smoke test against the eToro demo environment, on commit `427c28e`, with a temporary loopback PostgreSQL and an empty `main` ledger. It is not part of `npm run check`.
+
+| Check | Result |
+|---|---|
+| External request | `GET /api/v1/trading/info/demo/portfolio` only, HTTP 200 (direct adapter and runtime sync) |
+| Payload | `clientPortfolio` recognized; it matches the parser |
+| `positions` | 0 |
+| Order arrays (`orders`, `stockOrders`, `entryOrders`, `exitOrders`, `ordersForOpen`, `ordersForClose`, `ordersForCloseMultiple`) | 0 each |
+| Snapshot | stored, `fresh` |
+| Reconciliation | stored, `matched: true`, 0 issues |
+| Ledger, kill switch, instrument mappings | unchanged before and after the sync |
+| Broker orders | 0 |
+| Secret leaks | none found in console, runtime logs, snapshot, sync and reconciliation records, database rows or HTTP responses |
+| Runtime routes | `/health`, `status`, `sync`, `snapshot`, `reconciliation`: 200 |
+| Execution and order routes | `order`, `place`, `orders`, `cancel`, `modify`, `close`: 404 |
+
+No demo write and no real trading took place.
