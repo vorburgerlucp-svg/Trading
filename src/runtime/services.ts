@@ -18,6 +18,8 @@ import {
 import { toUtcIso } from '../market-data/time.js';
 import type { QuantService } from '../quant/quant-service.js';
 import type { PortfolioKillSwitchStore } from '../safety/portfolio-kill-switch-store.js';
+import { BrokerError } from '../broker/broker-errors.js';
+import type { EtoroBrokerService } from '../broker/etoro/etoro-broker-service.js';
 import type { BarsRequest, InstrumentRegisterRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
 import { RuntimeApiError } from './errors.js';
 
@@ -41,6 +43,8 @@ export interface RuntimeDeps {
   ping: () => Promise<boolean>;
   version: string;
   clock?: () => Date;
+  /** The eToro demo read-only service. Absent when eToro is not enabled: the broker then reports not connected. */
+  etoro?: EtoroBrokerService | null;
 }
 
 function sanitizeName(value: unknown): string | null {
@@ -320,6 +324,31 @@ export class RuntimeServiceImpl implements RuntimeServices {
       liveTradingAllowed: false,
       alerts: state.status === 'TRIPPED' ? [{ code: 'KILL_SWITCH_LATCHED', severity: 'trip' }] : [],
     };
+  }
+
+  /** eToro status. Without the service, the broker is reported as not configured; no request is sent. */
+  async etoroStatus(): Promise<unknown> {
+    const etoro = this.deps.etoro ?? null;
+    if (etoro === null) {
+      return { etoro: { configured: false, tradingMode: 'demo', connection: 'not_connected', access: 'read_only', accountIdentity: 'not_observed', lastSuccessfulSync: null, lastErrorCode: null } };
+    }
+    return etoro.status();
+  }
+
+  async etoroSync(): Promise<unknown> {
+    const etoro = this.deps.etoro ?? null;
+    if (etoro === null) throw new BrokerError('BROKER_NOT_CONNECTED', 'eToro read-only sync is not enabled');
+    return etoro.sync();
+  }
+
+  async etoroSnapshot(): Promise<unknown> {
+    const etoro = this.deps.etoro ?? null;
+    return { snapshot: etoro === null ? null : await etoro.latestSnapshot() };
+  }
+
+  async etoroReconciliation(requireFresh: boolean): Promise<unknown> {
+    const etoro = this.deps.etoro ?? null;
+    return { reconciliation: etoro === null ? null : await etoro.latestReconciliation(requireFresh) };
   }
 }
 

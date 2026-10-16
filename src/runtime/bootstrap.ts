@@ -9,10 +9,18 @@ import { PostgresAppendOnlyStore } from '../persistence/postgres/postgres-append
 import type { MarketDataProvider } from '../market-data/market-data-provider.js';
 import { TwelveDataMarketDataProvider } from '../market-data/providers/twelve-data.js';
 import type { KillSwitchState } from '../safety/portfolio-safety-envelope.js';
+import { AppendOnlyLog } from '../persistence/append-only-log.js';
+import { PostgresLedgerStore } from '../persistence/postgres/postgres-ledger-store.js';
+import { CapitalLedger } from '../capital/capital-ledger.js';
+import type { EtoroReconciliationRecord, EtoroSnapshotRecord, EtoroSyncRecord } from '../broker/etoro/etoro-broker-service.js';
+import { HttpsEtoroTransport, type EtoroCredentials, type EtoroTransport } from '../broker/etoro/etoro-transport.js';
 import { createRuntimeHandler } from './app.js';
 import { RuntimeConfigError, loadRuntimeConfig, summarizeRuntimeConfig, type Environment, type RuntimeConfig, type RuntimeConfigSummary } from './config.js';
-import { composeRuntime } from './compose.js';
+import { composeRuntime, type ComposeInput } from './compose.js';
 import { startHttpServer, type RunningServer } from './server.js';
+
+/** The ledger NEXUS books into. The eToro reconciliation reads it and never writes to it. */
+const NEXUS_LEDGER_ID = 'main';
 
 export const RUNTIME_VERSION = 'nexus-runtime:v1' as const;
 
@@ -38,6 +46,8 @@ export interface RuntimeHandle {
 export interface StartOptions {
   /** Tests inject a fixture provider here. The entry point never passes one: the provider comes from the environment. */
   provider?: MarketDataProvider | null;
+  /** Tests inject a fixture eToro transport here. The entry point never passes one: eToro is reached through the public API. */
+  etoroTransport?: EtoroTransport;
   clock?: () => Date;
 }
 
@@ -49,6 +59,7 @@ export async function startRuntime(env: Environment, options: StartOptions = {})
     const stores = await openPostgresMarketDataStores(pool);
     const killSwitch = await PostgresAppendOnlyStore.open<KillSwitchState>(pool, 'portfolio-kill-switch');
     const summary = summarizeRuntimeConfig(config);
+    const etoro = config.etoro.enabled ? await openEtoro(pool, config, options) : undefined;
     const services = await composeRuntime({
       instruments: stores.instruments,
       marketData: stores.marketData,
@@ -59,6 +70,7 @@ export async function startRuntime(env: Environment, options: StartOptions = {})
       ping: () => ping(pool),
       version: RUNTIME_VERSION,
       ...(options.clock ? { clock: options.clock } : {}),
+      ...(etoro ? { etoro } : {}),
     });
     const server = await startHttpServer(createRuntimeHandler(services), { host: config.host, port: config.port });
     return {
@@ -112,6 +124,29 @@ async function requireMigratedDatabase(pool: PgPool): Promise<void> {
   if (!status.upToDate) {
     throw new RuntimeStartError('MIGRATIONS_PENDING', 'migrations ' + status.pending.join(', ') + ' are not applied: run npm run db:migrate (the runtime never migrates by itself)');
   }
+}
+
+/**
+ * The eToro demo read-only wiring (O20): the HTTPS transport with the configured keys, the ledger opened for reading only, and
+ * three append-only logs. Nothing here creates the ledger or writes to it. The keys are read once, here, and never persisted.
+ */
+async function openEtoro(pool: PgPool, config: RuntimeConfig, options: StartOptions): Promise<NonNullable<ComposeInput['etoro']>> {
+  const clock = options.clock ?? (() => new Date());
+  const transport = options.etoroTransport ?? new HttpsEtoroTransport({ credentials: etoroCredentials(config) });
+  const ledger = await CapitalLedger.open(await PostgresLedgerStore.openReadOnly(pool, NEXUS_LEDGER_ID));
+  return {
+    transport,
+    ledger,
+    snapshots: await AppendOnlyLog.open<EtoroSnapshotRecord>('etoro-snapshots', await PostgresAppendOnlyStore.open<EtoroSnapshotRecord>(pool, 'etoro-snapshots'), { clock }),
+    reconciliations: await AppendOnlyLog.open<EtoroReconciliationRecord>('etoro-reconciliations', await PostgresAppendOnlyStore.open<EtoroReconciliationRecord>(pool, 'etoro-reconciliations'), { clock }),
+    syncs: await AppendOnlyLog.open<EtoroSyncRecord>('etoro-sync-events', await PostgresAppendOnlyStore.open<EtoroSyncRecord>(pool, 'etoro-sync-events'), { clock }),
+  };
+}
+
+function etoroCredentials(config: RuntimeConfig): EtoroCredentials {
+  const { apiKey, userKey } = config.etoro;
+  if (apiKey === null || userKey === null) throw new RuntimeConfigError('CONFIG_INVALID', 'ETORO_API_KEY and ETORO_USER_KEY are required when ETORO_ENABLED=1');
+  return { apiKey, userKey };
 }
 
 function providerFor(config: RuntimeConfig): MarketDataProvider | null {
