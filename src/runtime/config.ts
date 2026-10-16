@@ -44,6 +44,13 @@ export interface RuntimeConfig {
     readonly apiKey: string | null;
     readonly userKey: string | null;
   };
+  readonly etoroDemoExecution: {
+    /**
+     * ETORO_DEMO_EXECUTION_ENABLED=1 (O21). Off by default. It needs ETORO_ENABLED=1 and ETORO_TRADING_MODE=demo, and it does not
+     * open the build lock BUILD_LOCKS.etoroDemoExecution: with the lock closed, every demo broker write is still refused.
+     */
+    readonly enabled: boolean;
+  };
 }
 
 /** The loggable view: every secret is replaced by its state. */
@@ -55,6 +62,7 @@ export interface RuntimeConfigSummary {
   database: 'configured';
   marketData: 'production' | 'demo' | 'not_configured';
   etoro: 'demo_read_only' | 'not_configured';
+  etoroDemoExecution: 'enabled' | 'disabled';
 }
 
 const API_KEY = /^[A-Za-z0-9]{8,128}$/;
@@ -120,6 +128,14 @@ export function loadRuntimeConfig(env: Environment): RuntimeConfig {
     if (!isValidEtoroKey(etoroUserKey)) invalid('ETORO_USER_KEY has an invalid format');
   }
 
+  // eToro demo execution (O21). Exactly 0 or 1, not trimmed; missing or empty is off. On needs eToro on and the demo mode set.
+  const executionRaw = env.ETORO_DEMO_EXECUTION_ENABLED;
+  if (executionRaw !== undefined && executionRaw !== '' && executionRaw !== '0' && executionRaw !== '1') invalid('ETORO_DEMO_EXECUTION_ENABLED must be 1 or 0');
+  const demoExecutionEnabled = executionRaw === '1';
+  if (demoExecutionEnabled && (!etoroEnabled || etoroMode !== 'demo')) {
+    invalid('ETORO_DEMO_EXECUTION_ENABLED=1 requires ETORO_ENABLED=1 and ETORO_TRADING_MODE=demo');
+  }
+
   return Object.freeze({
     version: RUNTIME_CONFIG_VERSION,
     host,
@@ -138,6 +154,7 @@ export function loadRuntimeConfig(env: Environment): RuntimeConfig {
       apiKey: etoroEnabled && etoroApiKey !== undefined ? etoroApiKey : null,
       userKey: etoroEnabled && etoroUserKey !== undefined ? etoroUserKey : null,
     }),
+    etoroDemoExecution: Object.freeze({ enabled: demoExecutionEnabled }),
   });
 }
 
@@ -150,5 +167,6 @@ export function summarizeRuntimeConfig(config: RuntimeConfig): RuntimeConfigSumm
     database: 'configured',
     marketData: config.twelveData.apiKey !== null ? 'production' : config.twelveData.demo ? 'demo' : 'not_configured',
     etoro: config.etoro.enabled ? 'demo_read_only' : 'not_configured',
+    etoroDemoExecution: config.etoroDemoExecution.enabled ? 'enabled' : 'disabled',
   };
 }

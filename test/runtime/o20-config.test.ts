@@ -80,7 +80,7 @@ describe('O20 eToro configuration: the safety invariants are unchanged', () => {
     expect(config.tradingMode).toBe('paper');
     expect(config.allowLiveTrading).toBe(false);
     expect(summarizeRuntimeConfig(config)).toMatchObject({ tradingMode: 'paper', liveTrading: 'locked' });
-    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true });
+    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true });
   });
 
   it('no eToro variable can unlock live trading or an order', () => {
