@@ -4,11 +4,11 @@
 
 import { randomUUID } from 'node:crypto';
 import { BrokerError } from '../broker-errors.js';
+import { isValidEtoroKey } from './etoro-credentials.js';
 import { ETORO_ALLOWED_OPERATIONS, ETORO_BASE_URL, type EtoroOperation } from './etoro-readonly.js';
 
 export const ETORO_DEFAULT_TIMEOUT_MS = 10_000;
 export const ETORO_MAX_RESPONSE_BYTES = 1024 * 1024;
-const KEY_FORMAT = /^[\x21-\x7e]{1,256}$/;
 
 export interface EtoroCredentials {
   readonly apiKey: string;
@@ -73,7 +73,7 @@ export class HttpsEtoroTransport implements EtoroTransport {
   private readonly nextRequestId: () => string;
 
   constructor(private readonly options: HttpsEtoroTransportOptions) {
-    if (!KEY_FORMAT.test(options.credentials.apiKey) || !KEY_FORMAT.test(options.credentials.userKey)) {
+    if (!isValidEtoroKey(options.credentials.apiKey) || !isValidEtoroKey(options.credentials.userKey)) {
       throw new BrokerError('BROKER_AUTH_REQUIRED', 'the configured keys are missing or malformed');
     }
     this.timeoutMs = options.timeoutMs ?? ETORO_DEFAULT_TIMEOUT_MS;

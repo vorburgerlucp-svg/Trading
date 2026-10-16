@@ -28,6 +28,8 @@ Three headers on every request, and nothing else:
 
 The keys come only from the environment, through `src/runtime/config.ts`, and they are read only when `ETORO_ENABLED=1`. They are never logged, never returned by any route, never placed in an error message, never persisted, and never written into a snapshot or audit record. A malformed key is refused at start (`CONFIG_INVALID`); the message names the variable, not the value.
 
+One key rule applies in the configuration and in the transport (`src/broker/etoro/etoro-credentials.ts`): printable ASCII with no space and no control character, 1 to `ETORO_KEY_MAX_LENGTH` (1024) characters. Real user keys are longer than 256 characters. The configuration trims leading and trailing copy/paste whitespace; the transport never changes a key and refuses one that does not match.
+
 Tests prove this on the real transport with marker keys: the keys reach the request headers, and they appear in no stored record, no status, no view and no error (`test/broker/etoro/o20-service.test.ts`, `o20-transport.test.ts`).
 
 ## 4. Environment

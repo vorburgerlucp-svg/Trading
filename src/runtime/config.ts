@@ -5,6 +5,8 @@
 // TRADING_MODE=live and ALLOW_LIVE_TRADING=true make the start fail, and every other value that is not the exact safe one is refused.
 // Error messages never contain a secret or the database URL.
 
+import { isValidEtoroKey } from '../broker/etoro/etoro-credentials.js';
+
 export const RUNTIME_CONFIG_VERSION = 'nexus-runtime-config:v1' as const;
 
 export class RuntimeConfigError extends Error {
@@ -56,8 +58,6 @@ export interface RuntimeConfigSummary {
 }
 
 const API_KEY = /^[A-Za-z0-9]{8,128}$/;
-/** An eToro key is bounded and printable, with no space or control character. Its exact format is not assumed. */
-const ETORO_KEY = /^[\x21-\x7e]{1,256}$/;
 const DATABASE_URL = /^postgres(ql)?:\/\/\S+$/;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
@@ -116,8 +116,8 @@ export function loadRuntimeConfig(env: Environment): RuntimeConfig {
   const etoroUserKey = text(env, 'ETORO_USER_KEY');
   if (etoroEnabled) {
     if (etoroApiKey === undefined || etoroUserKey === undefined) invalid('ETORO_API_KEY and ETORO_USER_KEY are required when ETORO_ENABLED=1');
-    if (!ETORO_KEY.test(etoroApiKey)) invalid('ETORO_API_KEY has an invalid format');
-    if (!ETORO_KEY.test(etoroUserKey)) invalid('ETORO_USER_KEY has an invalid format');
+    if (!isValidEtoroKey(etoroApiKey)) invalid('ETORO_API_KEY has an invalid format');
+    if (!isValidEtoroKey(etoroUserKey)) invalid('ETORO_USER_KEY has an invalid format');
   }
 
   return Object.freeze({
