@@ -8,7 +8,9 @@ import type { TradingMode } from '../contracts.js';
 import type { CapitalBucket } from '../opportunities/opportunity-types.js';
 import type { DecisionOutcome, ExecutionGateResult } from './nexus-types.js';
 
-export const BUILD_LOCKS = Object.freeze({ liveTrading: true, brokerOrders: true, physicalPurchase: true } as const);
+// etoroDemoExecution (O21) is a separate lock for eToro DEMO execution only. It does not touch brokerOrders, which stays the lock of
+// every live or real broker order. true = locked: the demo execution layer refuses every broker write in this build.
+export const BUILD_LOCKS = Object.freeze({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true } as const);
 
 export interface SafetyConfig {
   readonly tradingMode: TradingMode;

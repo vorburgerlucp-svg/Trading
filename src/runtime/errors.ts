@@ -6,6 +6,7 @@ import { MarketDataError } from '../market-data/market-data-provider.js';
 import { MarketDataIntegrityError, MarketDataStoreError } from '../market-data/market-data-store.js';
 import { InstrumentRegistryError, InstrumentRegistryIntegrityError } from '../market-data/instrument-registry.js';
 import { BrokerError } from '../broker/broker-errors.js';
+import { DemoExecutionError } from '../broker/etoro/execution/etoro-demo-execution-errors.js';
 
 export type RuntimeErrorCode =
   | 'DATA_NOT_CONNECTED'
@@ -26,7 +27,23 @@ export type RuntimeErrorCode =
   | 'BROKER_TIMEOUT'
   | 'BROKER_RATE_LIMITED'
   | 'BROKER_SNAPSHOT_STALE'
-  | 'BROKER_RECONCILIATION_FAILURE';
+  | 'BROKER_RECONCILIATION_FAILURE'
+  | 'EXECUTION_DISABLED'
+  | 'EXECUTION_LOCKED_IN_BUILD'
+  | 'INTENT_INVALID'
+  | 'APPROVAL_INVALID'
+  | 'OPERATOR_INVALID'
+  | 'INTENT_NOT_FOUND'
+  | 'INTENT_STATE_INVALID'
+  | 'INTENT_DUPLICATE'
+  | 'GATE_REFUSED'
+  | 'BROKER_REJECTED'
+  | 'EXECUTION_AMBIGUOUS'
+  | 'RECONCILIATION_PENDING'
+  | 'OPERATOR_AUTH_REQUIRED'
+  | 'OPERATOR_AUTH_NOT_CONFIGURED'
+  | 'ORIGIN_REFUSED'
+  | 'UNSUPPORTED_MEDIA_TYPE';
 
 const FIXED_MESSAGE: Readonly<Record<RuntimeErrorCode, string>> = Object.freeze({
   DATA_NOT_CONNECTED: 'market data is not connected; no data is returned in its place',
@@ -48,6 +65,22 @@ const FIXED_MESSAGE: Readonly<Record<RuntimeErrorCode, string>> = Object.freeze(
   BROKER_RATE_LIMITED: 'the broker rate limit applies: no retry is made',
   BROKER_SNAPSHOT_STALE: 'the broker snapshot is stale: it is not current broker state',
   BROKER_RECONCILIATION_FAILURE: 'the reconciliation could not be computed',
+  EXECUTION_DISABLED: 'eToro demo execution is not enabled for this process',
+  EXECUTION_LOCKED_IN_BUILD: 'eToro demo execution is locked in this build: nothing was sent to the broker',
+  INTENT_INVALID: 'the execution intent is invalid',
+  APPROVAL_INVALID: 'the approval is invalid: a named human must approve',
+  OPERATOR_INVALID: 'a broker write needs an authenticated human operator: nothing was sent to the broker',
+  INTENT_NOT_FOUND: 'no such execution intent',
+  INTENT_STATE_INVALID: 'the execution intent is not in a state that allows this step',
+  INTENT_DUPLICATE: 'an equivalent execution intent is already active',
+  GATE_REFUSED: 'the execution gate refused the request: nothing was sent to the broker',
+  BROKER_REJECTED: 'the broker rejected the request',
+  EXECUTION_AMBIGUOUS: 'the outcome at the broker is unknown: the intent is never resent; reconcile it first',
+  RECONCILIATION_PENDING: 'the broker state does not yet decide the outcome: refresh again later',
+  OPERATOR_AUTH_REQUIRED: 'operator authentication is required for this route',
+  OPERATOR_AUTH_NOT_CONFIGURED: 'operator authentication is not configured: demo execution routes that change state are refused',
+  ORIGIN_REFUSED: 'requests from this origin are refused',
+  UNSUPPORTED_MEDIA_TYPE: 'the request body must be application/json',
 });
 
 const STATUS: Readonly<Record<RuntimeErrorCode, number>> = Object.freeze({
@@ -70,19 +103,40 @@ const STATUS: Readonly<Record<RuntimeErrorCode, number>> = Object.freeze({
   BROKER_RATE_LIMITED: 429,
   BROKER_SNAPSHOT_STALE: 409,
   BROKER_RECONCILIATION_FAILURE: 500,
+  EXECUTION_DISABLED: 403,
+  EXECUTION_LOCKED_IN_BUILD: 403,
+  INTENT_INVALID: 400,
+  APPROVAL_INVALID: 400,
+  OPERATOR_INVALID: 403,
+  INTENT_NOT_FOUND: 404,
+  INTENT_STATE_INVALID: 409,
+  INTENT_DUPLICATE: 409,
+  GATE_REFUSED: 409,
+  BROKER_REJECTED: 502,
+  EXECUTION_AMBIGUOUS: 502,
+  RECONCILIATION_PENDING: 409,
+  OPERATOR_AUTH_REQUIRED: 401,
+  OPERATOR_AUTH_NOT_CONFIGURED: 403,
+  ORIGIN_REFUSED: 403,
+  UNSUPPORTED_MEDIA_TYPE: 415,
 });
 
 export class RuntimeApiError extends Error {
   override readonly name = 'RuntimeApiError';
   readonly status: number;
   readonly code: RuntimeErrorCode;
+  /** Gate reason codes: fixed strings of this code base, never a value from a request, a broker or the environment. */
+  readonly reasons: readonly string[];
 
-  constructor(code: RuntimeErrorCode) {
+  constructor(code: RuntimeErrorCode, reasons: readonly string[] = []) {
     super(FIXED_MESSAGE[code]);
     this.code = code;
     this.status = STATUS[code];
+    this.reasons = reasons;
   }
 }
+
+const GATE_REASON = /^[A-Z][A-Z0-9_]{0,63}$/;
 
 const MARKET_DATA_NOT_CONNECTED = new Set(['not_configured']);
 const MARKET_DATA_NOT_FOUND = new Set(['not_found']);
@@ -92,6 +146,10 @@ const MARKET_DATA_REQUEST = new Set(['invalid_symbol', 'bad_request', 'unsupport
 export function toRuntimeApiError(error: unknown): RuntimeApiError {
   if (error instanceof RuntimeApiError) return error;
   if (error instanceof BrokerError) return new RuntimeApiError(error.code);
+  if (error instanceof DemoExecutionError) {
+    // Broker failures keep the existing broker codes; the rest map one to one. Only fixed gate reason codes are passed on.
+    return new RuntimeApiError(error.code, error.code === 'GATE_REFUSED' ? error.reasons.filter((r) => GATE_REASON.test(r)) : []);
+  }
   if (error instanceof MarketDataError) {
     if (MARKET_DATA_NOT_CONNECTED.has(error.code)) return new RuntimeApiError('DATA_NOT_CONNECTED');
     if (MARKET_DATA_NOT_FOUND.has(error.code)) return new RuntimeApiError('INSTRUMENT_NOT_FOUND');
@@ -109,6 +167,6 @@ export function toRuntimeApiError(error: unknown): RuntimeApiError {
   return new RuntimeApiError('INTERNAL_ERROR');
 }
 
-export function errorBody(error: RuntimeApiError): { error: { code: RuntimeErrorCode; message: string } } {
-  return { error: { code: error.code, message: error.message } };
+export function errorBody(error: RuntimeApiError): { error: { code: RuntimeErrorCode; message: string; reasons?: readonly string[] } } {
+  return { error: { code: error.code, message: error.message, ...(error.reasons.length > 0 ? { reasons: error.reasons } : {}) } };
 }

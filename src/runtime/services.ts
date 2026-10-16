@@ -20,8 +20,10 @@ import type { QuantService } from '../quant/quant-service.js';
 import type { PortfolioKillSwitchStore } from '../safety/portfolio-kill-switch-store.js';
 import { BrokerError } from '../broker/broker-errors.js';
 import type { EtoroBrokerService } from '../broker/etoro/etoro-broker-service.js';
-import type { BarsRequest, InstrumentRegisterRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
+import type { EtoroDemoExecutionService } from '../broker/etoro/execution/etoro-demo-execution-service.js';
+import type { BarsRequest, DemoExecutionRoutes, InstrumentRegisterRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
 import { RuntimeApiError } from './errors.js';
+import type { OperatorIdentity } from './operator-auth.js';
 
 /** A quote older than this is stale and is never usable for trading. */
 export const QUOTE_MAX_AGE_MS = 15 * 60 * 1000;
@@ -45,6 +47,8 @@ export interface RuntimeDeps {
   clock?: () => Date;
   /** The eToro demo read-only service. Absent when eToro is not enabled: the broker then reports not connected. */
   etoro?: EtoroBrokerService | null;
+  /** The eToro demo execution service (O21). Absent unless ETORO_DEMO_EXECUTION_ENABLED=1; the routes then answer EXECUTION_DISABLED. */
+  etoroDemoExecution?: EtoroDemoExecutionService | null;
 }
 
 function sanitizeName(value: unknown): string | null {
@@ -136,7 +140,23 @@ function quoteJson(quote: StoredQuote, freshness: 'fresh' | 'stale', mode: Marke
 }
 
 export class RuntimeServiceImpl implements RuntimeServices {
-  constructor(private readonly deps: RuntimeDeps) {}
+  /** O21: every intent route goes through the service; nothing here reaches the adapter or the transport. */
+  readonly demoExecution?: DemoExecutionRoutes;
+
+  constructor(private readonly deps: RuntimeDeps) {
+    const execution = deps.etoroDemoExecution ?? null;
+    if (execution !== null) {
+      // The operator is the identity the HTTP layer authenticated; it is the approver, and it is recorded on every write attempt.
+      this.demoExecution = Object.freeze({
+        create: (intent: unknown, operator: OperatorIdentity) => execution.create(intent, { kind: operator.kind, id: operator.id }),
+        get: (intentId: string) => execution.get(intentId),
+        approve: (intentId: string, operator: OperatorIdentity) => execution.approve(intentId, { kind: operator.kind, id: operator.id }),
+        execute: (intentId: string, operator: OperatorIdentity) => execution.execute(intentId, { kind: operator.kind, id: operator.id }),
+        refresh: (intentId: string) => execution.refresh(intentId),
+        cancel: (intentId: string, operator: OperatorIdentity) => execution.cancel(intentId, { kind: operator.kind, id: operator.id }),
+      });
+    }
+  }
 
   private now(): string {
     return toUtcIso((this.deps.clock ?? (() => new Date()))().getTime());
@@ -162,7 +182,12 @@ export class RuntimeServiceImpl implements RuntimeServices {
       providerHealth: this.deps.provider ? this.deps.provider.health().state : 'not_configured',
       tradingMode: 'paper',
       liveTrading: 'locked',
-      buildLocks: { liveTrading: BUILD_LOCKS.liveTrading, brokerOrders: BUILD_LOCKS.brokerOrders, physicalPurchase: BUILD_LOCKS.physicalPurchase },
+      buildLocks: {
+        liveTrading: BUILD_LOCKS.liveTrading,
+        brokerOrders: BUILD_LOCKS.brokerOrders,
+        physicalPurchase: BUILD_LOCKS.physicalPurchase,
+        etoroDemoExecution: BUILD_LOCKS.etoroDemoExecution,
+      },
       version: this.deps.version,
     };
   }

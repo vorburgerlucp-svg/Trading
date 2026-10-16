@@ -71,7 +71,7 @@ describe('O18 runtime services (composition over the existing NEXUS services)', 
     const up = await build({ mode: 'production' });
     const health = await up.services.health();
     expect(health).toMatchObject({ status: 'ok', database: 'connected', marketData: 'configured', providerHealth: 'closed' });
-    expect(health.buildLocks).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true });
+    expect(health.buildLocks).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true });
   });
 
   it('instrument search returns only validated items; injected text is sanitized and malformed candidates are dropped', async () => {

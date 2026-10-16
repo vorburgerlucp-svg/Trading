@@ -14,7 +14,10 @@ import { PostgresLedgerStore } from '../persistence/postgres/postgres-ledger-sto
 import { CapitalLedger } from '../capital/capital-ledger.js';
 import type { EtoroReconciliationRecord, EtoroSnapshotRecord, EtoroSyncRecord } from '../broker/etoro/etoro-broker-service.js';
 import { HttpsEtoroTransport, type EtoroCredentials, type EtoroTransport } from '../broker/etoro/etoro-transport.js';
+import { HttpsDemoExecutionTransport, type DemoExecutionTransport } from '../broker/etoro/execution/etoro-demo-execution-transport.js';
+import type { AttemptRecord, ConfirmationRecord, IntentEvent, ReconciliationRecord } from '../broker/etoro/execution/etoro-demo-execution-service.js';
 import { createRuntimeHandler } from './app.js';
+import { OperatorAuthenticator } from './operator-auth.js';
 import { RuntimeConfigError, loadRuntimeConfig, summarizeRuntimeConfig, type Environment, type RuntimeConfig, type RuntimeConfigSummary } from './config.js';
 import { composeRuntime, type ComposeInput } from './compose.js';
 import { startHttpServer, type RunningServer } from './server.js';
@@ -48,6 +51,8 @@ export interface StartOptions {
   provider?: MarketDataProvider | null;
   /** Tests inject a fixture eToro transport here. The entry point never passes one: eToro is reached through the public API. */
   etoroTransport?: EtoroTransport;
+  /** Tests inject a fixture demo execution transport here. The entry point never passes one. */
+  etoroExecutionTransport?: DemoExecutionTransport;
   clock?: () => Date;
 }
 
@@ -60,6 +65,7 @@ export async function startRuntime(env: Environment, options: StartOptions = {})
     const killSwitch = await PostgresAppendOnlyStore.open<KillSwitchState>(pool, 'portfolio-kill-switch');
     const summary = summarizeRuntimeConfig(config);
     const etoro = config.etoro.enabled ? await openEtoro(pool, config, options) : undefined;
+    const etoroDemoExecution = config.etoroDemoExecution.enabled ? await openEtoroDemoExecution(pool, config, options) : undefined;
     const services = await composeRuntime({
       instruments: stores.instruments,
       marketData: stores.marketData,
@@ -71,8 +77,11 @@ export async function startRuntime(env: Environment, options: StartOptions = {})
       version: RUNTIME_VERSION,
       ...(options.clock ? { clock: options.clock } : {}),
       ...(etoro ? { etoro } : {}),
+      ...(etoroDemoExecution ? { etoroDemoExecution } : {}),
     });
-    const server = await startHttpServer(createRuntimeHandler(services), { host: config.host, port: config.port });
+    // Operator authentication of the O21 control plane: from the configuration only. Without it, mutating demo routes are refused.
+    const operatorAuth = config.operator !== null ? new OperatorAuthenticator(config.operator) : null;
+    const server = await startHttpServer(createRuntimeHandler(services, { operatorAuth }), { host: config.host, port: config.port });
     return {
       url: server.url,
       config: summary,
@@ -140,6 +149,22 @@ async function openEtoro(pool: PgPool, config: RuntimeConfig, options: StartOpti
     snapshots: await AppendOnlyLog.open<EtoroSnapshotRecord>('etoro-snapshots', await PostgresAppendOnlyStore.open<EtoroSnapshotRecord>(pool, 'etoro-snapshots'), { clock }),
     reconciliations: await AppendOnlyLog.open<EtoroReconciliationRecord>('etoro-reconciliations', await PostgresAppendOnlyStore.open<EtoroReconciliationRecord>(pool, 'etoro-reconciliations'), { clock }),
     syncs: await AppendOnlyLog.open<EtoroSyncRecord>('etoro-sync-events', await PostgresAppendOnlyStore.open<EtoroSyncRecord>(pool, 'etoro-sync-events'), { clock }),
+  };
+}
+
+/**
+ * The eToro demo execution wiring (O21), only with ETORO_DEMO_EXECUTION_ENABLED=1: the demo execution transport and four
+ * append-only logs. No safety source is passed (none exists for the eToro demo account), so every open is refused; and the build
+ * lock BUILD_LOCKS.etoroDemoExecution refuses every write in this build.
+ */
+async function openEtoroDemoExecution(pool: PgPool, config: RuntimeConfig, options: StartOptions): Promise<NonNullable<ComposeInput['etoroDemoExecution']>> {
+  const clock = options.clock ?? (() => new Date());
+  return {
+    transport: options.etoroExecutionTransport ?? new HttpsDemoExecutionTransport({ credentials: etoroCredentials(config) }),
+    intents: await AppendOnlyLog.open<IntentEvent>('etoro-demo-execution-intents', await PostgresAppendOnlyStore.open<IntentEvent>(pool, 'etoro-demo-execution-intents'), { clock }),
+    attempts: await AppendOnlyLog.open<AttemptRecord>('etoro-demo-execution-attempts', await PostgresAppendOnlyStore.open<AttemptRecord>(pool, 'etoro-demo-execution-attempts'), { clock }),
+    confirmations: await AppendOnlyLog.open<ConfirmationRecord>('etoro-demo-broker-confirmations', await PostgresAppendOnlyStore.open<ConfirmationRecord>(pool, 'etoro-demo-broker-confirmations'), { clock }),
+    reconciliations: await AppendOnlyLog.open<ReconciliationRecord>('etoro-demo-execution-reconciliations', await PostgresAppendOnlyStore.open<ReconciliationRecord>(pool, 'etoro-demo-execution-reconciliations'), { clock }),
   };
 }
 
