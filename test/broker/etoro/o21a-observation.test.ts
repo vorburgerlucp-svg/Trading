@@ -2,7 +2,7 @@
 // else, refuses to run without explicit confirmation and the demo mode, prints no key, no value, and writes nothing to disk.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { CONFIRM_FLAG, runObservation } from '../../../src/broker/etoro/etoro-observe-cli.js';
+import { CONFIRM_FLAG, SOURCE_OPERATIONS, runObservation } from '../../../src/broker/etoro/etoro-observe-cli.js';
 import { DOCUMENTED_ORDER_FIELDS, DOCUMENTED_POSITION_FIELDS, kindOf, observeDemoPortfolio } from '../../../src/broker/etoro/etoro-observation.js';
 import { HttpsEtoroTransport, type EtoroFetch } from '../../../src/broker/etoro/etoro-transport.js';
 import { FixtureEtoroTransport, KEY_MARKER, USER_MARKER, emptyDemoPortfolio } from './o20-fixture.js';
@@ -103,9 +103,9 @@ describe('O21A observation tool: gated, one GET, no secrets, nothing on disk', (
     let built = 0;
     const transport = () => ((built++), new FixtureEtoroTransport());
     for (const env of [{ ...ENV, ETORO_TRADING_MODE: undefined }, { ...ENV, ETORO_TRADING_MODE: 'real' }, { ...ENV, ETORO_API_KEY: 'has space' }, { ...ENV, ETORO_USER_KEY: undefined }]) {
-      expect(await runObservation({ env, argv: [CONFIRM_FLAG], transport })).toMatchObject({ exitCode: 2 });
+      expect(await runObservation({ env, argv: ['--source=portfolio', CONFIRM_FLAG], transport })).toMatchObject({ exitCode: 2 });
     }
-    expect(await runObservation({ env: ENV, argv: [CONFIRM_FLAG, '--dump-raw'], transport })).toMatchObject({ exitCode: 2 });
+    expect(await runObservation({ env: ENV, argv: ['--source=portfolio', CONFIRM_FLAG, '--dump-raw'], transport })).toMatchObject({ exitCode: 2 });
     expect(built).toBe(0);
   });
 
@@ -115,7 +115,7 @@ describe('O21A observation tool: gated, one GET, no secrets, nothing on disk', (
       requests.push({ url, method: String(init.method), body: init.body });
       return new Response(JSON.stringify(documentedPortfolio()), { status: 200 });
     };
-    const outcome = await runObservation({ env: ENV, argv: [CONFIRM_FLAG, '--pseudonymize-ids'], transport: (credentials) => new HttpsEtoroTransport({ credentials, fetch }) });
+    const outcome = await runObservation({ env: ENV, argv: ['--source=portfolio', CONFIRM_FLAG, '--pseudonymize-ids'], transport: (credentials) => new HttpsEtoroTransport({ credentials, fetch }) });
     expect(outcome.exitCode).toBe(0);
     expect(requests).toEqual([{ url: 'https://public-api.etoro.com/api/v1/trading/info/demo/portfolio', method: 'GET', body: undefined }]);
     const text = JSON.stringify(outcome);
@@ -127,19 +127,21 @@ describe('O21A observation tool: gated, one GET, no secrets, nothing on disk', (
   it('a broker failure reports a fixed code or status only', async () => {
     const t = new FixtureEtoroTransport();
     t.response = { status: 401, body: null };
-    expect(await runObservation({ env: ENV, argv: [CONFIRM_FLAG], transport: () => t })).toEqual({ exitCode: 1, error: 'broker returned HTTP 401' });
+    expect(await runObservation({ env: ENV, argv: ['--source=portfolio', CONFIRM_FLAG], transport: () => t })).toEqual({ exitCode: 1, error: 'broker returned HTTP 401' });
     const fetch: EtoroFetch = async () => {
       throw new Error('connect ECONNREFUSED ' + KEY_MARKER);
     };
-    const failed = await runObservation({ env: ENV, argv: [CONFIRM_FLAG], transport: (credentials) => new HttpsEtoroTransport({ credentials, fetch }) });
+    const failed = await runObservation({ env: ENV, argv: ['--source=portfolio', CONFIRM_FLAG], transport: (credentials) => new HttpsEtoroTransport({ credentials, fetch }) });
     expect(failed).toEqual({ exitCode: 1, error: 'BROKER_NOT_CONNECTED' });
   });
 
-  it('the tool source writes no file and calls no operation but portfolio.demo', () => {
+  it('the tool source writes no file and has one call site, over the two fixed source operations (O21A.1)', () => {
     const source = readFileSync('src/broker/etoro/etoro-observe-cli.ts', 'utf8') + readFileSync('src/broker/etoro/etoro-observation.ts', 'utf8');
     expect(source).not.toMatch(/writeFile|appendFile|createWriteStream|mkdir/);
     expect(source).not.toMatch(/\bfetch\s*\(/);
-    expect([...source.matchAll(/\.call\('([^']+)'\)/g)].map((m) => m[1])).toEqual(['portfolio.demo']);
+    expect([...source.matchAll(/\.call\(/g)]).toHaveLength(1);
+    expect(source).toContain('.call(SOURCE_OPERATIONS[source])');
+    expect(SOURCE_OPERATIONS).toEqual({ portfolio: 'portfolio.demo', pnl: 'pnl.demo' });
   });
 
   it('nothing in the runtime imports the observation tool', () => {

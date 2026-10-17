@@ -22,7 +22,7 @@ import { Decimal } from '../../money/decimal.js';
 export const ETORO_MAX_ENTRIES = 500;
 /** Upper bound of every amount, rate and unit count the parser accepts. A larger value is refused. */
 const MAX_MAGNITUDE = 1e12;
-const MAX_LEVERAGE = 1000;
+export const MAX_LEVERAGE = 1000;
 
 /** The containers that are read when present with entries (documented element schema). */
 const READ_CONTAINERS = ['positions', 'orders'] as const;
@@ -86,39 +86,40 @@ export interface EtoroDemoPortfolio {
   readonly orders: readonly EtoroPendingOrder[];
 }
 
-function invalid(detail: string): BrokerError {
+// The helpers below are shared with the /demo/pnl parser (etoro-pnl-validation.ts), so both read a field the same way.
+export function invalid(detail: string): BrokerError {
   return new BrokerError('BROKER_RESPONSE_INVALID', detail);
 }
 
-function objectAt(value: unknown, path: string): Record<string, unknown> {
+export function objectAt(value: unknown, path: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalid(path + ' is not an object');
   return value as Record<string, unknown>;
 }
 
-function arrayAt(value: unknown, path: string): unknown[] {
+export function arrayAt(value: unknown, path: string): unknown[] {
   if (!Array.isArray(value)) throw invalid(path + ' is not an array');
   if (value.length > ETORO_MAX_ENTRIES) throw invalid(path + ' has too many entries');
   return value;
 }
 
 /** A positive integer id that round-trips exactly. The reference states `integer` with no format; NEXUS accepts safe integers only. */
-function idAt(value: unknown, path: string): number {
+export function idAt(value: unknown, path: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) throw invalid(path + ' is not a positive integer id');
   return value;
 }
 
-function codeAt(value: unknown, path: string): number {
+export function codeAt(value: unknown, path: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw invalid(path + ' is not a non-negative integer');
   return value;
 }
 
-function booleanAt(value: unknown, path: string): boolean {
+export function booleanAt(value: unknown, path: string): boolean {
   if (typeof value !== 'boolean') throw invalid(path + ' is not a boolean');
   return value;
 }
 
 /** A finite JSON number within the bound, as a canonical decimal string. JSON has no NaN; an overflowing literal parses to Infinity. */
-function numberAt(value: unknown, path: string, options: { min: number; exclusiveMin?: boolean; max?: number }): string {
+export function numberAt(value: unknown, path: string, options: { min: number; exclusiveMin?: boolean; max?: number }): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) throw invalid(path + ' is not a finite number');
   const max = options.max ?? MAX_MAGNITUDE;
   if (value > max || (options.exclusiveMin ? value <= options.min : value < options.min)) throw invalid(path + ' is out of range');
@@ -129,17 +130,17 @@ function numberAt(value: unknown, path: string, options: { min: number; exclusiv
   }
 }
 
-function optionalRate(value: unknown, path: string): string | null {
+export function optionalRate(value: unknown, path: string): string | null {
   if (value === undefined || value === null) return null;
   return numberAt(value, path, { min: 0 });
 }
 
-function optionalBoolean(value: unknown, path: string): boolean | null {
+export function optionalBoolean(value: unknown, path: string): boolean | null {
   if (value === undefined || value === null) return null;
   return booleanAt(value, path);
 }
 
-function timestampAt(value: unknown, path: string): string {
+export function timestampAt(value: unknown, path: string): string {
   if (typeof value !== 'string' || value.length > 40) throw invalid(path + ' is not a timestamp');
   // ISO 8601 with a time and an explicit UTC offset or Z; normalized to canonical UTC.
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?(Z|[+-]\d{2}:\d{2})$/.test(value)) throw invalid(path + ' is not an ISO 8601 timestamp');
@@ -154,7 +155,7 @@ function openOrderOf(p: Record<string, unknown>, path: string): { orderId: numbe
   return { orderId: idAt(p.orderID, path + '.orderID'), orderType: codeAt(p.orderType, path + '.orderType') };
 }
 
-function parsePosition(value: unknown, path: string): EtoroPosition {
+export function parsePosition(value: unknown, path: string): EtoroPosition {
   const p = objectAt(value, path);
   // Copy-trading positions are out of scope: a position must not belong to a mirror (the reference: 0 otherwise).
   if (p.mirrorID !== undefined && p.mirrorID !== 0) throw invalid(path + '.mirrorID is not 0: copy-trading positions are not supported');
@@ -194,7 +195,7 @@ function parseOrder(value: unknown, path: string): EtoroPendingOrder {
   };
 }
 
-function uniqueSorted<T>(entries: T[], idOf: (entry: T) => number, path: string): T[] {
+export function uniqueSorted<T>(entries: T[], idOf: (entry: T) => number, path: string): T[] {
   const sorted = [...entries].sort((a, b) => idOf(a) - idOf(b));
   for (let i = 1; i < sorted.length; i++) if (idOf(sorted[i]!) === idOf(sorted[i - 1]!)) throw invalid(path + ' has a duplicate id');
   return sorted;

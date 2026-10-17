@@ -1,6 +1,6 @@
 # O21A – eToro Non-empty Demo Portfolio Read-only V1
 
-Status: implemented, **not live-observed**. No eToro request was sent in this step. Base: `origin/main` = `ae6a984` (merge of PR #20, O21).
+Status: implemented. `/demo/portfolio` LIVE_OBSERVED twice (2026-10-17), HTTP 200, **empty** both times. `/demo/pnl` (O21A.1, section 11) DOCUMENTED, **not live-observed**. Base: `origin/main` = `ae6a984` (merge of PR #20, O21).
 
 O21A prepares the O20 read-only adapter for a non-empty eToro **demo** portfolio. It reads open positions and pending orders strictly with the documented schema, maps them to NEXUS instruments only through the human-governed `etoro` mapping, and stores the fields NEXUS needs. It also adds a separate read-only observation tool for the first controlled live read. Nothing here writes to the broker, unlocks anything, or touches O17, O19, O21 execution or O22.
 
@@ -86,11 +86,11 @@ Documentation inconsistency noted: the mirrors schema has `mirrorStatusID`, its 
 `src/broker/etoro/etoro-observation.ts` (report) and `src/broker/etoro/etoro-observe-cli.ts` (tool). Not imported by the runtime.
 
 ```
-npm run etoro:observe-demo -- --confirm-live-read [--pseudonymize-ids] [--show-instrument-ids]
+npm run etoro:observe-demo -- --source=portfolio|pnl --confirm-live-read [--pseudonymize-ids] [--show-instrument-ids]
 ```
 
-- Refuses without `--confirm-live-read`, without `ETORO_TRADING_MODE=demo`, with malformed keys, or with any unknown argument. A refusal sends nothing.
-- Sends exactly one request through the O20 transport, whose only operation is `GET /api/v1/trading/info/demo/portfolio`.
+- Refuses without exactly one valid `--source` (O21A.1: no default), without `--confirm-live-read`, without `ETORO_TRADING_MODE=demo`, with malformed keys, or with any unknown argument. A refusal sends nothing.
+- Sends exactly one request through the O20 transport: `--source=portfolio` → `GET /api/v1/trading/info/demo/portfolio`, `--source=pnl` → `GET /api/v1/trading/info/demo/pnl` (section 11). No fallback, no retry.
 - Prints a sanitized JSON report to stdout and writes nothing to disk; the body is dropped after the report.
 - The report contains: top-level keys, `clientPortfolio` keys, documented-but-missing and undocumented keys, per container the kind and element count, per field the presence count and JSON kind counts (`integer`, `unsafe_integer`, `non_integer_number`, `string_iso8601_utc_z` / `_offset` / `_no_zone`, `string_numeric`, `string_other`, `boolean`, `null`, `array`, `object`), sign classes for numbers (zero/positive/negative), the comparison against the documented field lists, and the O21A parser verdict (`accepted` with counts, or `refused` with the field path).
 - It contains no value. Key names that do not look like field names are counted, not printed. IDs appear only with `--pseudonymize-ids`, as HMAC-SHA256 with a random per-run salt that is never output (comparable within one report, not across runs). eToro instrument ids are public market identifiers and appear only with `--show-instrument-ids`, to prepare the human-governed mapping.
@@ -129,6 +129,89 @@ npm run etoro:observe-demo -- --confirm-live-read [--pseudonymize-ids] [--show-i
 ## 10. First live read (after approval)
 
 1. A human opens a small position in the eToro **demo** account (manually in the eToro UI; not through NEXUS — the O21 lock stays closed).
-2. `npm run etoro:observe-demo -- --confirm-live-read --show-instrument-ids` with demo keys in the environment.
+2. `npm run etoro:observe-demo -- --source=portfolio --confirm-live-read --show-instrument-ids` with demo keys in the environment.
 3. Compare the report against section 2 and the documented fixture: `documentedMissing`, `undocumentedPresent`, kinds, parser verdict.
 4. Record the result here as LIVE_OBSERVED, then decide on the mapping and the safety source.
+
+## 11. O21A.1 – /demo/pnl read-only observation support
+
+### Live observations of /demo/portfolio (2026-10-17)
+
+| Read | Result |
+|---|---|
+| 1 (portfolio empty in the UI) | HTTP 200, one GET. `clientPortfolio` with all 11 documented keys, none undocumented, none missing; every container an empty array; `credit` a positive non-integer number, `bonusCredit` the integer 0; parser accepted (0 positions, 0 orders). |
+| 2 (after a demo position was opened manually in the eToro UI) | HTTP 200, one GET. **Identical structure, every container still empty**; parser accepted (0/0). |
+
+LIVE_OBSERVED is therefore the empty container structure of `/demo/portfolio`. The position visible in the UI was **not** in the response. The cause is not documented. The account/key scope of the user key (environment, login, agent-portfolio or sub-account token) is **unresolved**.
+
+### Why /demo/pnl
+
+The current official guides *Calculate Available Cash*, *Calculate Total Invested*, *Calculate Profit/Loss* and *Calculate Equity* all read `GET /api/v1/trading/info/demo/pnl` (or `/real/pnl`), not `/portfolio`. `/demo/portfolio` is still documented and not deprecated. O21A.1 adds `/demo/pnl` as a **second, separate** observation source. `/demo/portfolio` remains supported unchanged; the sync adapter, service and runtime still read only `/demo/portfolio`.
+
+### Transport
+
+`ETORO_ALLOWED_OPERATIONS` has exactly two fixed operations, both GET, both under `/trading/info/demo/`: `portfolio.demo` → `/trading/info/demo/portfolio` (unchanged) and `pnl.demo` → `/trading/info/demo/pnl`. There is no caller-supplied URL, no generic method, no real route and no write route. Only the observation tool references `pnl.demo` (enforced by a test).
+
+### Evidence classes for /demo/pnl
+
+| Class | Meaning |
+|---|---|
+| REFERENCE_SCHEMA | The property definitions of the official reference (checked 2026-10-17). **Normative.** |
+| REFERENCE_EXAMPLE | The example response on the same page. **Not normative.** |
+| LIVE_OBSERVED | A real response. **None yet for /demo/pnl.** |
+
+Schema and example contradict each other:
+
+| Point | REFERENCE_SCHEMA | REFERENCE_EXAMPLE |
+|---|---|---|
+| Position ids | `positionID`, `instrumentID`, `CID`, `mirrorID`, `parentPositionID`, `orderID`, `redeemStatusID`, `settlementTypeID` | `positionId`, `instrumentId`, `cid`, `mirrorId`, `parentPositionId`, `orderId`, `redeemStatusId`, `settlementTypeId` |
+| Position PnL | nested, nullable `unrealizedPnL` { `pnL`, `pnlAssetCurrency`, `exposureInAccountCurrency`, `exposureInAssetCurrency`, `marginInAccountCurrency`, `marginInAssetCurrency`, `marginCurrencyId`, `assetCurrencyId`, `closeRate`, `closeConversionRate`, `timestamp` } | flat `pnL`, `closeRate`, `closeConversionRate`, `timestamp` on the position, no `unrealizedPnL` |
+| Mirrors | `mirrorID`, `CID`, `parentCID`, `mirrorStatusID` | `mirrorId`, `cid`, `parentCid`, `mirrorStatusId` |
+
+Documented without contradiction: the pnl order schemas spell `orderId` / `instrumentId` (unlike `orderID` / `instrumentID` in `/demo/portfolio`); `leverage` is `integer` (a number in `/portfolio`); `ordersForOpen`, `ordersForClose` and `ordersForCloseMultiple` have element schemas here; `clientPortfolio` also has `unrealizedPnL` (number) and `accountCurrencyId` ("1 = USD").
+
+### Parser (`src/broker/etoro/etoro-pnl-validation.ts`)
+
+- Follows REFERENCE_SCHEMA only, with no aliases: `positionId` is not read as `positionID`, `orderID` is not read as `orderId`, and flat `pnL` / `closeRate` are not read as the nested `unrealizedPnL`. A response in the example's shape is BROKER_RESPONSE_INVALID at the first schema field it lacks.
+- Read:
+  - `positions`: the same NEXUS-required fields and bounds as the portfolio parser, plus integer `leverage` and the optional nested `unrealizedPnL` (→ `pnL`, `closeRate`, `timestamp`).
+  - `orders`: `orderId`, `instrumentId`, `isBuy`, `amount`, `units`, integer `leverage`, `openDateTime`; optional `rate`, SL/TP and flags.
+  - `ordersForOpen`: `orderId`, `orderType`, `statusId`, `instrumentId`, `isBuy`, `amount`, integer `leverage`, `openDateTime`; optional `amountInUnits`; `mirrorId` must be 0.
+- `orderType` and `statusId` are kept as raw codes. Their values have no documented meaning (NOT_VERIFIED), and NEXUS gives them none.
+- Must be empty: `mirrors`, `ordersForClose`, `ordersForCloseMultiple` (closing flows are not read), and `stockOrders` / `entryOrders` / `exitOrders` when present.
+- Ids are positive safe integers. Numbers are finite and bounded. Timestamps are ISO 8601 with a zone. Duplicate ids are refused. Unknown fields are ignored and never kept. Errors name the field path only.
+- `credit` must be present and a finite number. `bonusCredit`, the total `unrealizedPnL` and `accountCurrencyId` are type-checked when present. None of them is returned. **Cash stays `not_read`**: no `cash = credit`.
+- Only the observation tool uses this parser. Nothing is stored, and no snapshot changes.
+
+### Observation (`--source=pnl`)
+
+- The report is built from the in-memory JSON first, independently of the parser. The parser verdict is computed afterwards and reported separately, so a shape the parser refuses is still fully described.
+- Per container, observed fields are split into:
+  - `schemaDocumentedPresent`: in the schema;
+  - `exampleOnlyPresent`: not in the schema, but in the reference example;
+  - `undocumentedPresent`: in neither;
+  - `documentedMissing`: schema fields that no element has.
+- Object fields list their inner key names (`objectKeys`). The nested `unrealizedPnL` is compared with its schema (`nested.schemaMissing`, `nested.undocumentedPresent`).
+- With `--pseudonymize-ids`, ids are pseudonymized in both spellings. Instrument ids (`instrumentID` or `instrumentId`) appear only with `--show-instrument-ids`. The report contains no value, key or account id. Nothing is written to disk.
+- One invocation sends one request. There is no default source and **no automatic fallback**: an empty portfolio never triggers a pnl read, and the reverse never happens either. There is no retry, and HTTP ≠ 200 fails closed with the status only.
+
+### Fixtures
+
+`test/broker/etoro/o21a1-pnl-fixture.ts`:
+- **(A) REFERENCE_SCHEMA fixtures**: DOCUMENTED / REFERENCE_SCHEMA, NOT LIVE_OBSERVED.
+- **(B) The verbatim reference example position**: REFERENCE_EXAMPLE, NOT NORMATIVE, NOT LIVE_OBSERVED. It is used only to prove that the parser refuses it and that the report still describes it.
+
+There is no invented live payload.
+
+### Tests
+
+New: `o21a1-pnl-validation.test.ts` (61 tests) and `o21a1-observation.test.ts` (30 tests). Updated:
+- `o20-boundary.test.ts`: two operations.
+- `o21a-observation.test.ts`: `--source=portfolio`, and one call site over the two fixed operations.
+
+### Open
+
+- `/demo/pnl` is NOT LIVE_OBSERVED. Whether a live response follows the REFERENCE_SCHEMA or the REFERENCE_EXAMPLE shape is unknown; the report will show it.
+- The account/key scope is unresolved (see above).
+- Cash stays `not_read`.
+- The next `/demo/pnl` read needs a separate, explicit approval, for exactly one run of `npm run etoro:observe-demo -- --source=pnl --confirm-live-read --pseudonymize-ids --show-instrument-ids`.

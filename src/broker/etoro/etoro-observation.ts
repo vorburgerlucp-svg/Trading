@@ -1,18 +1,22 @@
-// The read-only observation of a demo portfolio response (O21A): a sanitized schema report, never the response. It describes the
+// The read-only observation of a demo response (O21A, O21A.1): a sanitized schema report, never the response. Two sources, each
+// one fixed GET: source=portfolio (/trading/info/demo/portfolio) and source=pnl (/trading/info/demo/pnl). It describes the
 // structure only: key names, JSON types, null/present counts, element counts per container, and coarse number classes (integer or
 // not, safe integer or not, zero/positive/negative). It never copies a string, a number or an id into the report, unless the caller
 // asks for ids, and then only as pseudonyms (HMAC-SHA256 with a random per-run salt that is never output), so they can be compared
 // within one report and never across runs. eToro instrument ids are public market identifiers; they are listed in clear only when
 // the caller asks for them explicitly (to prepare the human-governed etoro mapping).
 //
-// The documented schema below is the official eToro API reference of GET /api/v1/trading/info/demo/portfolio (checked 2026-10-17).
-// It is used only to compare: which documented fields the observed response lacks, and which fields it has that are not documented.
+// Three evidence classes are kept apart. REFERENCE_SCHEMA: the property definitions of the official reference (checked 2026-10-17).
+// REFERENCE_EXAMPLE: the reference's example response, which for /demo/pnl contradicts its own schema (casing, flat vs nested PnL).
+// LIVE_OBSERVED: what this report describes. The report is built from the in-memory JSON first, independently of any parser; the
+// parser verdict is computed afterwards and reported separately, so a live shape the parser refuses is still fully described.
 
 import { createHmac, randomBytes } from 'node:crypto';
 import { BrokerError } from '../broker-errors.js';
+import { parseDemoPnl } from './etoro-pnl-validation.js';
 import { parseDemoPortfolio } from './etoro-validation.js';
 
-/** clientPortfolio properties in the reference. */
+/** /demo/portfolio REFERENCE_SCHEMA: clientPortfolio properties. */
 export const DOCUMENTED_CLIENT_PORTFOLIO_FIELDS = Object.freeze([
   'positions', 'credit', 'mirrors', 'orders', 'stockOrders', 'entryOrders', 'exitOrders', 'ordersForOpen', 'ordersForClose', 'ordersForCloseMultiple', 'bonusCredit',
 ]);
@@ -56,8 +60,102 @@ export const DOCUMENTED_ELEMENT_FIELDS: Readonly<Record<string, readonly string[
   ordersForCloseMultiple: null,
 });
 
-/** Id fields that are pseudonymized when ids are requested. Every other field is described by type only. */
-const ID_FIELDS = new Set(['positionID', 'orderID', 'CID', 'mirrorID', 'parentPositionID', 'parentCID']);
+/** /demo/pnl REFERENCE_SCHEMA: clientPortfolio properties. */
+export const PNL_SCHEMA_CLIENT_PORTFOLIO_FIELDS = Object.freeze([
+  'positions', 'credit', 'mirrors', 'orders', 'ordersForOpen', 'ordersForClose', 'ordersForCloseMultiple', 'bonusCredit', 'unrealizedPnL',
+  'accountCurrencyId', 'stockOrders', 'entryOrders', 'exitOrders',
+]);
+
+/** /demo/pnl REFERENCE_SCHEMA: position (TradingRealAdminApi_Position) = the portfolio position plus externalOperation and unrealizedPnL. */
+export const PNL_SCHEMA_POSITION_FIELDS = Object.freeze([...DOCUMENTED_POSITION_FIELDS, 'externalOperation', 'unrealizedPnL']);
+
+/** /demo/pnl REFERENCE_SCHEMA: the nested per-position unrealizedPnL object. */
+export const PNL_SCHEMA_UNREALIZED_PNL_FIELDS = Object.freeze([
+  'pnL', 'pnlAssetCurrency', 'exposureInAccountCurrency', 'exposureInAssetCurrency', 'marginInAccountCurrency', 'marginInAssetCurrency',
+  'marginCurrencyId', 'assetCurrencyId', 'closeRate', 'closeConversionRate', 'timestamp',
+]);
+
+/** /demo/pnl REFERENCE_SCHEMA: orders (TradingRealAdminApi_Order), spelled orderId / instrumentId. */
+export const PNL_SCHEMA_ORDER_FIELDS = Object.freeze([
+  'orderId', 'cid', 'openDateTime', 'instrumentId', 'isBuy', 'takeProfitRate', 'stopLossRate', 'rate', 'amount', 'leverage', 'units',
+  'isTslEnabled', 'executionType', 'isDiscounted', 'isNoTakeProfit', 'isNoStopLoss',
+]);
+
+/** /demo/pnl REFERENCE_SCHEMA: ordersForOpen. */
+export const PNL_SCHEMA_ORDER_FOR_OPEN_FIELDS = Object.freeze([
+  'orderId', 'orderType', 'statusId', 'cid', 'openDateTime', 'lastUpdate', 'instrumentId', 'amount', 'amountInUnits', 'isBuy', 'leverage',
+  'stopLossRate', 'takeProfitRate', 'isTslEnabled', 'isDiscounted', 'mirrorId', 'frozenAmount', 'totalExternalCosts', 'isNoTakeProfit',
+  'isNoStopLoss', 'lotCount', 'openPositionActionType', 'externalOperation',
+]);
+
+/** /demo/pnl REFERENCE_SCHEMA: ordersForClose. */
+export const PNL_SCHEMA_ORDER_FOR_CLOSE_FIELDS = Object.freeze([
+  'orderId', 'orderType', 'statusId', 'cid', 'openDateTime', 'lastUpdate', 'instrumentId', 'unitsToDeduct', 'lotsToDeduct', 'positionId',
+]);
+
+/** /demo/pnl REFERENCE_SCHEMA: ordersForCloseMultiple. */
+export const PNL_SCHEMA_ORDER_FOR_CLOSE_MULTIPLE_FIELDS = Object.freeze([
+  'orderId', 'orderType', 'statusId', 'cid', 'openDateTime', 'lastUpdate', 'instrumentId', 'unitsToDeduct', 'lotsToDeduct', 'pendingClosePositionIds',
+]);
+
+/**
+ * /demo/pnl REFERENCE_EXAMPLE: the keys of the example's top-level position. They contradict the schema: other casing (positionId,
+ * instrumentId, cid, ...) and flat PnL keys (pnL, closeRate, closeConversionRate, timestamp) instead of the nested unrealizedPnL.
+ */
+export const PNL_EXAMPLE_POSITION_FIELDS = Object.freeze([
+  'positionId', 'cid', 'openDateTime', 'openRate', 'instrumentId', 'isBuy', 'takeProfitRate', 'stopLossRate', 'mirrorId', 'parentPositionId',
+  'amount', 'leverage', 'orderId', 'orderType', 'units', 'totalFees', 'initialAmountInDollars', 'isTslEnabled', 'stopLossVersion', 'isSettled',
+  'redeemStatusId', 'initialUnits', 'isPartiallyAltered', 'unitsBaseValueDollars', 'isDiscounted', 'openPositionActionType', 'settlementTypeId',
+  'isDetached', 'openConversionRate', 'pnlVersion', 'totalExternalFees', 'totalExternalTaxes', 'isNoTakeProfit', 'isNoStopLoss', 'lotCount',
+  'externalOperation', 'pnL', 'closeRate', 'closeConversionRate', 'timestamp',
+]);
+
+export type ObservationSource = 'portfolio' | 'pnl';
+
+interface SourceSchema {
+  readonly endpoint: string;
+  readonly clientPortfolioFields: readonly string[];
+  /** REFERENCE_SCHEMA element properties per container; null = no documented element schema (or obsolete). */
+  readonly elementFields: Readonly<Record<string, readonly string[] | null>>;
+  /** REFERENCE_EXAMPLE element keys per container, where the example contradicts the schema. */
+  readonly exampleFields: Readonly<Record<string, readonly string[]>>;
+  /** REFERENCE_SCHEMA nested object properties: container -> field -> properties. */
+  readonly nestedFields: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
+}
+
+const SCHEMAS: Readonly<Record<ObservationSource, SourceSchema>> = Object.freeze({
+  portfolio: {
+    endpoint: 'GET /api/v1/trading/info/demo/portfolio',
+    clientPortfolioFields: DOCUMENTED_CLIENT_PORTFOLIO_FIELDS,
+    elementFields: DOCUMENTED_ELEMENT_FIELDS,
+    exampleFields: {},
+    nestedFields: {},
+  },
+  pnl: {
+    endpoint: 'GET /api/v1/trading/info/demo/pnl',
+    clientPortfolioFields: PNL_SCHEMA_CLIENT_PORTFOLIO_FIELDS,
+    elementFields: {
+      positions: PNL_SCHEMA_POSITION_FIELDS,
+      orders: PNL_SCHEMA_ORDER_FIELDS,
+      mirrors: DOCUMENTED_MIRROR_FIELDS,
+      ordersForOpen: PNL_SCHEMA_ORDER_FOR_OPEN_FIELDS,
+      ordersForClose: PNL_SCHEMA_ORDER_FOR_CLOSE_FIELDS,
+      ordersForCloseMultiple: PNL_SCHEMA_ORDER_FOR_CLOSE_MULTIPLE_FIELDS,
+      stockOrders: null,
+      entryOrders: null,
+      exitOrders: null,
+    },
+    exampleFields: { positions: PNL_EXAMPLE_POSITION_FIELDS },
+    nestedFields: { positions: { unrealizedPnL: PNL_SCHEMA_UNREALIZED_PNL_FIELDS } },
+  },
+});
+
+/** Id fields that are pseudonymized when ids are requested, in both spellings the reference uses. Every other field is described by type only. */
+const ID_FIELDS = new Set([
+  'positionID', 'orderID', 'CID', 'mirrorID', 'parentPositionID', 'parentCID',
+  'positionId', 'orderId', 'cid', 'mirrorId', 'parentPositionId', 'parentCid',
+]);
+const INSTRUMENT_ID_FIELDS = new Set(['instrumentID', 'instrumentId']);
 /** A key name is reported only when it looks like a schema field name; anything else could be data used as a key. */
 const KEY_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const MAX_KEYS = 200;
@@ -85,6 +183,10 @@ export interface FieldReport {
   sign?: { zero: number; positive: number; negative: number };
   /** For arrays only: the largest element count seen. */
   maxLength?: number;
+  /** For objects only: the key names seen inside (one level), never their values. */
+  objectKeys?: string[];
+  /** For an object field with a REFERENCE_SCHEMA nested definition: objectKeys compared with it. */
+  nested?: { schemaMissing: string[]; undocumentedPresent: string[] };
 }
 
 export interface ContainerReport {
@@ -95,9 +197,13 @@ export interface ContainerReport {
   /** Keys that are not reported by name because they do not look like field names. */
   unnamedKeys?: number;
   documented: 'element_schema' | 'no_element_schema';
-  /** Documented fields that no element has. Only for a non-empty container with a documented element schema. */
+  /** Observed fields that the REFERENCE_SCHEMA defines. Only for a non-empty container. */
+  schemaDocumentedPresent?: string[];
+  /** REFERENCE_SCHEMA fields that no element has. Only for a non-empty container with an element schema. */
   documentedMissing?: string[];
-  /** Fields that the reference does not document. */
+  /** Observed fields that are not in the schema but are in the REFERENCE_EXAMPLE (the schema/example contradiction). */
+  exampleOnlyPresent?: string[];
+  /** Observed fields that are in neither the schema nor the example. */
   undocumentedPresent?: string[];
   /** Per-run pseudonyms of the ids of each element, only when requested. */
   pseudonymousIds?: Record<string, string[]>;
@@ -105,9 +211,14 @@ export interface ContainerReport {
   instrumentIds?: number[];
 }
 
+export type ParserVerdict =
+  | { outcome: 'accepted'; positions: number; orders: number; ordersForOpen?: number }
+  | { outcome: 'refused'; code: string; detail: string };
+
 export interface ObservationReport {
   schema: 'etoro-demo-portfolio-observation:v1';
-  endpoint: 'GET /api/v1/trading/info/demo/portfolio';
+  source: ObservationSource;
+  endpoint: string;
   topLevelKeys: string[];
   topLevelUnnamedKeys: number;
   clientPortfolio: {
@@ -120,8 +231,8 @@ export interface ObservationReport {
     bonusCredit: { kind: JsonKind | 'missing'; sign?: 'zero' | 'positive' | 'negative' };
   };
   containers: Record<string, ContainerReport>;
-  /** What the O21A parser does with this response. The detail names a field path only, never a value. */
-  parser: { outcome: 'accepted'; positions: number; orders: number } | { outcome: 'refused'; code: string; detail: string };
+  /** What the parser of this source does with the response, computed after the report. The detail names a field path, never a value. */
+  parser: ParserVerdict;
 }
 
 export interface ObservationOptions {
@@ -178,8 +289,10 @@ function scalarSummary(value: unknown): { kind: JsonKind | 'missing'; sign?: 'ze
   return typeof value === 'number' ? { kind, sign: signOf(value) } : { kind };
 }
 
-function describeContainer(name: string, value: unknown, options: ObservationOptions, pseudonym: (text: string) => string): ContainerReport {
-  const documentedFields = DOCUMENTED_ELEMENT_FIELDS[name] ?? null;
+function describeContainer(name: string, value: unknown, schema: SourceSchema, options: ObservationOptions, pseudonym: (text: string) => string): ContainerReport {
+  const documentedFields = schema.elementFields[name] ?? null;
+  const exampleFields = schema.exampleFields[name] ?? [];
+  const nestedSchema = schema.nestedFields[name] ?? {};
   const documented = documentedFields === null ? 'no_element_schema' : 'element_schema';
   if (value === undefined) return { kind: 'missing', count: 0, documented };
   if (!Array.isArray(value)) return { kind: kindOf(value), count: 0, documented };
@@ -212,21 +325,30 @@ function describeContainer(name: string, value: unknown, options: ObservationOpt
         f.sign[signOf(v)]++;
       }
       if (Array.isArray(v)) f.maxLength = Math.max(f.maxLength ?? 0, v.length);
+      if (isObject(v)) {
+        const inner = namedKeys(v);
+        f.objectKeys = [...new Set([...(f.objectKeys ?? []), ...inner.names])].sort();
+        unnamed += inner.unnamed;
+      }
       if (options.pseudonymizeIds && ID_FIELDS.has(key) && (typeof v === 'number' || typeof v === 'string')) {
         (ids[key] ??= []).push(pseudonym(String(v)));
       }
-      if (options.showInstrumentIds && key === 'instrumentID' && typeof v === 'number' && Number.isSafeInteger(v)) instruments.add(v);
+      if (options.showInstrumentIds && INSTRUMENT_ID_FIELDS.has(key) && typeof v === 'number' && Number.isSafeInteger(v)) instruments.add(v);
     }
+  }
+  for (const [key, nested] of Object.entries(nestedSchema)) {
+    const f = fields[key];
+    const keys = f?.objectKeys;
+    if (f && keys) f.nested = { schemaMissing: nested.filter((n) => !keys.includes(n)), undocumentedPresent: keys.filter((n) => !nested.includes(n)) };
   }
   report.fields = Object.fromEntries(Object.keys(fields).sort().map((k) => [k, fields[k]!]));
   if (unnamed > 0) report.unnamedKeys = unnamed;
-  if (documentedFields !== null) {
-    const seen = new Set(Object.keys(fields));
-    report.documentedMissing = documentedFields.filter((f) => !seen.has(f));
-    report.undocumentedPresent = [...seen].filter((f) => f !== '<element>' && !documentedFields.includes(f)).sort();
-  } else {
-    report.undocumentedPresent = Object.keys(fields).filter((f) => f !== '<element>').sort();
-  }
+  const seen = Object.keys(fields).filter((f) => f !== '<element>').sort();
+  const schemaFields = documentedFields ?? [];
+  report.schemaDocumentedPresent = seen.filter((f) => schemaFields.includes(f));
+  if (documentedFields !== null) report.documentedMissing = documentedFields.filter((f) => !(f in fields));
+  report.exampleOnlyPresent = seen.filter((f) => !schemaFields.includes(f) && exampleFields.includes(f));
+  report.undocumentedPresent = seen.filter((f) => !schemaFields.includes(f) && !exampleFields.includes(f));
   if (options.pseudonymizeIds && Object.keys(ids).length > 0) {
     report.pseudonymousIds = Object.fromEntries(Object.keys(ids).sort().map((k) => [k, ids[k]!.sort()]));
   }
@@ -234,8 +356,12 @@ function describeContainer(name: string, value: unknown, options: ObservationOpt
   return report;
 }
 
-function parserVerdict(body: unknown): ObservationReport['parser'] {
+function parserVerdict(source: ObservationSource, body: unknown): ParserVerdict {
   try {
+    if (source === 'pnl') {
+      const parsed = parseDemoPnl(body);
+      return { outcome: 'accepted', positions: parsed.positionCount, orders: parsed.orderCount, ordersForOpen: parsed.orderForOpenCount };
+    }
     const parsed = parseDemoPortfolio(body);
     return { outcome: 'accepted', positions: parsed.positionCount, orders: parsed.orderCount };
   } catch (error) {
@@ -244,8 +370,12 @@ function parserVerdict(body: unknown): ObservationReport['parser'] {
   }
 }
 
-/** The sanitized schema report of one demo portfolio response body. The body itself is never part of the result. */
-export function observeDemoPortfolio(body: unknown, options: ObservationOptions = {}): ObservationReport {
+/**
+ * The sanitized schema report of one demo response body of the given source. The structure is described first, from the in-memory
+ * JSON; the parser verdict is computed afterwards and cannot prevent the report. The body itself is never part of the result.
+ */
+export function observeDemoResponse(source: ObservationSource, body: unknown, options: ObservationOptions = {}): ObservationReport {
+  const schema = SCHEMAS[source];
   const salt = options.salt ?? randomBytes(32);
   const pseudonym = (text: string) => 'id_' + createHmac('sha256', salt).update(text).digest('hex').slice(0, 16);
 
@@ -254,25 +384,31 @@ export function observeDemoPortfolio(body: unknown, options: ObservationOptions 
   const cpKeys = isObject(cp) ? namedKeys(cp) : { names: [], unnamed: 0 };
   const containers: Record<string, ContainerReport> = {};
   // Every documented container, and every other array that appears in clientPortfolio.
-  const containerNames = new Set<string>(Object.keys(DOCUMENTED_ELEMENT_FIELDS));
+  const containerNames = new Set<string>(Object.keys(schema.elementFields));
   if (isObject(cp)) for (const key of cpKeys.names) if (Array.isArray(cp[key])) containerNames.add(key);
-  for (const name of [...containerNames].sort()) containers[name] = describeContainer(name, isObject(cp) ? cp[name] : undefined, options, pseudonym);
+  for (const name of [...containerNames].sort()) containers[name] = describeContainer(name, isObject(cp) ? cp[name] : undefined, schema, options, pseudonym);
 
-  return {
+  const described: Omit<ObservationReport, 'parser'> = {
     schema: 'etoro-demo-portfolio-observation:v1',
-    endpoint: 'GET /api/v1/trading/info/demo/portfolio',
+    source,
+    endpoint: schema.endpoint,
     topLevelKeys: top.names,
     topLevelUnnamedKeys: top.unnamed,
     clientPortfolio: {
       kind: cp === undefined ? 'missing' : kindOf(cp),
       keys: cpKeys.names,
       unnamedKeys: cpKeys.unnamed,
-      undocumentedKeys: cpKeys.names.filter((k) => !DOCUMENTED_CLIENT_PORTFOLIO_FIELDS.includes(k)),
-      documentedMissing: DOCUMENTED_CLIENT_PORTFOLIO_FIELDS.filter((k) => !cpKeys.names.includes(k)),
+      undocumentedKeys: cpKeys.names.filter((k) => !schema.clientPortfolioFields.includes(k)),
+      documentedMissing: schema.clientPortfolioFields.filter((k) => !cpKeys.names.includes(k)),
       credit: scalarSummary(isObject(cp) ? cp.credit : undefined),
       bonusCredit: scalarSummary(isObject(cp) ? cp.bonusCredit : undefined),
     },
     containers,
-    parser: parserVerdict(body),
   };
+  return { ...described, parser: parserVerdict(source, body) };
+}
+
+/** The O21A portfolio report: observeDemoResponse('portfolio', ...). */
+export function observeDemoPortfolio(body: unknown, options: ObservationOptions = {}): ObservationReport {
+  return observeDemoResponse('portfolio', body, options);
 }

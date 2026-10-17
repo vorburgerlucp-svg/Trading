@@ -12,9 +12,10 @@ const EXECUTION_WORDS = ['place', 'placeOrder', 'submitOrder', 'modify', 'modify
 const EXECUTION_PATH = /place|modify|cancel|replace|close|order|transfer|withdraw|deposit|trade|exercise|reply|real/i;
 
 describe('O20 eToro boundary: the allowlist', () => {
-  it('contains exactly one operation: the demo portfolio', () => {
-    expect(Object.keys(ETORO_ALLOWED_OPERATIONS).sort()).toEqual(['portfolio.demo']);
+  it('contains exactly the demo portfolio and, since O21A.1, the demo pnl read: both fixed, both demo', () => {
+    expect(Object.keys(ETORO_ALLOWED_OPERATIONS).sort()).toEqual(['pnl.demo', 'portfolio.demo']);
     expect(ETORO_ALLOWED_OPERATIONS['portfolio.demo'].path).toBe('/trading/info/demo/portfolio');
+    expect(ETORO_ALLOWED_OPERATIONS['pnl.demo'].path).toBe('/trading/info/demo/pnl');
   });
 
   it('every allowed operation is a GET: no POST, PUT, PATCH or DELETE exists in this build', () => {
@@ -28,7 +29,7 @@ describe('O20 eToro boundary: the allowlist', () => {
   it('the base URL is the eToro public API over HTTPS, and the portfolio path is the demo one', () => {
     expect(ETORO_BASE_URL).toBe('https://public-api.etoro.com/api/v1');
     expect(ETORO_BASE_URL.startsWith('https://')).toBe(true);
-    expect(ETORO_ALLOWED_OPERATIONS['portfolio.demo'].path.startsWith('/trading/info/demo/')).toBe(true);
+    for (const spec of Object.values(ETORO_ALLOWED_OPERATIONS)) expect(spec.path.startsWith('/trading/info/demo/')).toBe(true);
   });
 });
 
