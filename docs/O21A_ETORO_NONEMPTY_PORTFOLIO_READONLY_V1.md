@@ -1,6 +1,10 @@
 # O21A – eToro Non-empty Demo Portfolio Read-only V1
 
-Status: implemented. `/demo/portfolio` LIVE_OBSERVED twice (2026-10-17), HTTP 200, **empty** both times. `/demo/pnl` (O21A.1, section 11) DOCUMENTED, **not live-observed**. Base: `origin/main` = `ae6a984` (merge of PR #20, O21).
+Status: implemented and merged (PR #21, merge commit `9a226b4`; original base `ae6a984`, merge of PR #20, O21).
+- `/demo/portfolio`: LIVE_OBSERVED twice through NEXUS (2026-10-17), HTTP 200, **empty** both times.
+- `/demo/pnl` (O21A.1, section 11): LIVE_OBSERVED once through NEXUS (2026-10-17), HTTP 200, **empty**.
+- An independent direct `/demo/pnl` GET outside NEXUS was also **empty**.
+- A **non-empty** response is still **NOT live-observed**, although a demo position was open in the eToro UI. Blocker: **`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`** (section 9).
 
 O21A prepares the O20 read-only adapter for a non-empty eToro **demo** portfolio. It reads open positions and pending orders strictly with the documented schema, maps them to NEXUS instruments only through the human-governed `etoro` mapping, and stores the fields NEXUS needs. It also adds a separate read-only observation tool for the first controlled live read. Nothing here writes to the broker, unlocks anything, or touches O17, O19, O21 execution or O22.
 
@@ -16,8 +20,10 @@ O21A prepares the O20 read-only adapter for a non-empty eToro **demo** portfolio
 |---|---|
 | Path, method, `clientPortfolio` wrapper | DOCUMENTED + LIVE_OBSERVED (O20, empty portfolio) |
 | All nine containers present and arrays when empty, `credit` a JSON number | LIVE_OBSERVED (O20) |
-| Element schema of `positions` and `orders` | DOCUMENTED only |
-| Any non-empty container | **NOT live-observed** |
+| Empty `/demo/portfolio` structure (all 11 documented keys, every container empty) | LIVE_OBSERVED twice (O21A, section 11) |
+| Empty `/demo/pnl` structure (all 13 schema keys, `positions` / `orders` / `ordersForOpen` empty) | LIVE_OBSERVED once through NEXUS, and once independently outside NEXUS (section 11) |
+| Element schema of `positions` and `orders` | DOCUMENTED only. The REFERENCE_SCHEMA is the only basis for non-empty parsing. |
+| Any non-empty container / non-empty element shape | **NOT LIVE_OBSERVED** (`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`) |
 | Meaning and currency of `credit` / `bonusCredit` | DOCUMENTED as "USD"; meaning NOT_VERIFIED |
 | Element schema of `ordersForOpen`, `ordersForClose`, `ordersForCloseMultiple` | NOT documented (`items: { type: object }`, no properties) |
 | `stockOrders`, `entryOrders`, `exitOrders` | DOCUMENTED as "Obsolete" |
@@ -98,7 +104,7 @@ npm run etoro:observe-demo -- --source=portfolio|pnl --confirm-live-read [--pseu
 
 ## 6. Fixtures
 
-`test/broker/etoro/o21a-documented-fixture.ts` is the official reference example, field for field. It is marked **documented fixture — NOT live-observed** (`FIXTURE_PROVENANCE = 'documented_fixture_not_live_observed'`). No real payload was copied, and there is no "real payload fixture". After the live read, the observation report is compared with this structure.
+`test/broker/etoro/o21a-documented-fixture.ts` is the official reference example, field for field. It is marked **documented fixture — NOT live-observed** (`FIXTURE_PROVENANCE = 'documented_fixture_not_live_observed'`). No real payload was copied, and there is no "real payload fixture". The live reads so far were empty, so no observed element could be compared with this structure (`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`).
 
 ## 7. Tests
 
@@ -114,11 +120,20 @@ npm run etoro:observe-demo -- --source=portfolio|pnl --confirm-live-read [--pseu
 - `BUILD_LOCKS.liveTrading`, `.brokerOrders`, `.physicalPurchase`, `.etoroDemoExecution` = `true`.
 - No change to O21 execution, its state machine, operator auth, or O17/O19.
 - `PORTFOLIO_SAFETY_NOT_CONNECTED` stays: no eToro demo portfolio safety source is built in O21A.
-- Broker writes: 0. Real endpoints: 0. Allowed eToro read operations: still only `portfolio.demo`.
+- Broker writes: 0. Real endpoints: 0.
+- Allowed eToro read operations: exactly two fixed demo read operations, both GET:
+  - `portfolio.demo` → `/trading/info/demo/portfolio`;
+  - `pnl.demo` → `/trading/info/demo/pnl`, observation-only (used by the observation tool alone).
+- No real route and no write route.
 
 ## 9. Remaining blockers
 
-1. No live non-empty demo response observed. Every non-empty parse path rests on the documentation.
+1. **`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`**: no non-empty demo portfolio has been observed live.
+   - The demo position open in the eToro UI was visible neither through `/demo/portfolio` nor through `/demo/pnl`.
+   - A direct `/demo/pnl` GET outside NEXUS was empty too.
+   - Section 11 records the observations and the manual credential/account check.
+   - Treated as an external eToro demo API / portfolio visibility blocker: the API response does not expose the UI-visible position in the observed context.
+   - Every non-empty parse path therefore rests on the documentation alone. The non-empty parser semantics (`units`, ids, timestamps, the PnL nesting and casing of `/demo/pnl`) remain unconfirmed live.
 2. Semantics to confirm live: `units` vs NEXUS quantity (leverage/CFD vs real asset), sign/meaning of `stopLossRate`/`takeProfitRate` = 0, timestamp format (zone present?), whether ids fit safe integers.
 3. Where an order placed via O21 appears before execution (`orders` vs `ordersForOpen`). `ordersForOpen` has no documented element schema; while non-empty, the whole read is refused.
 4. Cash authority (`credit`, `bonusCredit`) not decided.
@@ -126,12 +141,13 @@ npm run etoro:observe-demo -- --source=portfolio|pnl --confirm-live-read [--pseu
 6. Human-governed `etoro` mappings must exist for the instruments held, before reconciliation can match.
 7. The eToro demo portfolio safety source (next step) is not built.
 
-## 10. First live read (after approval)
+## 10. First live read (historical, executed 2026-10-17)
 
-1. A human opens a small position in the eToro **demo** account (manually in the eToro UI; not through NEXUS — the O21 lock stays closed).
-2. `npm run etoro:observe-demo -- --source=portfolio --confirm-live-read --show-instrument-ids` with demo keys in the environment.
-3. Compare the report against section 2 and the documented fixture: `documentedMissing`, `undocumentedPresent`, kinds, parser verdict.
-4. Record the result here as LIVE_OBSERVED, then decide on the mapping and the safety source.
+The planned procedure was carried out; the results are in section 11.
+1. A human opened a demo position manually in the eToro UI, not through NEXUS. The O21 lock stayed closed.
+2. Approved, single runs of `npm run etoro:observe-demo` were made with demo keys: twice `--source=portfolio`, once `--source=pnl`.
+3. Every report was compared against the documented structure. All responses were empty, so there was no element shape to compare (`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`).
+4. No decision on the mapping or the safety source has been made.
 
 ## 11. O21A.1 – /demo/pnl read-only observation support
 
@@ -142,7 +158,23 @@ npm run etoro:observe-demo -- --source=portfolio|pnl --confirm-live-read [--pseu
 | 1 (portfolio empty in the UI) | HTTP 200, one GET. `clientPortfolio` with all 11 documented keys, none undocumented, none missing; every container an empty array; `credit` a positive non-integer number, `bonusCredit` the integer 0; parser accepted (0 positions, 0 orders). |
 | 2 (after a demo position was opened manually in the eToro UI) | HTTP 200, one GET. **Identical structure, every container still empty**; parser accepted (0/0). |
 
-LIVE_OBSERVED is therefore the empty container structure of `/demo/portfolio`. The position visible in the UI was **not** in the response. The cause is not documented. The account/key scope of the user key (environment, login, agent-portfolio or sub-account token) is **unresolved**.
+LIVE_OBSERVED is therefore the empty container structure of `/demo/portfolio`. The position visible in the UI was **not** in the response.
+
+### Live observation of /demo/pnl (2026-10-17)
+
+| Read | Result |
+|---|---|
+| 1, through NEXUS (`--source=pnl`) | HTTP 200, one GET. `clientPortfolio` with all 13 schema keys; `positions` = 0, `orders` = 0, `ordersForOpen` = 0; parser accepted. No non-empty element shape observed. |
+| Independent direct GET outside NEXUS | `GET https://public-api.etoro.com/api/v1/trading/info/demo/pnl` via PowerShell, made manually by the operator with the same existing demo credentials. Request successful: `positions`, `orders`, `ordersForOpen`, `ordersForClose`, `ordersForCloseMultiple` and `mirrors` all 0; `accountCurrencyId` = 1; `credit` present as a positive number (value not recorded). A demo position was open in the eToro UI at the same time. |
+
+### Credential / account context (checked manually by the operator)
+
+- Key environment: Demo.
+- Same eToro login as the UI.
+- Main account (not an agent portfolio or sub-account).
+- The position was open in the demo context.
+
+Despite this, both NEXUS and a direct API call outside NEXUS return an empty portfolio. The empty response is therefore not caused by the NEXUS transport or parser. The remaining blocker is kept as an external eToro demo API / portfolio visibility blocker: the API response does not expose the UI-visible position in the observed context. Blocker name: **`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`**.
 
 ### Why /demo/pnl
 
@@ -158,7 +190,7 @@ The current official guides *Calculate Available Cash*, *Calculate Total Investe
 |---|---|
 | REFERENCE_SCHEMA | The property definitions of the official reference (checked 2026-10-17). **Normative.** |
 | REFERENCE_EXAMPLE | The example response on the same page. **Not normative.** |
-| LIVE_OBSERVED | A real response. **None yet for /demo/pnl.** |
+| LIVE_OBSERVED | A real response. For `/demo/pnl`: an empty response, observed once through NEXUS and once independently outside NEXUS. The non-empty element shape remains **NOT LIVE_OBSERVED**. |
 
 Schema and example contradict each other:
 
@@ -211,7 +243,11 @@ New: `o21a1-pnl-validation.test.ts` (61 tests) and `o21a1-observation.test.ts` (
 
 ### Open
 
-- `/demo/pnl` is NOT LIVE_OBSERVED. Whether a live response follows the REFERENCE_SCHEMA or the REFERENCE_EXAMPLE shape is unknown; the report will show it.
-- The account/key scope is unresolved (see above).
+- An empty `/demo/pnl` response is LIVE_OBSERVED.
+- A non-empty `/demo/pnl` response remains NOT LIVE_OBSERVED. Whether a non-empty element follows the REFERENCE_SCHEMA or the REFERENCE_EXAMPLE shape is unknown.
+- The credential/account context was checked manually (see above).
+- Further demo reads are currently not useful.
+- Blocker: **`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`**.
 - Cash stays `not_read`.
-- The next `/demo/pnl` read needs a separate, explicit approval, for exactly one run of `npm run etoro:observe-demo -- --source=pnl --confirm-live-read --pseudonymize-ids --show-instrument-ids`.
+- `PORTFOLIO_SAFETY_NOT_CONNECTED` remains.
+- `BUILD_LOCKS.etoroDemoExecution` remains `true`.
