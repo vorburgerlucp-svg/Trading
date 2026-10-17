@@ -2,22 +2,29 @@
 // schema check, and a snapshot. It has no order method and cannot call anything outside ETORO_ALLOWED_OPERATIONS. It never writes
 // to the ledger and never maps an instrument: eToro instrumentId is the broker identity, and mappings are human-governed.
 //
-// Coverage is stated, not implied. An empty demo portfolio is a verified empty state. Cash is not read yet (its structure is not
-// observed), and no account identifier is observed, so none is invented.
+// Coverage is stated, not implied. An empty demo portfolio is a verified empty state (live observed in O20). Positions and pending
+// orders of a non-empty portfolio are read with the documented schema (O21A), which is not yet observed in a live response; the
+// coverage says so. Cash is not read, and no account identifier is observed, so none is invented.
+//
+// The generic BrokerSnapshot positions and openOrders stay empty: they need a cost currency and an instrument the payload does not
+// state. The eToro entries are carried in the eToro-specific fields instead, with the eToro instrument id as their identity.
 
 import type { AdapterConnection } from '../../ai/model-adapter.js';
 import type { BrokerSnapshot, BrokerSyncAdapter } from '../broker-sync.js';
 import { BrokerError } from '../broker-errors.js';
 import type { EtoroTransport } from './etoro-transport.js';
-import { parseDemoPortfolio } from './etoro-validation.js';
+import { parseDemoPortfolio, type EtoroPendingOrder, type EtoroPosition } from './etoro-validation.js';
 
 export interface EtoroCoverage {
-  /** Not read: clientPortfolio.credit exists, but its fields are not observed yet. No cash is derived from it. */
+  /** Not read: clientPortfolio.credit exists, but its meaning is not verified against a live account. No cash is derived from it. */
   readonly cash: 'not_read';
-  /** A verified empty container in the live demo payload. */
-  readonly positions: 'verified_empty';
-  /** Verified empty order containers in the live demo payload. */
-  readonly openOrders: 'verified_empty';
+  /**
+   * verified_empty: the container is empty (the live-observed shape). documented_schema: entries were read with the documented
+   * schema, which is not yet observed in a live response.
+   */
+  readonly positions: 'verified_empty' | 'documented_schema';
+  /** For clientPortfolio.orders; every other order container must be empty. */
+  readonly openOrders: 'verified_empty' | 'documented_schema';
   /** No stable account identifier was observed in the portfolio payload. */
   readonly accountIdentity: 'not_observed';
 }
@@ -29,11 +36,23 @@ export const ETORO_COVERAGE: EtoroCoverage = Object.freeze({
   accountIdentity: 'not_observed',
 });
 
-/** A BrokerSnapshot that states what it covers. Its accountId is null by construction in O20. */
+function coverageOf(positions: number, orders: number): EtoroCoverage {
+  if (positions === 0 && orders === 0) return ETORO_COVERAGE;
+  return Object.freeze({
+    cash: 'not_read',
+    positions: positions === 0 ? 'verified_empty' : 'documented_schema',
+    openOrders: orders === 0 ? 'verified_empty' : 'documented_schema',
+    accountIdentity: 'not_observed',
+  });
+}
+
+/** A BrokerSnapshot that states what it covers. Its accountId is null by construction. */
 export interface EtoroSnapshot extends BrokerSnapshot {
   readonly broker: 'etoro';
   readonly accountId: null;
   readonly coverage: EtoroCoverage;
+  /** The eToro positions and pending orders, validated, sorted by id. */
+  readonly etoro: { readonly positions: readonly EtoroPosition[]; readonly orders: readonly EtoroPendingOrder[] };
 }
 
 export interface EtoroSyncAdapterOptions {
@@ -75,7 +94,7 @@ export class EtoroBrokerSyncAdapter implements BrokerSyncAdapter {
   private async collect(): Promise<EtoroSnapshot> {
     try {
       const observedAt = this.options.clock().toISOString();
-      parseDemoPortfolio(await this.call());
+      const portfolio = parseDemoPortfolio(await this.call());
       const retrievedAt = this.options.clock().toISOString();
       this.connected = true;
       return {
@@ -87,7 +106,8 @@ export class EtoroBrokerSyncAdapter implements BrokerSyncAdapter {
         cash: [],
         positions: [],
         openOrders: [],
-        coverage: ETORO_COVERAGE,
+        coverage: coverageOf(portfolio.positionCount, portfolio.orderCount),
+        etoro: { positions: portfolio.positions, orders: portfolio.orders },
       };
     } catch (error) {
       this.connected = false;

@@ -13,6 +13,7 @@
     "dev": "npm run build && node dist/runtime/main.js",
     "start": "node dist/runtime/main.js",
     "db:migrate": "npm run build && node dist/runtime/migrate.js",
+    "etoro:observe-demo": "npm run build && node dist/broker/etoro/etoro-observe-cli.js",
     "test": "vitest run --project unit --project pg",
     "test:unit": "vitest run --project unit",
     "test:pg": "vitest run --project pg",
