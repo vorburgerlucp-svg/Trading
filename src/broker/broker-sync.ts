@@ -72,13 +72,36 @@ export type ReconciliationIssue =
   | { kind: 'missing_in_ledger'; instrumentId: string; broker: string }
   | { kind: 'missing_at_broker'; instrumentId: string; ledger: string }
   | { kind: 'cash_mismatch'; broker: string; ledger: string }
-  | { kind: 'unsupported_currency'; detail: string };
+  | { kind: 'unsupported_currency'; detail: string }
+  /** A broker position whose broker instrument has no human-governed NEXUS mapping: it cannot be compared, so nothing matches. */
+  | { kind: 'unmapped_broker_instrument'; brokerInstrumentId: string; broker: string };
 
 export interface ReconciliationReport {
   broker: string;
   observedAt: string;
   matched: boolean;
   issues: ReconciliationIssue[];
+}
+
+/**
+ * Compares broker quantities per NEXUS instrument with the open ledger positions of that broker: quantity_mismatch,
+ * missing_in_ledger, missing_at_broker. Shared by every broker reconciliation; it reads nothing else.
+ */
+export function reconcilePositionQuantities(
+  broker: string,
+  brokerQuantities: ReadonlyMap<string, Decimal>,
+  ledgerPositions: Pick<PortfolioSnapshot, 'positions'>['positions'],
+): ReconciliationIssue[] {
+  const issues: ReconciliationIssue[] = [];
+  const open = new Map(ledgerPositions.filter((p) => p.brokerId === broker && p.isOpen).map((p) => [p.instrumentId, p]));
+  for (const [instrumentId, quantity] of brokerQuantities) {
+    const ledger = open.get(instrumentId);
+    if (!ledger) issues.push({ kind: 'missing_in_ledger', instrumentId, broker: quantity.toString() });
+    else if (!ledger.quantity.eq(quantity)) issues.push({ kind: 'quantity_mismatch', instrumentId, broker: quantity.toString(), ledger: ledger.quantity.toString() });
+    open.delete(instrumentId);
+  }
+  for (const [instrumentId, ledger] of open) issues.push({ kind: 'missing_at_broker', instrumentId, ledger: ledger.quantity.toString() });
+  return issues;
 }
 
 /**
@@ -90,17 +113,9 @@ export function reconcileBrokerSnapshot(
   snapshot: BrokerSnapshot,
   ledger: { portfolio: Pick<PortfolioSnapshot, 'positions'>; balances: ReadonlyMap<AccountKey, AccountBalance> },
 ): ReconciliationReport {
-  const portfolio = ledger.portfolio;
-  const issues: ReconciliationIssue[] = [];
-  const ledgerPositions = new Map(portfolio.positions.filter((p) => p.brokerId === snapshot.broker && p.isOpen).map((p) => [p.instrumentId, p]));
-
-  for (const position of snapshot.positions) {
-    const ledger = ledgerPositions.get(position.instrumentId);
-    if (!ledger) issues.push({ kind: 'missing_in_ledger', instrumentId: position.instrumentId, broker: position.quantity.toString() });
-    else if (!ledger.quantity.eq(position.quantity)) issues.push({ kind: 'quantity_mismatch', instrumentId: position.instrumentId, broker: position.quantity.toString(), ledger: ledger.quantity.toString() });
-    ledgerPositions.delete(position.instrumentId);
-  }
-  for (const [instrumentId, ledger] of ledgerPositions) issues.push({ kind: 'missing_at_broker', instrumentId, ledger: ledger.quantity.toString() });
+  const brokerQuantities = new Map<string, Decimal>();
+  for (const position of snapshot.positions) brokerQuantities.set(position.instrumentId, position.quantity);
+  const issues = reconcilePositionQuantities(snapshot.broker, brokerQuantities, ledger.portfolio.positions);
 
   for (const cash of snapshot.cash) {
     if (cash.currency !== 'CHF') {

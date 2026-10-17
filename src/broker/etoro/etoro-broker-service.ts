@@ -7,7 +7,9 @@ import { derivePositions } from '../../capital/portfolio.js';
 import type { AppendOnlyLog } from '../../persistence/append-only-log.js';
 import { hashOf } from '../../persistence/canonical-json.js';
 import { BrokerError, type BrokerErrorCode } from '../broker-errors.js';
-import { reconcileBrokerSnapshot, type ReconciliationIssue } from '../broker-sync.js';
+import { reconcilePositionQuantities, type ReconciliationIssue } from '../broker-sync.js';
+import { Decimal } from '../../money/decimal.js';
+import type { EtoroPendingOrder, EtoroPosition } from './etoro-validation.js';
 import type { EtoroBrokerSyncAdapter, EtoroCoverage, EtoroSnapshot } from './etoro-sync-adapter.js';
 
 /** A snapshot older than this is stale: it is not current broker state. */
@@ -18,14 +20,39 @@ export interface EtoroLedgerView {
   balances(): ReadonlyMap<AccountKey, AccountBalance>;
 }
 
-/** What is persisted of a snapshot. It has no timestamps, so identical content keeps one snapshot id. */
+/** The provider name of the human-governed eToro instrument mapping in the instrument registry. */
+export const ETORO_INSTRUMENT_PROVIDER = 'etoro';
+
+/**
+ * How the service finds the NEXUS instrument of an eToro instrument id: the human-governed mapping (provider etoro, provider symbol
+ * = the eToro instrument id) valid at the observation time. There is no ticker fallback and nothing is registered automatically.
+ */
+export interface EtoroInstrumentResolver {
+  resolve(provider: string, providerSymbol: string, at: string): string | null;
+}
+
+/** A stored position: the validated eToro fields and the NEXUS instrument of the mapping, or null when there is none. */
+export interface EtoroPositionRecord extends EtoroPosition {
+  readonly instrumentId: string | null;
+}
+
+export interface EtoroOrderRecord extends EtoroPendingOrder {
+  readonly instrumentId: string | null;
+}
+
+/**
+ * What is persisted of a snapshot. It has no timestamps, so identical content keeps one snapshot id. positions and orders are present
+ * only when the portfolio has entries: the content of an empty portfolio is exactly the O20 content.
+ */
 export interface EtoroSnapshotContent {
   readonly broker: 'etoro';
   readonly accountId: null;
   readonly access: 'read_only';
   readonly coverage: EtoroCoverage;
-  readonly positionCount: 0;
-  readonly openOrderCount: 0;
+  readonly positionCount: number;
+  readonly openOrderCount: number;
+  readonly positions?: readonly EtoroPositionRecord[];
+  readonly orders?: readonly EtoroOrderRecord[];
 }
 
 export interface EtoroSnapshotRecord {
@@ -71,6 +98,8 @@ export interface EtoroServiceDeps {
   syncs: AppendOnlyLog<EtoroSyncRecord>;
   clock: () => Date;
   maxAgeMs?: number;
+  /** The instrument registry. Without it every eToro instrument is unmapped, so a non-empty portfolio never matches. */
+  instruments?: EtoroInstrumentResolver | null;
 }
 
 export interface EtoroSnapshotView {
@@ -105,14 +134,40 @@ function ledgerFingerprintOf(balances: ReadonlyMap<AccountKey, AccountBalance>):
 }
 
 /**
- * Only the verified empty state is persistable in O20. A snapshot that carries entries is refused, so the stored content can never
- * claim an empty state for data that was not read.
+ * The persisted content. Generic cash, positions and open orders must be empty (they are not used for eToro); the eToro entries are
+ * stored with their mapping. The content of an empty portfolio has no positions or orders field, exactly as in O20.
  */
-function contentOf(snapshot: EtoroSnapshot): EtoroSnapshotContent {
+function contentOf(snapshot: EtoroSnapshot, instruments: EtoroInstrumentResolver | null): EtoroSnapshotContent {
   if (snapshot.cash.length !== 0 || snapshot.positions.length !== 0 || snapshot.openOrders.length !== 0) {
-    throw new BrokerError('BROKER_RESPONSE_INVALID', 'the snapshot carries entries that this build does not persist');
+    throw new BrokerError('BROKER_RESPONSE_INVALID', 'the snapshot carries generic entries that this build does not persist');
   }
-  return { broker: 'etoro', accountId: null, access: 'read_only', coverage: snapshot.coverage, positionCount: 0, openOrderCount: 0 };
+  const map = (etoroInstrumentId: number): string | null => instruments?.resolve(ETORO_INSTRUMENT_PROVIDER, String(etoroInstrumentId), snapshot.observedAt) ?? null;
+  const positions = snapshot.etoro.positions.map((p) => ({ ...p, instrumentId: map(p.etoroInstrumentId) }));
+  const orders = snapshot.etoro.orders.map((o) => ({ ...o, instrumentId: map(o.etoroInstrumentId) }));
+  const base = { broker: 'etoro' as const, accountId: null, access: 'read_only' as const, coverage: snapshot.coverage, positionCount: positions.length, openOrderCount: orders.length };
+  return {
+    ...base,
+    ...(positions.length > 0 ? { positions } : {}),
+    ...(orders.length > 0 ? { orders } : {}),
+  };
+}
+
+/**
+ * The broker side of the reconciliation: the net quantity per NEXUS instrument (buy units minus sell units of its mapped positions),
+ * and one unmapped_broker_instrument issue per eToro instrument without a mapping. Pending orders do not change positions.
+ */
+function brokerSide(content: EtoroSnapshotContent): { quantities: Map<string, Decimal>; unmapped: ReconciliationIssue[] } {
+  const quantities = new Map<string, Decimal>();
+  const unmapped = new Map<number, Decimal>();
+  for (const p of content.positions ?? []) {
+    const signed = p.direction === 'buy' ? Decimal.from(p.units) : Decimal.from(p.units).negated();
+    if (p.instrumentId === null) unmapped.set(p.etoroInstrumentId, (unmapped.get(p.etoroInstrumentId) ?? Decimal.from(0)).plus(signed));
+    else quantities.set(p.instrumentId, (quantities.get(p.instrumentId) ?? Decimal.from(0)).plus(signed));
+  }
+  const issues: ReconciliationIssue[] = [...unmapped.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([id, quantity]) => ({ kind: 'unmapped_broker_instrument' as const, brokerInstrumentId: String(id), broker: quantity.toString() }));
+  return { quantities, unmapped: issues };
 }
 
 function freshnessOf(observedAt: string, nowMs: number, maxAgeMs: number): 'fresh' | 'stale' {
@@ -166,7 +221,7 @@ export class EtoroBrokerService {
     let content: EtoroSnapshotContent;
     let reconciled: { ledgerFingerprint: string; matched: boolean; issues: readonly ReconciliationIssue[] };
     try {
-      content = contentOf(snapshot);
+      content = contentOf(snapshot, this.deps.instruments ?? null);
     } catch (error) {
       if (error instanceof BrokerError) await this.recordFailure(error.code);
       throw error;
@@ -174,8 +229,9 @@ export class EtoroBrokerService {
     try {
       const balances = this.deps.ledger.balances();
       const positions = derivePositions(balances, { asOf: snapshot.observedAt, maxQuoteAgeMs: 0 });
-      const report = reconcileBrokerSnapshot(snapshot, { portfolio: { positions }, balances });
-      reconciled = { ledgerFingerprint: ledgerFingerprintOf(balances), matched: report.matched, issues: report.issues };
+      const side = brokerSide(content);
+      const issues = [...side.unmapped, ...reconcilePositionQuantities('etoro', side.quantities, positions)];
+      reconciled = { ledgerFingerprint: ledgerFingerprintOf(balances), matched: issues.length === 0, issues };
     } catch {
       await this.recordFailure('BROKER_RECONCILIATION_FAILURE');
       throw new BrokerError('BROKER_RECONCILIATION_FAILURE');

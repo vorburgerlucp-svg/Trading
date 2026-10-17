@@ -1,5 +1,5 @@
 // Schema validation of the eToro demo portfolio: fail closed, empty containers are valid, a missing or mistyped container is refused,
-// an oversized container is refused, a non-empty container is refused (its structure is not yet verified), and data outside
+// an oversized container is refused, a non-empty container is refused unless O21A reads its documented schema, and data outside
 // clientPortfolio is never used.
 import { describe, expect, it } from 'vitest';
 import { BrokerError } from '../../../src/broker/broker-errors.js';
@@ -20,23 +20,23 @@ const CONTAINERS = ['positions', 'mirrors', 'orders', 'stockOrders', 'entryOrder
 
 describe('O20 eToro validation: the empty demo portfolio', () => {
   it('an empty demo portfolio is a valid state: zero positions and zero orders', () => {
-    expect(parseDemoPortfolio(emptyDemoPortfolio())).toEqual({ positionCount: 0, orderCount: 0 });
+    expect(parseDemoPortfolio(emptyDemoPortfolio())).toMatchObject({ positionCount: 0, orderCount: 0 });
   });
 
   it('empty containers are valid, whatever the cash value is', () => {
-    expect(parseDemoPortfolio(emptyDemoPortfolio({ credit: 0 }))).toEqual({ positionCount: 0, orderCount: 0 });
-    expect(parseDemoPortfolio(emptyDemoPortfolio({ credit: '12.50' }))).toEqual({ positionCount: 0, orderCount: 0 });
+    expect(parseDemoPortfolio(emptyDemoPortfolio({ credit: 0 }))).toMatchObject({ positionCount: 0, orderCount: 0 });
+    expect(parseDemoPortfolio(emptyDemoPortfolio({ credit: '12.50' }))).toMatchObject({ positionCount: 0, orderCount: 0 });
   });
 
   it('unknown fields inside clientPortfolio are ignored when the required containers are correct', () => {
-    expect(parseDemoPortfolio(emptyDemoPortfolio({ someNewField: { anything: true }, bonusCredit: 'unknown-type' }))).toEqual({ positionCount: 0, orderCount: 0 });
+    expect(parseDemoPortfolio(emptyDemoPortfolio({ someNewField: { anything: true }, bonusCredit: 'unknown-type' }))).toMatchObject({ positionCount: 0, orderCount: 0 });
   });
 });
 
 describe('O20 eToro validation: the observed location is used, nothing else', () => {
   it('data at the top level is never used: a non-empty top-level positions field does not make the portfolio non-empty', () => {
-    expect(parseDemoPortfolio({ ...emptyDemoPortfolio(), positions: [{ instrumentId: 1 }] })).toEqual({ positionCount: 0, orderCount: 0 });
-    expect(parseDemoPortfolio({ ...emptyDemoPortfolio(), data: { positions: [{ instrumentId: 1 }] } })).toEqual({ positionCount: 0, orderCount: 0 });
+    expect(parseDemoPortfolio({ ...emptyDemoPortfolio(), positions: [{ instrumentId: 1 }] })).toMatchObject({ positionCount: 0, orderCount: 0 });
+    expect(parseDemoPortfolio({ ...emptyDemoPortfolio(), data: { positions: [{ instrumentId: 1 }] } })).toMatchObject({ positionCount: 0, orderCount: 0 });
   });
 
   it('a missing clientPortfolio is BROKER_RESPONSE_INVALID, and a top-level positions field does not replace it', () => {
@@ -88,13 +88,16 @@ describe('O20 eToro validation: bounds and refusals', () => {
     expect(error.message).toContain('too many entries');
   });
 
-  it('a non-empty positions array is refused: its structure is not verified against a live payload, so nothing is guessed', () => {
-    const error = invalidOf(() => parseDemoPortfolio(emptyDemoPortfolio({ positions: [{ instrumentId: 1, units: 2 }] })));
-    expect(error.code).toBe('BROKER_RESPONSE_INVALID');
-    expect(error.message).toContain('clientPortfolio.positions is not empty');
-  });
+  // O21A: positions and orders are read with the documented element schema; an entry that does not match it is refused, not guessed.
+  for (const container of ['positions', 'orders']) {
+    it(`a non-empty ${container} entry that does not match the documented schema is refused (O21A)`, () => {
+      const error = invalidOf(() => parseDemoPortfolio(emptyDemoPortfolio({ [container]: [{ instrumentId: 1, units: 2 }] })));
+      expect(error.code).toBe('BROKER_RESPONSE_INVALID');
+      expect(error.message).toContain('clientPortfolio.' + container + '[0]');
+    });
+  }
 
-  for (const container of CONTAINERS.filter((c) => c !== 'positions')) {
+  for (const container of CONTAINERS.filter((c) => c !== 'positions' && c !== 'orders')) {
     it(`a non-empty ${container} is refused too`, () => {
       expect(invalidOf(() => parseDemoPortfolio(emptyDemoPortfolio({ [container]: [{ id: 1 }] }))).message).toContain('clientPortfolio.' + container + ' is not empty');
     });

@@ -88,6 +88,8 @@ export async function composeRuntime(input: ComposeInput): Promise<RuntimeServic
         reconciliations: input.etoro.reconciliations,
         syncs: input.etoro.syncs,
         clock,
+        // The human-governed etoro mapping maps eToro positions to NEXUS instruments; nothing is registered automatically.
+        instruments: registry,
       })
     : null;
   const executionInput = input.etoroDemoExecution;
