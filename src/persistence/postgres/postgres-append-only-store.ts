@@ -25,11 +25,20 @@ export class PostgresAppendOnlyStore<T> implements AppendOnlyStore<T> {
     readonly logName: string,
     private readonly projector: Projector<T> | undefined,
     private readonly lockTimeoutMs: number,
+    private readonly readOnly = false,
   ) {}
 
   static async open<T>(pool: PgPool, logName: string, options: { projector?: Projector<T>; lockTimeoutMs?: number } = {}): Promise<PostgresAppendOnlyStore<T>> {
     await pool.query('INSERT INTO append_only_logs (log_name) VALUES ($1) ON CONFLICT (log_name) DO NOTHING', [logName]);
     return new PostgresAppendOnlyStore<T>(pool, logName, options.projector, options.lockTimeoutMs ?? 15_000);
+  }
+
+  /**
+   * O22: a store that can only read. Opening it writes nothing (no log head row is created), and every append is refused before
+   * any statement. A missing log reads as empty. Used by inspection and dry-run tools.
+   */
+  static openReadOnly<T>(pool: PgPool, logName: string): PostgresAppendOnlyStore<T> {
+    return new PostgresAppendOnlyStore<T>(pool, logName, undefined, 15_000, true);
   }
 
   loadAll(): Promise<readonly LogRecord<T>[]> {
@@ -41,6 +50,7 @@ export class PostgresAppendOnlyStore<T> implements AppendOnlyStore<T> {
   }
 
   async writeExclusive<R>(knownSequence: number, decide: (newer: readonly LogRecord<T>[]) => WriteDecision<T, R>): Promise<R> {
+    if (this.readOnly) throw new Error('read-only store: ' + this.logName + ' cannot be written');
     const client = await this.pool.connect();
     let failed: unknown;
     // A connection that dies mid-transaction emits 'error' on the client; without a listener that

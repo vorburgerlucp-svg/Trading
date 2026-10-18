@@ -106,6 +106,8 @@ export interface TdQuote {
   name?: string;
   micCode?: string;
   currency?: string;
+  /** O22: currency_quote, which Twelve Data documents for crypto pairs. Kept as text; only an ISO code is ever used (twelve-data.ts). */
+  currencyQuote?: string;
   timestamp: number;
   lastQuoteAt?: number;
   open: string;
@@ -127,11 +129,13 @@ export function parseQuote(body: unknown): TdQuote {
   const name = optStr(q.name, 'name', 300);
   const micCode = optStr(q.mic_code, 'mic_code', 16);
   const currency = optStr(q.currency, 'currency', 16);
+  const currencyQuote = optStr(q.currency_quote, 'currency_quote', 32);
   return {
     symbol: str(q.symbol, 'symbol', 64),
     ...(name !== undefined ? { name: sanitizeText(name) } : {}),
     ...(micCode !== undefined ? { micCode } : {}),
     ...(currency !== undefined ? { currency } : {}),
+    ...(currencyQuote !== undefined ? { currencyQuote } : {}),
     timestamp,
     ...(lastQuoteAt !== undefined ? { lastQuoteAt } : {}),
     open: decimalText(q.open, 'open'),

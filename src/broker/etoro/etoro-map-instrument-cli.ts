@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { InstrumentRegistry } from '../../market-data/instrument-registry.js';
+import { openRegistryReadOnly } from '../../market-data/registry-inspect-cli.js';
 import { createPoolFromEnv } from '../../persistence/postgres/pool.js';
 import { openPostgresMarketDataStores } from '../../persistence/postgres/postgres-stores.js';
 import { INSTRUMENT_METADATA_REPORT_VERSION, parseInstrumentMetadata } from './etoro-instrument-metadata.js';
@@ -89,7 +90,10 @@ async function main(): Promise<void> {
     argv: process.argv.slice(2),
     now: new Date().toISOString(),
     readFile: (path) => readFileSync(path),
+    // A dry run opens the registry strictly read-only (read-only session and store: nothing at all is written, not even a log row).
+    // Only --apply opens it for the one append.
     openRegistry: async () => {
+      if (!process.argv.includes(APPLY_FLAG)) return openRegistryReadOnly(process.env);
       const pool = createPoolFromEnv(process.env, { max: 1, applicationName: 'nexus-etoro-map-instrument' });
       const stores = await openPostgresMarketDataStores(pool);
       return { registry: await InstrumentRegistry.open(stores.instruments), close: () => pool.end() };

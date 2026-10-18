@@ -343,7 +343,61 @@ The production registry could **not** be checked from this session: no `DATABASE
   - Twelve Data's ETH/USD (an exchange or aggregate price) is not eToro's execution price. The order is by **amount**, so the quote only checks freshness and sanity; the units come from eToro.
 - **Currency assumption.** If eToro's ETH were not quoted in USD, `openRate` and the units/rate arithmetic would not be USD. The valuation does not depend on it: `amount` and `pnL` are in the account currency, USD (G2).
 
-## 15. Safety boundaries (unchanged)
+## 15. Registry, database and ETH/USD market data (B4, B8)
+
+### Database status (2026-10-18, this session)
+
+- No authorized database access:
+  - `DATABASE_URL` and `PG*` are not set (neither process nor user scope);
+  - no PostgreSQL listens on the usual local ports, and no postgres process runs.
+- The runtime reads the database only from `DATABASE_URL` (README); there is no other configured connection.
+- Foreign `.env` files were not opened.
+- No database was created, and no throwaway test database is presented as the registry.
+- **The operator's registry was therefore not read.** Whether ETH/USD exists there, is active, crypto and USD, or has an eToro or Twelve Data mapping is **unknown**. The repository holds no ETH instrument.
+
+### New: strictly read-only inspection
+
+- **`PostgresAppendOnlyStore.openReadOnly`.** Opening it writes nothing; `open` inserts a log row, this does not. Every append is refused before any statement.
+- **`npm run registry:inspect -- --symbol=ETH --etoro-instrument-id=100001`** (`src/market-data/registry-inspect-cli.ts`).
+  - The session is opened with `default_transaction_read_only=on`, so PostgreSQL itself refuses any write, and the read-only store is used.
+  - Per match it prints: id, symbol, name, asset class, currency, active, exchange, time zone, calendar, all mappings, and the checks `crypto`, `quotedInUsd`, `symbolIsEthUsd`, `openEtoroMapping`, `openTwelveDataMapping`. It also prints what eToro 100001 resolves to.
+  - It never prints `DATABASE_URL` or a key.
+  - The base currency (ETH) is not a registry field and is **not** derived from the symbol; `symbolIsEthUsd` only compares the stored symbol.
+- **`etoro:map-instrument` without `--apply`** now uses the same read-only path. Before, the dry run opened the log with `open`, which inserts an `append_only_logs` row if missing. Now a dry run writes nothing at all (PostgreSQL test). Only `--apply --confirm-human-mapping` opens for the one append.
+
+### ETH/USD quote and currency (B8)
+
+**Integration as built.**
+- `TwelveDataMarketDataProvider.getQuote` reads `GET /quote?symbol=ETH/USD`. It refuses a quote for another symbol.
+- `observedAt` is `last_quote_at` (else `timestamp`). The demo gate needs it ≤ 60 s old, from a production source, at create and at execute.
+
+**Currency.**
+- Before O22, the quote currency came only from `currency`, and only as an ISO code.
+- The Twelve Data documentation lists `currency` for `/quote` but shows no crypto example. For crypto pairs it documents `currency_base` / `currency_quote` (on the cryptocurrencies reference).
+- O22 change: if `currency` is absent, an **ISO** `currency_quote` is used. A name such as "US Dollar" is **not** translated. The symbol `ETH/USD` is **never** parsed for a currency. `currency` and `currency_quote` that disagree are a schema error.
+- Without a stated ISO code the quote has no currency, and the gate refuses with `INSTRUMENT_NOT_USD` (tested).
+
+**Not verified (no external call made):** whether Twelve Data's ETH/USD `/quote` actually states `USD`, and whether `symbol_search` returns ETH/USD with `currency: USD`. The registration needs the latter; the gate needs the former.
+
+### Planned mapping (unchanged, dry run only)
+
+- **Evidence:** `docs/evidence/O22_etoro_instrument_metadata_100001_2026-10-18.json` (sha256 `3e898fcd…340528c`): 100001, Crypto, ETH, Ethereum.
+- **Plan:** `etoro / 100001 / 100001 → <NEXUS ETH/USD>`, `validFrom` set by the human, actor human, no exchange.
+- **Conditions:** It needs an existing, active, crypto, USD instrument. It refuses a duplicate and never creates an instrument.
+
+### Missing before registration and mapping
+
+1. **Read the operator's registry.** The operator runs `npm run registry:inspect -- --symbol=ETH --etoro-instrument-id=100001` in the NEXUS environment (with `DATABASE_URL`). It is read-only.
+2. **If no ETH/USD instrument exists,** register it. This needs approval: it is a productive write and an authenticated Twelve Data request.
+   - Run the runtime with `TWELVE_DATA_API_KEY` (production) and `POST /api/instruments/register` `{ "providerSymbol": "ETH/USD", "validFrom": "<UTC now>" }`.
+   - It is refused unless Twelve Data states `currency` and a time zone for it.
+   - If ETH/USD already exists: no registration, and nothing is duplicated.
+3. **Quote check.** This also needs approval: an authenticated Twelve Data request.
+   - `GET /api/market/quote?instrumentId=<ETH/USD>` must show `currency: "USD"` and a production source.
+   - If it shows no currency, the cycle cannot start: the gate refuses, and B8 stays open.
+4. **Mapping.** `npm run etoro:map-instrument -- --instrument-id=<ETH/USD> --metadata-report=docs/evidence/O22_etoro_instrument_metadata_100001_2026-10-18.json --valid-from=<UTC> --operator=<id>` as a dry run (read-only); then, by a separate human decision, `--apply --confirm-human-mapping`.
+
+## 16. Safety boundaries (unchanged)
 
 - `BUILD_LOCKS` = `{ liveTrading, brokerOrders, physicalPurchase, etoroDemoExecution }`, all `true`.
 - `TRADING_MODE=paper`, `ALLOW_LIVE_TRADING=false`.

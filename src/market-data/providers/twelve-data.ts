@@ -422,6 +422,15 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
     const { instrument, mapping } = request;
     const q = parseQuote(await this.request('/quote', { symbol: mapping.providerSymbol, ...(this.settings.minimalRequests ? {} : venueParams(instrument, mapping)) }));
     if (q.symbol.toUpperCase() !== mapping.providerSymbol.toUpperCase()) throw new MarketDataError('schema_invalid', PROVIDER, 'quote is for another symbol');
+    // The quote currency comes only from the response: `currency`, else (O22, crypto pairs) `currency_quote`, and only as an ISO code.
+    // A name such as "US Dollar" is not translated, the symbol (e.g. "ETH/USD") is never parsed for it, and two different stated
+    // currencies are a schema error. Without a stated ISO code the quote has no currency, and the demo gate refuses it.
+    const statedCurrency = q.currency && ISO_CURRENCY.test(q.currency) ? q.currency : undefined;
+    const statedQuoteCurrency = q.currencyQuote && ISO_CURRENCY.test(q.currencyQuote) ? q.currencyQuote : undefined;
+    if (statedCurrency !== undefined && statedQuoteCurrency !== undefined && statedCurrency !== statedQuoteCurrency) {
+      throw new MarketDataError('schema_invalid', PROVIDER, 'quote states two different currencies');
+    }
+    const currency = statedCurrency ?? statedQuoteCurrency;
     const retrievedAt = toUtcIso(this.clock().getTime());
     const source = this.source('quote');
     const quote: MarketQuote = {
@@ -433,7 +442,7 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
       low: Decimal.from(q.low),
       ...(q.previousClose !== undefined ? { previousClose: Decimal.from(q.previousClose) } : {}),
       ...(q.volume !== undefined && instrument.assetClass !== 'forex' ? { volume: Decimal.from(q.volume) } : {}),
-      ...(q.currency && ISO_CURRENCY.test(q.currency) ? { currency: q.currency } : {}),
+      ...(currency !== undefined ? { currency } : {}),
       marketOpen: q.isMarketOpen,
       // last_quote_at = last minute candle; `timestamp` is only the opening candle (conservative fallback).
       observedAt: toUtcIso((q.lastQuoteAt ?? q.timestamp) * 1000),
