@@ -12,10 +12,11 @@ const MANUAL_POSITION = 3000000999;
 const FILLED_AT = '2026-10-20T10:00:05.000Z';
 const CLOSED_AT = '2026-10-20T10:20:05.000Z';
 
-function view(v: { id: string; action: 'open' | 'close'; state: string; positionIds?: number[]; positionId?: number | null; side?: 'buy' | 'sell'; etoroId?: number; filledAt?: string }): IntentView {
+function view(v: { id: string; action: 'open' | 'close'; state: string; positionIds?: number[]; positionId?: number | null; side?: 'buy' | 'sell'; etoroId?: number; filledAt?: string; settlementType?: string | null }): IntentView {
   return {
     intentId: v.id,
     state: v.state,
+    brokerSettlementType: v.settlementType === undefined ? (v.action === 'open' ? 'real' : null) : v.settlementType,
     intent: { action: v.action, etoroInstrumentId: v.etoroId ?? ETH, side: v.side ?? 'buy', positionId: v.positionId ?? null },
     brokerPositionIds: v.positionIds ?? [],
     history: [{ state: 'CREATED', at: '2026-10-20T09:59:00.000Z', reason: 'x' }, ...(v.state === 'FILLED' ? [{ state: 'FILLED', at: v.filledAt ?? FILLED_AT, reason: 'x' }] : [])],
@@ -42,8 +43,16 @@ describe('O22 cycle reconciliation', () => {
   it('after the open: the broker-confirmed position is in a later fresh snapshot -> consistent', () => {
     const r = reconcileDemoCycle([open], snapshot([{ positionId: NEXUS_POSITION }]));
     expect(r.verdict).toBe('consistent');
-    expect(r.items).toEqual([{ intentId: 'eint_open', action: 'open', state: 'FILLED', kind: 'open_position_confirmed', positionId: NEXUS_POSITION }]);
+    expect(r.items).toEqual([{ intentId: 'eint_open', action: 'open', state: 'FILLED', kind: 'open_position_confirmed', positionId: NEXUS_POSITION, settlementType: 'real' }]);
     expect(r.externalPositions).toEqual([]);
+    expect(r.reasons).toEqual([]);
+  });
+
+  it('a filled open the broker did not state as a real asset is flagged: its units are not an asset quantity', () => {
+    for (const settlementType of ['cfd', 'marginTrade', null]) {
+      const r = reconcileDemoCycle([view({ id: 'eint_open', action: 'open', state: 'FILLED', positionIds: [NEXUS_POSITION], settlementType })], snapshot([{ positionId: NEXUS_POSITION }]));
+      expect(r.reasons, String(settlementType)).toContain('PRODUCT_TYPE_NOT_CONFIRMED_REAL');
+    }
   });
 
   it('a hand-opened position on the same instrument is external: it is never taken for the NEXUS position', () => {
@@ -65,7 +74,7 @@ describe('O22 cycle reconciliation', () => {
     const after = '2026-10-20T10:21:00.000Z';
     const gone = reconcileDemoCycle([open, close], snapshot([], { observedAt: after }));
     expect(gone.verdict).toBe('consistent');
-    expect(gone.items).toEqual([{ intentId: 'eint_close', action: 'close', state: 'FILLED', kind: 'close_confirmed', positionId: NEXUS_POSITION }]);
+    expect(gone.items).toEqual([{ intentId: 'eint_close', action: 'close', state: 'FILLED', kind: 'close_confirmed', positionId: NEXUS_POSITION, settlementType: null }]);
     const still = reconcileDemoCycle([open, close], snapshot([{ positionId: NEXUS_POSITION }], { observedAt: after }));
     expect(still.verdict).toBe('inconsistent');
     expect(still.items[0]!.kind).toBe('closed_position_still_open');

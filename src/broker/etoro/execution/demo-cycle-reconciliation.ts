@@ -33,6 +33,8 @@ export interface CycleItem {
   readonly state: string;
   readonly kind: CycleItemKind;
   readonly positionId: number | null;
+  /** The product type the broker stated in the order status of this intent (cfd, real, ...), or null when it stated none. */
+  readonly settlementType: string | null;
 }
 
 export interface DemoCycleReconciliation {
@@ -74,7 +76,7 @@ export function reconcileDemoCycle(intents: readonly IntentView[], snapshot: Eto
   const after = (at: string | null): boolean => snapshot !== null && at !== null && Date.parse(snapshot.observedAt) >= Date.parse(at);
 
   for (const v of intents) {
-    const base = { intentId: v.intentId, action: v.intent.action, state: v.state };
+    const base = { intentId: v.intentId, action: v.intent.action, state: v.state, settlementType: v.brokerSettlementType ?? null };
     if (PENDING_STATES.has(v.state)) {
       items.push({ ...base, kind: 'outcome_pending', positionId: v.intent.positionId });
       continue;
@@ -103,6 +105,8 @@ export function reconcileDemoCycle(intents: readonly IntentView[], snapshot: Eto
 
   for (const item of items) {
     if (INCONSISTENT.has(item.kind) || UNKNOWN.has(item.kind)) reasons.push(item.kind.toUpperCase());
+    // The units of a CFD or margin position are not an asset quantity: a filled open that the broker did not state as "real" is flagged.
+    if (item.action === 'open' && item.kind === 'open_position_confirmed' && item.settlementType !== 'real') reasons.push('PRODUCT_TYPE_NOT_CONFIRMED_REAL');
   }
   const externalPositions = positions
     .filter((p) => !nexusPositions.has(p.positionId))

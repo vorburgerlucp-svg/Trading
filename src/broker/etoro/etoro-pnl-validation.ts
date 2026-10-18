@@ -12,8 +12,11 @@
 //
 // Read: positions (TradingRealAdminApi_Position + unrealizedPnL), orders, ordersForOpen. Must be empty: mirrors (copy trading),
 // ordersForClose, ordersForCloseMultiple (closing flows are out of scope), and stockOrders / entryOrders / exitOrders when present.
-// credit, bonusCredit, unrealizedPnL and accountCurrencyId are type-checked and NOT read: cash stays not_read.
+// credit, bonusCredit, unrealizedPnL and accountCurrencyId are type-checked and NOT read by parseDemoPnl: cash stays not_read there.
+// O22: parseDemoPnlValuationInput additionally returns credit, accountCurrencyId and the ordersForOpen external costs, for the
+// demo account safety source only (the guide formulas). It is exactly as strict: anything parseDemoPnl refuses is refused.
 
+import { Decimal } from '../../money/decimal.js';
 import {
   arrayAt,
   booleanAt,
@@ -169,6 +172,47 @@ function parsePnlOrderForOpen(value: unknown, path: string): EtoroPnlOrderForOpe
 function optionalFiniteNumber(value: unknown, path: string): void {
   if (value === undefined || value === null) return;
   numberAt(value, path, { min: -MAX_MAGNITUDE });
+}
+
+/**
+ * O22: the account values the official guides compute from this response ("Calculate Available Cash", "Calculate Total Invested",
+ * "Calculate Profit/Loss", "Calculate Equity", checked 2026-10-18), read only from schema fields of a response parseDemoPnl
+ * accepted. A value the guides need and the response does not state is null: it is never read as zero.
+ */
+export interface EtoroDemoPnlAccount {
+  /** clientPortfolio.credit. */
+  readonly creditUsd: string;
+  /** clientPortfolio.accountCurrencyId ("1 = USD"), null when absent. */
+  readonly accountCurrencyId: number | null;
+  /** Σ ordersForOpen[i].totalExternalCosts (mirrorID = 0 only; mirrors are refused). null when an order does not state it. */
+  readonly ordersForOpenExternalCostsUsd: string | null;
+}
+
+export interface EtoroDemoPnlValuationInput extends EtoroDemoPnl {
+  readonly account: EtoroDemoPnlAccount;
+}
+
+/** parseDemoPnl plus the account values. The same strictness: anything parseDemoPnl refuses is refused here. */
+export function parseDemoPnlValuationInput(body: unknown): EtoroDemoPnlValuationInput {
+  const parsed = parseDemoPnl(body);
+  const portfolio = objectAt(objectAt(body, 'pnl').clientPortfolio, 'clientPortfolio');
+  const creditUsd = numberAt(portfolio.credit, 'clientPortfolio.credit', { min: -MAX_MAGNITUDE });
+  const accountCurrencyId = portfolio.accountCurrencyId === undefined || portfolio.accountCurrencyId === null ? null : codeAt(portfolio.accountCurrencyId, 'clientPortfolio.accountCurrencyId');
+  const forOpen = arrayAt(portfolio.ordersForOpen, 'clientPortfolio.ordersForOpen');
+  let costs: Decimal | null = Decimal.from(0);
+  for (let i = 0; i < forOpen.length; i++) {
+    const o = objectAt(forOpen[i], 'clientPortfolio.ordersForOpen[' + i + ']');
+    if (o.totalExternalCosts === undefined || o.totalExternalCosts === null) {
+      costs = null;
+      continue;
+    }
+    const cost = numberAt(o.totalExternalCosts, 'clientPortfolio.ordersForOpen[' + i + '].totalExternalCosts', { min: 0 });
+    if (costs !== null) costs = costs.plus(cost);
+  }
+  return Object.freeze({
+    ...parsed,
+    account: Object.freeze({ creditUsd, accountCurrencyId, ordersForOpenExternalCostsUsd: costs === null ? null : costs.toString() }),
+  });
 }
 
 /**

@@ -10,6 +10,7 @@ import { EToroDemoExecutionAdapter, DemoWritePacer } from '../../../src/broker/e
 import { HttpsDemoExecutionTransport, type DemoExecutionFetch } from '../../../src/broker/etoro/execution/etoro-demo-execution-transport.js';
 import {
   EtoroDemoExecutionService,
+  type DemoSafetySource,
   type AttemptRecord,
   type ConfirmationRecord,
   type IntentEvent,
@@ -131,6 +132,8 @@ export interface FixtureOptions {
   /** Replaces the quote source, e.g. to hold a gate back while another process acts. */
   quoteSource?: (instrumentId: string) => Promise<GateQuote | null>;
   safety?: PortfolioSafetyDecision | null;
+  /** O22: a real safety source (e.g. the demo account source over a fixture transport) instead of a fixed decision. */
+  safetySource?: DemoSafetySource;
   quote?: GateQuote | null;
   killSwitch?: KillSwitchState;
   broker?: { connection: string; lastSuccessfulSync: string | null };
@@ -213,7 +216,7 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
     reconciliations,
     registry,
     killSwitch,
-    safety: { current: async () => safety },
+    safety: options.safetySource ?? { current: async () => safety },
     quotes: { latest: async (instrumentId) => (options.quoteSource ? options.quoteSource(instrumentId) : quote) },
     brokerStatus: () => brokerStatus,
     executionEnabled: options.executionEnabled ?? true,

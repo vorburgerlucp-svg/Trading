@@ -12,6 +12,7 @@ import type { EtoroReconciliationRecord, EtoroSnapshotRecord, EtoroSyncRecord } 
 import { HttpsDemoExecutionTransport } from '../../src/broker/etoro/execution/etoro-demo-execution-transport.js';
 import { DEMO_E2E_CYCLE_POLICY_VERSION } from '../../src/broker/etoro/execution/execution-gate.js';
 import type { AttemptRecord, ConfirmationRecord, IntentEvent, ReconciliationRecord } from '../../src/broker/etoro/execution/etoro-demo-execution-service.js';
+import type { DemoAccountValuationRecord } from '../../src/broker/etoro/execution/demo-account-safety.js';
 import { BUILD_LOCKS, loadSafetyConfig } from '../../src/nexus/safety.js';
 import { createRuntimeHandler } from '../../src/runtime/app.js';
 import { composeRuntime, type ComposeInput } from '../../src/runtime/compose.js';
@@ -31,7 +32,8 @@ afterEach(async () => {
   server = null;
 });
 
-async function runtime(execution: boolean) {
+async function runtime(execution: boolean, options: { injectSafety?: boolean } = {}) {
+  const injectSafety = options.injectSafety ?? true;
   const now = () => new Date(O21_NOW);
   const instruments = new InMemoryAppendOnlyStore<InstrumentEvent>();
   const registry = await InstrumentRegistry.open(instruments, { clock: now });
@@ -67,8 +69,10 @@ async function runtime(execution: boolean) {
             attempts: await AppendOnlyLog.inMemory<AttemptRecord>('etoro-demo-execution-attempts', { clock: now }),
             confirmations: await AppendOnlyLog.inMemory<ConfirmationRecord>('etoro-demo-broker-confirmations', { clock: now }),
             reconciliations: await AppendOnlyLog.inMemory<ReconciliationRecord>('etoro-demo-execution-reconciliations', { clock: now }),
-            // TESTS ONLY (the entry point never passes them): a safety decision and a quote, so the gate can approve at creation.
-            safetyForTests: { current: async () => normalSafety() },
+            accountValuations: await AppendOnlyLog.inMemory<DemoAccountValuationRecord>('etoro-demo-account-valuations', { clock: now }),
+            // TESTS ONLY (the entry point never passes them): a quote, and unless the test wants the real demo account source, a
+            // safety decision, so the gate can approve at creation.
+            ...(injectSafety ? { safetyForTests: { current: async () => normalSafety() } } : {}),
             quotesForTests: { latest: async () => freshQuote() },
           },
         }
@@ -95,7 +99,21 @@ describe('O22 runtime: GET /api/broker/etoro/demo/cycle', () => {
     expect(res.json.cycle.reconciliation.verdict).toBe('unknown');
     expect(res.json.cycle.reconciliation.reasons).toContain('SNAPSHOT_MISSING');
     expect(res.json.cycle.safetyReadiness.connected).toBe(false);
-    expect(res.json.cycle.safetyReadiness.gateReason).toBe('PORTFOLIO_SAFETY_NOT_CONNECTED');
+    expect(res.json.cycle.safetyReadiness.reasons).toContain('PORTFOLIO_SAFETY_NOT_CONNECTED');
+    expect(r.readOnly.calls).toEqual([]);
+    expect(r.broker.requests).toEqual([]);
+  });
+
+  it('the production wiring passes the demo account safety source; without released evidence it sends nothing and every open is refused', async () => {
+    const r = await runtime(true, { injectSafety: false });
+    const { createdBy: _ignored, ...intent } = openInput({ amount: '100' });
+    void _ignored;
+    const created = await r.call('POST', '/api/broker/etoro/demo/intents', intent);
+    expect(created.json.intent.state).toBe('REJECTED');
+    expect(created.json.intent.gateReasons).toContain('PORTFOLIO_SAFETY_NOT_CONNECTED');
+    const cycle = await r.call('GET', '/api/broker/etoro/demo/cycle');
+    expect(cycle.json.cycle.safetyReadiness.connected).toBe(false);
+    expect(cycle.json.cycle.safetyReadiness.reasons).toEqual(expect.arrayContaining(['PORTFOLIO_SAFETY_NOT_CONNECTED', 'DEMO_PNL_NONEMPTY_NOT_LIVE_OBSERVED']));
     expect(r.readOnly.calls).toEqual([]);
     expect(r.broker.requests).toEqual([]);
   });

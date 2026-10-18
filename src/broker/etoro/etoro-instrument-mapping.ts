@@ -48,6 +48,12 @@ function canonical(value: string): number | null {
   return Number.isFinite(ms) && new Date(ms).toISOString() === value ? ms : null;
 }
 
+export interface GovernedEtoroMappingPlan {
+  readonly mapping: { readonly instrumentId: string; readonly provider: string; readonly providerSymbol: string; readonly providerInstrumentId: string; readonly validFrom: string };
+  readonly by: { readonly kind: 'human'; readonly id: string };
+  readonly reason: string;
+}
+
 /**
  * Adds the eToro mapping of one NEXUS instrument, by a named human, from verified metadata. Returns the mapping written. Every
  * contradiction is refused before anything is written.
@@ -58,6 +64,13 @@ export async function applyGovernedEtoroMapping(
   actor: unknown,
   now: string,
 ): Promise<{ instrumentId: string; provider: string; providerSymbol: string; validFrom: string }> {
+  const plan = planGovernedEtoroMapping(registry, request, actor, now);
+  await registry.addMapping(plan.mapping, { at: now, by: plan.by, reason: plan.reason });
+  return { instrumentId: plan.mapping.instrumentId, provider: plan.mapping.provider, providerSymbol: plan.mapping.providerSymbol, validFrom: plan.mapping.validFrom };
+}
+
+/** Every check of applyGovernedEtoroMapping, without writing: the mapping that would be written, or a refusal. */
+export function planGovernedEtoroMapping(registry: InstrumentRegistry, request: GovernedEtoroMappingRequest, actor: unknown, now: string): GovernedEtoroMappingPlan {
   if (typeof actor !== 'object' || actor === null || Array.isArray(actor)) throw new EtoroMappingError('MAPPING_ACTOR_INVALID', 'a named human is required');
   const a = actor as Record<string, unknown>;
   if (Object.keys(a).some((k) => k !== 'kind' && k !== 'id') || a.kind !== 'human' || typeof a.id !== 'string' || !/^[A-Za-z0-9_.@-]{1,64}$/.test(a.id)) {
@@ -92,10 +105,9 @@ export async function applyGovernedEtoroMapping(
 
   // No exchange: the O20 sync and the O21 gate resolve without one, and a mapping with an exchange would never match.
   const mapping = { instrumentId: request.instrumentId, provider: ETORO_MAPPING_PROVIDER_NAME, providerSymbol, providerInstrumentId: providerSymbol, validFrom: request.validFrom };
-  await registry.addMapping(mapping, {
-    at: now,
+  return Object.freeze({
+    mapping: Object.freeze(mapping),
     by,
     reason: 'O22 governed eToro mapping by a named human; evidence ' + reportSha256 + ' (type ' + metadata.type + ', symbol ' + metadata.symbol + ')',
   });
-  return { instrumentId: mapping.instrumentId, provider: mapping.provider, providerSymbol, validFrom: mapping.validFrom };
 }

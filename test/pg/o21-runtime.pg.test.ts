@@ -108,6 +108,8 @@ describe.skipIf(!pgAvailable)('O21 runtime on PostgreSQL' + (pgAvailable ? '' : 
 
     const logs = await rows(db.name, "SELECT log_name, (SELECT count(*)::int FROM append_only_records r WHERE r.log_name = l.log_name) AS n FROM append_only_logs l WHERE log_name LIKE 'etoro-demo-%' ORDER BY 1");
     expect(logs).toEqual([
+      // O22: the demo account safety source is wired; without released evidence it reads nothing and records no valuation.
+      { log_name: 'etoro-demo-account-valuations', n: 0 },
       { log_name: 'etoro-demo-broker-confirmations', n: 0 },
       { log_name: 'etoro-demo-execution-attempts', n: 0 },
       { log_name: 'etoro-demo-execution-intents', n: 2 },

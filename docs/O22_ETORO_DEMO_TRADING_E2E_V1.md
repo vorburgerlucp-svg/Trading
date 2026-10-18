@@ -2,11 +2,11 @@
 
 Status: **implemented and tested offline; not released.** Base: `519233d` (merge of PR #24, O21C).
 - No eToro request was sent while building O22: no authenticated read, no demo write, no metadata read.
-- Every build lock stays closed; `BUILD_LOCKS.etoroDemoExecution = true` refuses every demo write in this build.
-- `PORTFOLIO_SAFETY_NOT_CONNECTED` stays: the runtime has no demo safety source, so every **open** is refused.
-- The first demo buy therefore **cannot** happen with this build. Section 9 lists what must be decided and changed first, section 8 the exact sequence for afterwards.
+- `BUILD_LOCKS.etoroDemoExecution = true` refuses every demo write in this build.
+- The demo account safety source (B2, variant A, section 5) is built and wired. It answers `null` until a non-empty `/demo/pnl` has been observed live and recorded, so every open is still refused with `PORTFOLIO_SAFETY_NOT_CONNECTED`.
+- The first demo buy therefore cannot happen with this build. Section 9 lists what is still open; section 8 gives the exact sequence for afterwards.
 
-Naming note: an unrelated, uncommitted work package "O22 OpenAI shadow provider" exists in another local worktree (with a migration `014_model_run_usage.sql`). This package uses its own file and branch names (`O22_ETORO_DEMO_TRADING_E2E_V1.md`, `feature/o22-etoro-demo-trading-e2e-v1`), adds no migration, and touches none of those files. The numbering should be reconciled before both are merged.
+Naming note: an unrelated, uncommitted work package "O22 OpenAI shadow provider" exists in another local worktree (with a migration `014_model_run_usage.sql`). This package uses its own file and branch names, adds no migration, and touches none of those files. The numbering should be reconciled before both are merged.
 
 ## 1. What already existed and is reused
 
@@ -14,206 +14,208 @@ Naming note: an unrelated, uncommitted work package "O22 OpenAI shadow provider"
 |---|---|---|
 | Read-only demo portfolio sync, snapshot, reconciliation against the ledger | O20, O21A | baseline and after-trade portfolio |
 | Non-empty portfolio parser (live-observed for positions) | O21A, O21B, O21C | identifying positions by `positionID` |
+| `/demo/pnl` parser (REFERENCE_SCHEMA, only empty live-observed) | O21A.1 | the account valuation of the safety source |
 | `ExecutionIntent`, state machine, risk gate, operator authentication, routes | O21 | the cycle itself, unchanged |
-| Reservation step (`SUBMITTING` inside the log's critical section) | O21 | at-most-once, now also the cycle budget |
-| AMBIGUOUS handling (lookup by original `x-request-id`; a negative lookup decides nothing; an AMBIGUOUS close is never reconciled) | O21 | timeouts and unclear answers |
+| Reservation step (`SUBMITTING` inside the log's critical section) | O21 | at-most-once, and the cycle budget |
+| AMBIGUOUS handling | O21 | timeouts and unclear answers |
 | Close of a broker-confirmed position, cancel of a pending open | O21 | the close of the cycle |
-| Kill switch store, O15 safety envelope | O15/O16 | open blocked when tripped; close stays possible |
-
-There is no parallel implementation: O22 adds a policy, a book counter, read-only checks, one fixed read and one governed function.
+| Kill switch store | O15/O16 | part of every safety decision |
 
 ## 2. What O22 adds
 
 | File | Change |
 |---|---|
-| `src/broker/etoro/execution/execution-gate.ts` | `DEMO_E2E_CYCLE_POLICY` (`etoro-demo-e2e-cycle-policy:v1`). Two book checks, `cycleOpenBudget` and `cycleCloseBudget`. The verdict records the policy version actually used. |
-| `src/broker/etoro/execution/etoro-demo-execution-service.ts` | The book counts submissions. `cycleBudget()` is read only. |
-| `src/runtime/compose.ts` | The runtime uses `DEMO_E2E_CYCLE_POLICY`, a code constant. |
-| `src/broker/etoro/execution/demo-cycle-reconciliation.ts` | Pure check of the cycle against a stored portfolio snapshot. |
-| `src/broker/etoro/execution/demo-safety-readiness.ts` | Pure readiness report. It is not a safety decision. |
-| `src/broker/etoro/etoro-readonly.ts`, `etoro-transport.ts` | One fixed read `instrument.metadata.100001`, and the URL helper `etoroOperationUrl`. |
-| `src/broker/etoro/etoro-instrument-metadata.ts` | Strict parser and four-field report of that read. |
-| `src/broker/etoro/etoro-observe-cli.ts` | `--source=instrument-metadata`. |
-| `src/broker/etoro/etoro-instrument-mapping.ts` | `applyGovernedEtoroMapping`: a human eToro mapping with metadata evidence. |
-| `src/runtime/app.ts`, `services.ts` | `GET /api/broker/etoro/demo/cycle`, read only. |
-| `test/broker/etoro/o22-*.test.ts`, `test/runtime/o22-runtime.test.ts`, `test/pg/o22-cycle-budget.pg.test.ts` | New tests (section 10). |
-| `test/broker/etoro/o20-boundary.test.ts`, `o21a-observation.test.ts`, `o21a1-observation.test.ts` | Allowlist pins updated: three fixed GET operations. |
-| `test/runtime/o21-runtime.test.ts`, `test/pg/o21-runtime.pg.test.ts` | The route intent invests 100 USD (the runtime cycle limit). No rule was relaxed. |
+| `execution/execution-gate.ts` | `DEMO_E2E_CYCLE_POLICY` with the open and close budget. `GateSafetyDecision`: the narrow safety shape the gate reads; the checks themselves are unchanged. |
+| `execution/etoro-demo-execution-service.ts` | Submission counts and `cycleBudget()`. The broker's `settlementType` is kept from order status reads. |
+| `execution/etoro-demo-execution-validation.ts` | `asset.settlementType` of `orders:lookup`: an enum, strictly validated. |
+| `execution/demo-account-evidence.ts` | The compile-time evidence record. Non-empty `/demo/pnl` live-observed: **false**. |
+| `execution/demo-account-safety.ts` | The demo account safety source: the guide formulas, limits, risk day, kill switch. |
+| `execution/demo-safety-readiness.ts` | Readiness report: evidence, source status, sync, kill switch. |
+| `execution/demo-cycle-reconciliation.ts` | The cycle against the snapshot; external positions; product type. |
+| `etoro-pnl-validation.ts` | `parseDemoPnlValuationInput`: `credit`, `accountCurrencyId` and the external costs, with the same strictness. |
+| `etoro-readonly.ts`, `etoro-transport.ts`, `etoro-instrument-metadata.ts`, `etoro-observe-cli.ts` | One fixed metadata read, `instrument.metadata.100001`. |
+| `etoro-instrument-mapping.ts`, `etoro-map-instrument-cli.ts`, `package.json` | The governed mapping (plan and apply), and `npm run etoro:map-instrument` (dry run by default). |
+| `runtime/compose.ts`, `bootstrap.ts`, `services.ts`, `app.ts` | Cycle policy; the demo account safety source wired, with the log `etoro-demo-account-valuations`; `GET /api/broker/etoro/demo/cycle`. |
+| Tests | Section 10. |
 
 ## 3. The cycle policy and budget
 
-`DEMO_E2E_CYCLE_POLICY` is the runtime policy since O22. It is stricter than the O21 default in every field:
+`DEMO_E2E_CYCLE_POLICY` is the runtime policy:
+- at most 100 USD per open, leverage 1, one position, at most 100 USD gross exposure of NEXUS intents;
+- **one open and one close submission over the whole intent log**.
 
-| Field | O21 default | Cycle |
-|---|---|---|
-| `maxOrderInvestmentUsd` | 1000 | **100** |
-| `maxLeverage` | 1 | 1 |
-| `maxOpenPositions` | 3 | **1** |
-| `maxGrossExposureUsd` | 3000 | **100** |
-| `maxOpenSubmissions` / `maxCloseSubmissions` | none | **1 / 1** |
-| quote / safety / sync age | 60 s / 5 min / 5 min | same |
-
-**The budget.**
-- It counts every intent that ever reached `SUBMITTING`, over the whole persistent intent log, whatever happened next: accepted, rejected (for example 403, a missing write permission), timeout, `AMBIGUOUS`, or a crash after the reservation.
-- It is checked in two places:
-  - at the gate;
-  - again inside the reservation step (`bookRefusals`, inside the log's storage-backed critical section).
-
-  So it holds across processes (tested on PostgreSQL with two pools).
-- Once spent, every further open or close is refused (`CYCLE_OPEN_BUDGET_EXHAUSTED` / `CYCLE_CLOSE_BUDGET_EXHAUSTED`). There is no reset, no route and no configuration for it. A new cycle needs a reviewed code change. **This is the test end**: after one open and one close, nothing more can be sent.
-- A refused execute (lock closed, gate refused) never reaches `SUBMITTING` and does not spend the budget.
+**Budget.**
+- Every submission spends it, whatever its outcome: accepted, rejected, timeout, AMBIGUOUS, or a crash after the reservation.
+- It is checked at the gate and again inside the reservation step, so it holds across processes (tested on PostgreSQL).
+- It cannot be reset: after one open and one close the test is over, and a new cycle needs a code change.
+- A refused execute (lock, gate) is not a submission and does not spend it.
 
 ## 4. Cycle reconciliation (read only)
 
-`reconcileDemoCycle(intents, snapshot)` and `GET /api/broker/etoro/demo/cycle` compare broker-confirmed order status with a stored O20 `/demo/portfolio` snapshot.
+Positions are identified by the `positionID` from an eToro order status read, never by instrument.
+- **Hand-opened positions.** A position the operator opened by hand (the ETH buy of O21B/O21C) is **external**. It is never taken for the NEXUS position and never closed by NEXUS.
+- **Snapshot timing.** Only a snapshot taken after the confirming state can confirm.
+- **Product type.** A filled open whose order status does not state `settlementType: real` is flagged `PRODUCT_TYPE_NOT_CONFIRMED_REAL`, because the units of a CFD or margin position are not an asset quantity.
+- **Route.** `GET /api/broker/etoro/demo/cycle` reports the budget, this reconciliation and the safety readiness. It sends no broker request.
 
-**Identity.** A position is identified by the `positionID` from an eToro **order status read** (`orders:lookup`), never by instrument. A position the operator opened by hand on the same instrument (for example the existing ETH buy of O21B/O21C) is listed as **external**. It is never taken for the NEXUS position, and NEXUS never closes it.
+## 5. Portfolio safety of the demo account (B2, variant A)
 
-**Item kinds.**
-- `open_position_confirmed`, `close_confirmed`: proved by a snapshot observed **after** the confirming state.
-- `open_position_missing`, `position_mismatch`, `closed_position_still_open`: **inconsistent**.
-- `outcome_pending` (`SUBMITTING`, `SUBMITTED`, `ACCEPTED`, `AMBIGUOUS`, `RECONCILED`, `PARTIALLY_FILLED`) and `snapshot_predates_intent`: **unknown**.
+### What eToro documents, and what has been observed
 
-**Verdict.**
-- `consistent` only if nothing is inconsistent or unknown and the snapshot is fresh.
-- A missing or stale snapshot is `unknown`.
-
-Nothing is sent, written, booked or corrected.
-
-**The route.** `GET /api/broker/etoro/demo/cycle` answers with:
-- `execution` (enabled or disabled) and `buildLocked`;
-- the budget: `policyVersion`, maxima and counts;
-- the cycle reconciliation;
-- the safety readiness.
-
-It sends no broker request: the snapshot is the latest stored one, and `POST /api/broker/etoro/sync` (O20) refreshes it.
-
-## 5. Portfolio safety: why it stays not connected
-
-What the request asks for, and what NEXUS can prove today (`assessDemoSafetyReadiness`):
-
-| Input | Status | Why |
+| Value | Source (official) | LIVE_OBSERVED |
 |---|---|---|
-| Demo account context | not verified | The portfolio states no account identity (`accountIdentity: not_observed`). "Demo" rests on the demo route and keys. |
-| Positions and open orders | verified when the sync is fresh | O20/O21A parser; positions live-observed |
-| Current gross exposure | not available | `/demo/portfolio` has no current rate; the valuation of the demo positions is not verified |
-| Available funds | not verified | The meaning of `credit` is not verified; cash stays `not_read` |
-| Drawdown and loss limits | not available | No verified demo equity or day P&L. The O15 envelope values the **CHF ledger**, which does not hold the demo account. |
-| Data freshness | from the O20 sync | |
-| Kill switch | from the kill switch store | A tripped switch blocks every open |
+| `credit` | `/demo/pnl` and `/demo/portfolio` schema; guides use it for Available Cash | present as a positive number in empty and non-empty `/demo/portfolio`, and in an empty `/demo/pnl` |
+| `accountCurrencyId` ("1 = USD") | `/demo/pnl` schema | **1**, in an empty `/demo/pnl` (direct GET, O21A.1) |
+| `positions[].amount`, `leverage` | both schemas | yes, in `/demo/portfolio` (O21B/O21C) |
+| `positions[].unrealizedPnL.pnL` | `/demo/pnl` schema (nested), guides | **no**: a non-empty `/demo/pnl` has never been observed |
+| `ordersForOpen[].amount`, `totalExternalCosts`; `orders[].amount` | `/demo/pnl` schema, guides | no (always empty) |
+| Account identity | not in the portfolio; `GET /api/v1/me` returns `demoCid` and `scopes` | the operator reports a successful `/me`; nothing of it is stored |
+| Demo context of the key | Reference: "Each key can only be used for one environment" | the operator confirmed the key environment Demo (O21A section 11) |
 
-The report always says `connected: false`, and the runtime still passes `NO_DEMO_SAFETY_SOURCE`. Feeding the O15 ledger decision into the gate would read the demo account as safe without valuing it: that is the "unknown read as approved" case that is excluded. **No safety decision is produced, and none is faked.**
+**Formulas** (official guides, checked 2026-10-18):
+- Available Cash = credit − (Σ ordersForOpen.amount (mirrorID = 0) + Σ orders.amount)
+- Total Invested = Σ positions.amount + Σ ordersForOpen.amount + Σ orders.amount + Σ ordersForOpen.totalExternalCosts (+ mirror terms; mirrors are refused)
+- Unrealized PnL = Σ positions.unrealizedPnL.pnL
+- Equity = Available Cash + Total Invested + Unrealized PnL
 
-Closing this gap needs a safety-relevant decision by the operator (section 9, B2).
+All of these are "USD balance".
+
+### The source (`EtoroDemoAccountSafetySource`)
+
+- **One read per evaluation.** Each gate run (create and execute) makes one GET `/demo/pnl`, never retried. HTTP ≠ 200, a transport failure, or a refused response gives **null**, and the gate answers `PORTFOLIO_SAFETY_NOT_CONNECTED`.
+- **Fail-closed valuation.** A value a formula needs and the response does not state is a **DATA_HOLD** and is never read as zero:
+  - a position without `unrealizedPnL.pnL`;
+  - an `ordersForOpen` entry without `totalExternalCosts`;
+  - `accountCurrencyId` absent or not 1.
+- **Whole account.**
+  - Gross exposure = Σ |amount × leverage + pnL| over **all** positions, plus Σ amount × leverage over all pending orders.
+  - Hand-opened positions are included and reported as `externalPositions` / `externalExposureUsd`. Nothing is subtracted.
+- **Limits** (`DEMO_ACCOUNT_SAFETY_POLICY`, a code constant for review):
+
+  | Check | Limit | Result |
+  |---|---|---|
+  | account gross exposure + one reserved cycle order (100 USD) | ≤ 100 USD | else `ACCOUNT_EXPOSURE_LIMIT` (capacity block) |
+  | positions + pending orders + 1 | ≤ 1 | else `ACCOUNT_POSITION_LIMIT` (capacity block) |
+  | available cash | ≥ 100 USD | else `AVAILABLE_CASH_BELOW_ORDER` (capacity block) |
+  | day loss from the first valuation of the UTC day | < 100 USD and < 100 bp | else `DAILY_LOSS_LIMIT` (trips) |
+  | drawdown from the day's peak | < 100 USD and < 100 bp | else `DRAWDOWN_LIMIT` (trips) |
+  | equity | > 0 | else `EQUITY_NOT_POSITIVE` (trips) |
+  | kill switch | armed | else `KILL_SWITCH_TRIPPED` |
+
+- **Risk day.** Complete valuations are appended to `etoro-demo-account-valuations`. It stores day, time and equity only; no account or position id. All processes share it, so a restart does not reset a drawdown (PostgreSQL test). A breach does not latch the shared kill switch. With an open budget of one, a later recovery cannot allow more than that one open.
+- **Decision.** It has the gate's shape (`state`, `canIncreaseRisk`, `killSwitch`, reasons, `asOf`). It is NORMAL only with every check passing, and `liveOrderAllowed` is always `false`.
+- **Evidence gate.** `DEMO_ACCOUNT_VALUATION_EVIDENCE.nonEmptyPnlLiveObserved = false` is a compile-time constant, read directly like `BUILD_LOCKS`. While it is false, the source returns null and **sends no request**.
+
+### The hand-opened ETH position
+
+It is in the account (O21B/O21C: 100 USD at leverage 1). With it, account exposure (≈100 USD) plus the reserved 100 USD order exceeds 100 USD, and the account holds one position already. The decision is `CAPACITY_BLOCK` (`ACCOUNT_EXPOSURE_LIMIT`, `ACCOUNT_POSITION_LIMIT`), and the cycle open stays refused (tested).
+
+Two ways out, neither taken here:
+1. **Recommended:** the operator closes the hand-opened position **in the eToro UI** before the test. NEXUS never closes it. The account then has no exposure, and the 100 USD order fits.
+2. A reviewed code change raises `maxAccountGrossExposureUsd` / `maxAccountPositionsAndOrders` to cover the existing position. That is an explicit risk decision; the existing exposure would still be counted, not removed.
 
 ## 6. Instrument identity of 100001
 
 | Fact | Status |
 |---|---|
-| `instrumentID` 100001 is the position observed in `/demo/portfolio` | LIVE_OBSERVED (O21B direct, O21C through NEXUS) |
-| It is ETH | **Preliminary hint only**: the operator's UI comparison (direction, units, rate, time); 0.04229 × 2364.57 ≈ 100 = `amount` at leverage 1 |
-| Product type of the observed position | Not CFD. `settlementTypeID` is documented as "0 - CFD, 1 - Real Asset, 2 - SWAP, 3 - Crypto MarginTrade, 4 - Future Contract". O21C reports it as a positive integer; the exact value is not exported. |
-| Meaning of `units` and `amount` | `amount` = USD allocated (reference). `units` = number of units (reference); whether it equals an ETH quantity depends on the exact `settlementTypeID`. NOT_VERIFIED. |
-| Currency and price notation of `openRate` | "In the instrument's currency" (reference); USD is not stated in the payload. NOT_VERIFIED. |
-| NEXUS registry mapping for 100001 | **None.** No ETH/USD instrument is registered in the repository fixtures. Nothing was registered. |
+| 100001 is the instrument of the observed position | LIVE_OBSERVED (O21B, O21C) |
+| It is ETH | preliminary UI hint only (direction, units, rate, time; 0.04229 × 2364.57 ≈ 100 = `amount`) |
+| Product type of the hand-opened position | `settlementTypeID` positive: **not a CFD** ("0 - CFD, 1 - Real Asset, 2 - SWAP, 3 - Crypto MarginTrade, 4 - Future Contract"). Exact value not exported. |
+| Product type of the NEXUS open | captured from the order status (`asset.settlementType`: cfd, real, realFutures, marginTrade) and flagged unless `real` |
+| `amount` / `units` | `amount` = USD allocated incl. margin; `units` = number of units. They equal an asset quantity only for `real` (to be confirmed by the order status). |
+| `openRate` currency | "in the instrument's currency"; not stated in the payload |
+| NEXUS mapping for 100001 | **none**; nothing registered |
 
 **Prepared, not executed:**
-- **The fixed metadata read.**
-  - Operation: `instrument.metadata.100001` → `GET https://public-api.etoro.com/api/v2/market-data/instruments?instrumentsIds=100001`.
-  - Fixed: the id and the query are constants.
-  - Rules: one GET, no body, no retry, keys in headers only.
-  - Used only by `npm run etoro:observe-demo -- --source=instrument-metadata --confirm-live-read`.
-  - Report: `instrumentId`, `type`, `symbol` and `displayName`, nothing else. A refusal names a path, never a value, and exit code 0 still requires `verdict: accepted`.
-  - Authorization: the reference accepts `etoro-public:market-data:read` (or `demo:read`). The operator reports that `market-data:read` was present in the successful `/me` result (not stored in the repository); if so, no new key permission is needed, only this addition to our allowlist.
-- **The governed mapping, `applyGovernedEtoroMapping`.**
-  - Who: a named human only.
-  - Evidence: the accepted report, cited by its sha256.
-  - The NEXUS instrument must already exist, be active and in USD, with the asset class of the eToro type: `Crypto` → `crypto`. CFD, Bonds, TrustFunds and Options are refused.
-  - The mapping has no exchange, and an existing mapping on either side is refused.
+- **The metadata read.** `npm run etoro:observe-demo -- --source=instrument-metadata --confirm-live-read`: one GET `/api/v2/market-data/instruments?instrumentsIds=100001`. The report keeps four fields: id, type, symbol and display name.
+- **The governed mapping.** `npm run etoro:map-instrument -- --instrument-id=<ETH/USD> --metadata-report=<saved report> --valid-from=<UTC> --operator=<id>`.
+  - It runs as a dry run by default; `--apply --confirm-human-mapping` writes the one registry event.
+  - The evidence is the report file, cited by its sha256.
+  - The NEXUS instrument must exist, be active, in USD and `crypto`. There must be no exchange and no existing mapping.
   - No symbol comparison decides anything.
-  - **There is no CLI or route for it yet** (section 9, B4).
 
 ## 7. The demo buy as the code sends it
 
-- **Body.** `{ action: 'open', transaction: 'buy', instrumentId: 100001, orderType: 'mkt', amount: 100, orderCurrency: 'usd', leverage: 1 }`, plus `stopLossRate` / `stopLossType: 'fixed'` / `takeProfitRate` only if the intent sets them. Exactly one of amount/units is sent; the cycle uses **amount**, never unverified units.
-- **Endpoint and header.** `POST https://public-api.etoro.com/api/v2/trading/execution/demo/orders`, with a fresh `x-request-id`. The `referenceId` of the answer must echo it.
-- **`settlementType`.** It is optional on v2 and **not sent** (O21). The position type is then the broker default. Open point: whether to send `settlementType: 'real'` explicitly is a decision (section 9, B6).
-- **Minimum amount.** It is not in the API reference. eToro's own product announcement gives a USD 10 minimum for crypto; 100 USD is above it.
-- **Write permission.** The reference requires `etoro-public:demo:write` or `etoro-public:trade.demo:write`. Whether the existing key has it is **not verified**. A 401/403 is `REJECTED`, which also spends the open budget.
-- **Rate limit.** 20 writes per 60 s, shared. The local pacer and `Retry-After` apply.
+- **Body.** `{ action: 'open', transaction: 'buy', instrumentId: 100001, orderType: 'mkt', amount: 100, orderCurrency: 'usd', leverage: 1 }`, with no units and a fresh `x-request-id`.
+- **`settlementType`.** It is not sent (v2: optional). The broker's choice is **verified** after the fill from the order status and flagged unless `real`.
+- **Minimum.** USD 10 for crypto (eToro product announcement, not the API reference).
+- **Write permission.**
+  - Required: `etoro-public:demo:write` or `etoro-public:trade.demo:write`.
+  - For API keys, the permission is set when the user key is created ("Write" for trading) and is reported in `GET /me` → `scopes`.
+  - Not proved in the repository. If the operator's earlier `/me` result lists one of these scopes, B5 is closed **without any new call**.
 
-## 8. Exact sequence for the later first demo buy and close (after section 9 is resolved)
+## 8. Exact sequence for the first demo buy and close (after section 9)
 
-Every step is a separate operator action, and every "STOP" is final for this cycle.
+Each step is a separate operator action. Every STOP ends this cycle.
 
-1. **Preconditions** (each checked, not assumed):
-   - the release change of section 9 is merged;
-   - `ETORO_ENABLED=1`, `ETORO_TRADING_MODE=demo`, `ETORO_DEMO_EXECUTION_ENABLED=1`, `NEXUS_OPERATOR_ID` / `NEXUS_OPERATOR_TOKEN` set; `TRADING_MODE=paper`, `ALLOW_LIVE_TRADING=false` unchanged;
-   - production market data for ETH/USD configured.
+1. **Evidence for the valuation.**
+   - Run one approved `npm run etoro:observe-demo -- --source=pnl --confirm-live-read --pseudonymize-ids --show-instrument-ids` while the hand-opened position still exists. It is non-empty now, so this is exactly the missing observation.
+   - STOP unless the parser verdict is `accepted` and `positions[].unrealizedPnL` holds `pnL`.
+   - Record the report as evidence. Then a reviewed code change sets `nonEmptyPnlLiveObserved: true` with that `evidenceRef`.
 2. **Identity.**
-   - Run the metadata read once. STOP unless `verdict: accepted`, `instrumentId: 100001`, `type: Crypto`.
-   - Register ETH/USD via `POST /api/instruments/register` if it is not registered.
-   - Apply the governed mapping by the operator with the report's sha256.
-3. **Quote.** `GET /api/market/quote?instrumentId=<ETH/USD>`. It must be fresh (≤ 60 s), production, USD.
-4. **Baseline.**
-   - `POST /api/broker/etoro/sync`, then `GET /api/broker/etoro/demo/cycle`.
-   - Expect: budget 0/0; reconciliation without items; the hand-opened ETH position listed as **external**.
-   - STOP if the sync fails or the snapshot is not fresh.
-5. **Create the open.** `POST /api/broker/etoro/demo/intents` with `action: open`, `side: buy`, `orderType: mkt`, `amount: "100"`, `currency: USD`, `leverage: 1`, the NEXUS ETH/USD id, `etoroInstrumentId: 100001`, `expiresAt` ≤ 15 min after `createdAt`. STOP unless `RISK_APPROVED`.
-6. **Approve.** `POST …/intents/{id}/approve` by the operator.
-7. **Execute, exactly once.** `POST …/intents/{id}/execute`.
-   - `SUBMITTED` → continue.
-   - `REJECTED` → STOP. The cycle budget is spent.
-   - `AMBIGUOUS` (timeout, 5xx, unparseable) → **never execute again**. Only `POST …/refresh`, which looks the order up by the original `x-request-id`. A not-found decides nothing. Check the eToro UI by hand.
-8. **Confirm.** `POST …/refresh` (reads only) until `FILLED`; it may take several manual calls with pauses. Note `brokerPositionIds` (exactly one). An accepted order is not an executed one.
-9. **Portfolio after the buy.**
-   - `POST /api/broker/etoro/sync`, then `GET /api/broker/etoro/demo/cycle`.
-   - Expect `open_position_confirmed` for that `positionId` and verdict `consistent`.
-   - STOP on `inconsistent` or `unknown`.
-10. **Close, with a new approval.**
-    - `POST …/intents` with `action: close`, `closesIntentId: <open intent>`. The position id comes from the broker-confirmed status, never from input.
-    - Then `approve` (a **new** human approval) and `execute`, exactly once.
-    - `AMBIGUOUS` close: **no further close**. It stays `AMBIGUOUS`; check the UI by hand.
-    - `refresh` until `FILLED`.
-11. **Final state.**
-    - `POST /api/broker/etoro/sync`, then `GET /api/broker/etoro/demo/cycle`.
-    - Expect `close_confirmed`, budget 1/1, the external ETH position untouched.
-    - **Test end**: every further open or close is refused by the budget.
+   - Run one approved metadata read. STOP unless `accepted`, id 100001, type `Crypto`.
+   - Register ETH/USD (`POST /api/instruments/register`).
+   - Dry-run `etoro:map-instrument`, then apply it with confirmation.
+3. **Write permission.** The operator confirms a demo write scope from the `/me` result.
+4. **Clear the account.** The operator closes the hand-opened ETH position in the eToro UI. NEXUS does not touch it.
+5. **Release.** A separate reviewed change opens `BUILD_LOCKS.etoroDemoExecution` for this build. Set `ETORO_ENABLED=1`, `ETORO_TRADING_MODE=demo`, `ETORO_DEMO_EXECUTION_ENABLED=1` and operator auth. `TRADING_MODE=paper` and `ALLOW_LIVE_TRADING=false` stay.
+6. **Baseline.**
+   - `POST /api/broker/etoro/sync` and `GET /api/broker/etoro/demo/cycle`.
+   - Expect budget 0/0, no positions, safety `connected: true` with last decision NORMAL.
+   - Check that the ETH/USD quote is fresh.
+7. **Open.**
+   - Create the open intent (100 USD, mkt, buy, leverage 1, 100001). STOP unless `RISK_APPROVED`.
+   - Approve it.
+   - **Execute exactly once.**
+     - `REJECTED`: STOP.
+     - `AMBIGUOUS`: only `refresh`, which looks the order up by the original request id. Never execute again.
+8. **Confirm.**
+   - `refresh` until `FILLED`. Note the one `brokerPositionIds` and `brokerSettlementType`.
+   - Sync, then cycle. Expect `open_position_confirmed`; STOP on `inconsistent` or `unknown`.
+   - A `PRODUCT_TYPE_NOT_CONFIRMED_REAL` reason is noted for review.
+9. **Close.**
+   - Create the close intent (`closesIntentId`), give a **new** approval, **execute once**.
+   - `AMBIGUOUS`: no further close; check the UI by hand.
+   - `refresh` until `FILLED`.
+10. **Final state.**
+    - Sync, then cycle. Expect `close_confirmed` and budget 1/1.
+    - Test end: every further write is refused.
 
-No step books anything in the ledger, and no balancing or opening booking is made.
+No ledger booking at any step.
 
-## 9. Blockers before a release
+## 9. Blockers B1–B8
 
-| # | Blocker | Kind |
-|---|---|---|
-| B1 | `BUILD_LOCKS.etoroDemoExecution = true` | A separate, explicitly approved code change, after B2–B5. Not part of this package. |
-| B2 | No demo portfolio safety source (`PORTFOLIO_SAFETY_NOT_CONNECTED`); equity, cash, exposure and day P&L of the demo account are not verified | **Safety decision by the operator**: (a) build a verified demo-account valuation (needs a non-empty `/demo/pnl` observation and verified `credit` semantics), or (b) explicitly approve a narrowly scoped cycle-only safety basis (the 100 USD / one position / one-cycle budget instead of an account-level envelope). Neither is implemented. |
-| B3 | Identity of 100001 not officially confirmed | One approved run of the prepared metadata read, or an explicit operator decision to accept the UI hint |
-| B4 | No governed mapping path in the running system | A CLI or operator route calling `applyGovernedEtoroMapping` (not built) |
-| B5 | Demo write permission of the key not verified | Operator check of the key's scopes (`demo:write` / `trade.demo:write`) |
-| B6 | `settlementType` not sent; the broker default decides the position type | Decision: keep the default, or send `real` (a code change) |
-| B7 | AMBIGUOUS close reconciliation not verified (O21) | Accepted: an ambiguous close stays ambiguous and is checked by hand |
-| B8 | Production ETH/USD quote | Configuration of the market data provider in production mode |
+| # | Blocker | Status after this package | What closes it |
+|---|---|---|---|
+| B1 | `BUILD_LOCKS.etoroDemoExecution = true` | **open** (by design) | a separate, approved code change, last |
+| B2 | Demo portfolio safety | **implemented (variant A); not active** | (1) one approved `/demo/pnl` observation, non-empty and parser-accepted; (2) a reviewed change of the evidence record; (3) the account must fit the limits (close the hand-opened position, or an explicit limit decision) |
+| B3 | Identity of 100001 | **open**; read prepared | one approved metadata read (or an explicit decision to accept the UI hint) |
+| B4 | Governed mapping path | **closed** (`etoro:map-instrument`, dry run and apply); not executed | the operator's apply after B3 |
+| B5 | Demo write permission | **not proved in the repository** | the `scopes` from the operator's `/me` result (no new call needed if it is at hand) |
+| B6 | `settlementType` | **narrowed**: not sent, but verified after the fill and flagged unless `real` | decide whether a non-`real` result is acceptable for the test |
+| B7 | AMBIGUOUS close | accepted (unchanged): stays AMBIGUOUS, no further close, manual UI check | — |
+| B8 | Production ETH/USD quote | **open** | production market data configuration |
 
 ## 10. Tests
 
 | File | What |
 |---|---|
-| `o22-cycle.test.ts` (16) | The policy constant, stricter in every field; sizes above 100 USD and leverage refused. Then: <ul><li>the full cycle with exactly 2 writes and the test end;</li><li>the open body;</li><li>budget across processes;</li><li>timeout → AMBIGUOUS with no second order;</li><li>a negative lookup decides nothing;</li><li>AMBIGUOUS found by referenceId;</li><li>403 spends the budget;</li><li>AMBIGUOUS close not reconciled, no second close;</li><li>a rejected close spends the close budget;</li><li>crash after SUBMITTING and restart;</li><li>the race where the reservation refuses by budget alone;</li><li>the same intent executed twice at once;</li><li>a tripped kill switch blocks the open but allows the close;</li><li>no safety source → `PORTFOLIO_SAFETY_NOT_CONNECTED`.</li></ul> |
-| `o22-cycle-reconciliation.test.ts` (7) | Confirmed, external hand-opened position, mismatch, close confirmed or still open, snapshot predates, missing or stale, pending states, pending broker orders |
-| `o22-safety-readiness.test.ts` (4) | Never connected; stale is never verified; a tripped switch blocks; the runtime passes no safety source |
-| `o22-instrument-metadata.test.ts` (23) | Strict parser; 13 refusals by path; one GET to the fixed URL; HTTP errors with no retry; gating; only the CLI and the allowlist name the operation; no mapping from it |
-| `o22-governed-mapping.test.ts` (6) | Human only; evidence checks; instrument checks; conflicts; symbol does not decide |
-| `test/runtime/o22-runtime.test.ts` (7) | The route, with no broker request; the runtime policy; locked build without a mock (0 writes, budget untouched); every lock closed; no real route |
-| `test/pg/o22-cycle-budget.pg.test.ts` (3) | Budget across two PostgreSQL pools; concurrent executes; restart after a timeout |
+| `o22-cycle.test.ts` (17) | Policy; full cycle; timeout, AMBIGUOUS, 403; close ambiguity; crash and restart; races; kill switch; product type from the order status |
+| `o22-demo-account-safety.test.ts` (14) | Guide formulas; external positions; data holds; decision limits; the hand-opened position blocks the open; the source sends nothing without evidence |
+| `o22-account-safety-cycle.test.ts` (10) | Evidence released for the module only: <ul><li>one GET per evaluation; null on 4xx/5xx, timeout or invalid response;</li><li>risk day start, peak and new day;</li><li>DATA_HOLD not recorded; kill switch;</li><li>the cycle with the real source: open refused with the hand-opened position;</li><li>the position appearing before execute (refused, budget kept);</li><li>a failed read refuses the open;</li><li>the full open; the close without a safety read;</li><li>an ambiguous close is never repeated.</li></ul> |
+| `o22-cycle-reconciliation.test.ts` (8), `o22-safety-readiness.test.ts` (4) | Reconciliation and readiness |
+| `o22-instrument-metadata.test.ts` (23), `o22-governed-mapping.test.ts` (6), `o22-map-instrument-cli.test.ts` (6) | Metadata read, mapping, tool |
+| `test/runtime/o22-runtime.test.ts` (8) | The route; the production wiring with the demo account source and no evidence (open refused, 0 eToro requests); locked build without mock; every lock closed |
+| `test/pg/o22-cycle-budget.pg.test.ts` (3), `test/pg/o22-account-safety.pg.test.ts` (1) | Budget across pools; a shared risk day across processes and a restart |
 
-Results: see the PR description (full unit and PostgreSQL suites, `tsc --noEmit`).
+Results: in the PR description.
 
 ## 11. Safety boundaries (unchanged)
 
-- `BUILD_LOCKS` = `{ liveTrading, brokerOrders, physicalPurchase, etoroDemoExecution }` all `true`.
+- `BUILD_LOCKS` = `{ liveTrading, brokerOrders, physicalPurchase, etoroDemoExecution }`, all `true`.
 - `TRADING_MODE=paper`, `ALLOW_LIVE_TRADING=false`.
-- No real-account endpoint and no real key path.
-- No autonomous cycle: every write needs a named human approval and a human execute.
-- No ledger booking, no balancing booking, no automatic mapping.
+- No real endpoint and no real key path.
+- No autonomous cycle.
+- No ledger booking and no balancing booking; the valuation log is not a ledger.
+- No automatic mapping and no automatic close of the hand-opened position.
 - No eToro request was made while building O22.

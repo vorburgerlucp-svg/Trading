@@ -237,6 +237,25 @@ describe('O22 cycle: a timeout, an unclear answer or a rejection never leads to 
   });
 });
 
+describe('O22 cycle: the product type stated by the broker', () => {
+  it('the order status keeps asset.settlementType; an undocumented value is refused and changes nothing', async () => {
+    const f = await cycle();
+    const open = await approvedCycleOpen(f);
+    f.broker.next(orderAccepted());
+    await f.service.execute(open, HUMAN);
+    const bad = lookupAnswer(3, { positionIds: [POSITION] }) as { status: number; body: { asset: Record<string, unknown> } };
+    bad.body.asset.settlementType = 'spot';
+    f.broker.next(bad);
+    expect((await refusal(f.service.refresh(open))).code).toBe('BROKER_RESPONSE_INVALID');
+    expect((await f.service.get(open)).state).toBe('SUBMITTED');
+    f.broker.next(lookupAnswer(3, { positionIds: [POSITION] }));
+    const filled = await f.service.refresh(open);
+    expect(filled.state).toBe('FILLED');
+    expect(filled.brokerSettlementType).toBe('real');
+    expect(f.broker.writes).toHaveLength(1);
+  });
+});
+
 describe('O22 cycle: crash and restart', () => {
   it('a process that crashed after SUBMITTING leaves the budget spent; the restarted process sends nothing and treats it as AMBIGUOUS', async () => {
     const stores = inMemoryStores();

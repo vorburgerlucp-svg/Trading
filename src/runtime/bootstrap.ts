@@ -16,6 +16,7 @@ import type { EtoroReconciliationRecord, EtoroSnapshotRecord, EtoroSyncRecord } 
 import { HttpsEtoroTransport, type EtoroCredentials, type EtoroTransport } from '../broker/etoro/etoro-transport.js';
 import { HttpsDemoExecutionTransport, type DemoExecutionTransport } from '../broker/etoro/execution/etoro-demo-execution-transport.js';
 import type { AttemptRecord, ConfirmationRecord, IntentEvent, ReconciliationRecord } from '../broker/etoro/execution/etoro-demo-execution-service.js';
+import type { DemoAccountValuationRecord } from '../broker/etoro/execution/demo-account-safety.js';
 import { createRuntimeHandler } from './app.js';
 import { OperatorAuthenticator } from './operator-auth.js';
 import { RuntimeConfigError, loadRuntimeConfig, summarizeRuntimeConfig, type Environment, type RuntimeConfig, type RuntimeConfigSummary } from './config.js';
@@ -154,8 +155,9 @@ async function openEtoro(pool: PgPool, config: RuntimeConfig, options: StartOpti
 
 /**
  * The eToro demo execution wiring (O21), only with ETORO_DEMO_EXECUTION_ENABLED=1: the demo execution transport and four
- * append-only logs. No safety source is passed (none exists for the eToro demo account), so every open is refused; and the build
- * lock BUILD_LOCKS.etoroDemoExecution refuses every write in this build.
+ * append-only logs, plus (O22) the valuation log of the demo account safety source. That source answers null until the evidence
+ * record says a non-empty /demo/pnl was observed live, so every open is still refused; and the build lock
+ * BUILD_LOCKS.etoroDemoExecution refuses every write in this build.
  */
 async function openEtoroDemoExecution(pool: PgPool, config: RuntimeConfig, options: StartOptions): Promise<NonNullable<ComposeInput['etoroDemoExecution']>> {
   const clock = options.clock ?? (() => new Date());
@@ -165,6 +167,8 @@ async function openEtoroDemoExecution(pool: PgPool, config: RuntimeConfig, optio
     attempts: await AppendOnlyLog.open<AttemptRecord>('etoro-demo-execution-attempts', await PostgresAppendOnlyStore.open<AttemptRecord>(pool, 'etoro-demo-execution-attempts'), { clock }),
     confirmations: await AppendOnlyLog.open<ConfirmationRecord>('etoro-demo-broker-confirmations', await PostgresAppendOnlyStore.open<ConfirmationRecord>(pool, 'etoro-demo-broker-confirmations'), { clock }),
     reconciliations: await AppendOnlyLog.open<ReconciliationRecord>('etoro-demo-execution-reconciliations', await PostgresAppendOnlyStore.open<ReconciliationRecord>(pool, 'etoro-demo-execution-reconciliations'), { clock }),
+    // O22: the risk day of the demo account safety source (equity valuations only; no account or position id).
+    accountValuations: await AppendOnlyLog.open<DemoAccountValuationRecord>('etoro-demo-account-valuations', await PostgresAppendOnlyStore.open<DemoAccountValuationRecord>(pool, 'etoro-demo-account-valuations'), { clock }),
   };
 }
 

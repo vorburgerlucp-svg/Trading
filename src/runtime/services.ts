@@ -23,6 +23,7 @@ import type { EtoroBrokerService } from '../broker/etoro/etoro-broker-service.js
 import type { EtoroDemoExecutionService } from '../broker/etoro/execution/etoro-demo-execution-service.js';
 import { reconcileDemoCycle } from '../broker/etoro/execution/demo-cycle-reconciliation.js';
 import { assessDemoSafetyReadiness } from '../broker/etoro/execution/demo-safety-readiness.js';
+import type { EtoroDemoAccountSafetySource } from '../broker/etoro/execution/demo-account-safety.js';
 import { DEMO_E2E_CYCLE_POLICY } from '../broker/etoro/execution/execution-gate.js';
 import type { BarsRequest, DemoExecutionRoutes, InstrumentRegisterRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
 import { RuntimeApiError } from './errors.js';
@@ -52,6 +53,8 @@ export interface RuntimeDeps {
   etoro?: EtoroBrokerService | null;
   /** The eToro demo execution service (O21). Absent unless ETORO_DEMO_EXECUTION_ENABLED=1; the routes then answer EXECUTION_DISABLED. */
   etoroDemoExecution?: EtoroDemoExecutionService | null;
+  /** O22: the demo account safety source, for its status only (the execution service reads its decisions). */
+  etoroDemoAccountSafety?: EtoroDemoAccountSafetySource | null;
 }
 
 function sanitizeName(value: unknown): string | null {
@@ -392,7 +395,15 @@ export class RuntimeServiceImpl implements RuntimeServices {
       return { connection: s.connection, lastSuccessfulSync: s.lastSuccessfulSync };
     })();
     await this.deps.killSwitch.sync();
-    const safetyReadiness = assessDemoSafetyReadiness({ now: this.now(), broker, snapshot, killSwitch: this.deps.killSwitch.current(), maxSyncAgeMs: DEMO_E2E_CYCLE_POLICY.maxBrokerSyncAgeMs });
+    const accountSafety = this.deps.etoroDemoAccountSafety ?? null;
+    const safetyReadiness = assessDemoSafetyReadiness({
+      now: this.now(),
+      broker,
+      snapshot,
+      killSwitch: this.deps.killSwitch.current(),
+      maxSyncAgeMs: DEMO_E2E_CYCLE_POLICY.maxBrokerSyncAgeMs,
+      source: accountSafety === null ? null : accountSafety.status(),
+    });
     if (execution === null) {
       return { cycle: { execution: 'disabled', buildLocked: BUILD_LOCKS.etoroDemoExecution, budget: null, reconciliation: null, safetyReadiness } };
     }

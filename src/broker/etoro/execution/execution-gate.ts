@@ -8,7 +8,7 @@
 
 import { Decimal } from '../../../money/decimal.js';
 import type { Instrument, ProviderInstrumentMapping } from '../../../market-data/market-data-types.js';
-import type { KillSwitchState, PortfolioSafetyDecision } from '../../../safety/portfolio-safety-envelope.js';
+import type { KillSwitchState } from '../../../safety/portfolio-safety-envelope.js';
 import type { ExecutionIntent } from './execution-intent.js';
 
 export const DEMO_EXECUTION_POLICY_VERSION = 'etoro-demo-execution-policy:v1' as const;
@@ -87,6 +87,19 @@ export interface GateQuote {
   readonly production: boolean;
 }
 
+/**
+ * What the gate reads of a portfolio safety decision. The O15 envelope decision (PortfolioSafetyDecision) and, since O22, the eToro
+ * demo account decision (demo-account-safety.ts) both have this shape; the gate's checks are unchanged.
+ */
+export interface GateSafetyDecision {
+  readonly asOf: string;
+  readonly state: string;
+  readonly canIncreaseRisk: boolean;
+  readonly killSwitch: { readonly status: KillSwitchState['status'] };
+  readonly hardBreachReasons: readonly string[];
+  readonly capacityBlockReasons: readonly string[];
+}
+
 /** What NEXUS itself knows about its live demo intents. Derived from the intent log by the service. */
 export interface GateBook {
   readonly liveIntentCount: number;
@@ -111,8 +124,8 @@ export interface GateInput {
   readonly buildLocked: boolean;
   readonly executionEnabled: boolean;
   readonly killSwitch: KillSwitchState;
-  /** A decision of the portfolio safety envelope from a trusted source, or null when none is connected. */
-  readonly safety: PortfolioSafetyDecision | null;
+  /** A decision of a trusted portfolio safety source, or null when none is connected. */
+  readonly safety: GateSafetyDecision | null;
   readonly instrument: Instrument | null;
   readonly mapping: ProviderInstrumentMapping | null;
   readonly quote: GateQuote | null;

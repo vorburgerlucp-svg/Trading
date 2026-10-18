@@ -54,10 +54,10 @@ describe('O21A.1 transport: fixed GET operations only (two demo account reads, a
     expect(r.requests).toEqual([]);
   });
 
-  it('the sync adapter, the service and the runtime never call pnl.demo: only the observation tool does', () => {
+  it('the sync adapter and the runtime never call pnl.demo: only the observation tool and, since O22, the demo account safety source do', () => {
     const files = ['src/broker/etoro', 'src/broker/etoro/execution', 'src/runtime'].flatMap((dir) => readdirSync(dir).filter((f) => f.endsWith('.ts')).map((f) => join(dir, f)));
     const users = files.filter((f) => readFileSync(f, 'utf8').includes("'pnl.demo'")).map((f) => f.replace(/\\/g, '/'));
-    expect(users.sort()).toEqual(['src/broker/etoro/etoro-observe-cli.ts', 'src/broker/etoro/etoro-readonly.ts']);
+    expect(users.sort()).toEqual(['src/broker/etoro/etoro-observe-cli.ts', 'src/broker/etoro/etoro-readonly.ts', 'src/broker/etoro/execution/demo-account-safety.ts']);
   });
 });
 

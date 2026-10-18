@@ -143,6 +143,8 @@ export interface BrokerOrderStatus {
   /** The order action and transaction of the reference enums, when the response states them (orders:lookup does). */
   readonly action: 'open' | 'close' | null;
   readonly transaction: 'buy' | 'sell' | 'sellShort' | 'buyToCover' | null;
+  /** O22: asset.settlementType of orders:lookup ("Possible values: cfd, real, realFutures, marginTrade"), null when not stated. */
+  readonly settlementType: 'cfd' | 'real' | 'realFutures' | 'marginTrade' | null;
 }
 
 function optionalEnum<T extends string>(value: unknown, allowed: readonly T[], path: string): T | null {
@@ -170,6 +172,7 @@ export function parseOrderLookup(body: unknown): BrokerOrderStatus {
     positionIds: [...new Set([...positionIds, ...idList(root.positionsToClose, 'positionsToClose')])],
     action: optionalEnum(root.action, ['open', 'close'] as const, 'action'),
     transaction: optionalEnum(root.transaction, ['buy', 'sell', 'sellShort', 'buyToCover'] as const, 'transaction'),
+    settlementType: optionalEnum(asset.settlementType, ['cfd', 'real', 'realFutures', 'marginTrade'] as const, 'asset.settlementType'),
   };
 }
 
@@ -190,5 +193,6 @@ export function parseCloseOrderInfo(body: unknown): BrokerOrderStatus {
     positionIds,
     action: 'close',
     transaction: null,
+    settlementType: null,
   };
 }

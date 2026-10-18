@@ -22,7 +22,6 @@ import { AppendOnlyLogError, type AppendOnlyLog } from '../../../persistence/app
 import { hashOf } from '../../../persistence/canonical-json.js';
 import type { InstrumentRegistry } from '../../../market-data/instrument-registry.js';
 import type { PortfolioKillSwitchStore } from '../../../safety/portfolio-kill-switch-store.js';
-import type { PortfolioSafetyDecision } from '../../../safety/portfolio-safety-envelope.js';
 import { DemoExecutionError, type DemoExecutionErrorCode } from './etoro-demo-execution-errors.js';
 import type { EToroDemoExecutionAdapter, ReadOutcome, WriteOutcome } from './etoro-demo-execution-adapter.js';
 import { CANCELLABLE_STATUS_IDS, ETORO_ORDER_STATUS, type BrokerOrderOutcome, type BrokerOrderStatus } from './etoro-demo-execution-validation.js';
@@ -34,6 +33,7 @@ import {
   type DemoExecutionPolicy,
   type GateBook,
   type GateQuote,
+  type GateSafetyDecision,
   type GateVerdict,
 } from './execution-gate.js';
 import {
@@ -104,6 +104,8 @@ export interface ConfirmationRecord {
   readonly outcome: BrokerOrderOutcome | null;
   readonly errorCode: number | null;
   readonly observedAt: string;
+  /** O22: the product type an order status read states (asset.settlementType), when it states one. */
+  readonly settlementType?: BrokerOrderStatus['settlementType'];
 }
 
 export interface ReconciliationRecord {
@@ -121,7 +123,7 @@ export interface ReconciliationRecord {
 
 export interface DemoSafetySource {
   /** The current portfolio safety decision from a trusted, verified source, or null when none is connected. */
-  current(now: string): Promise<PortfolioSafetyDecision | null>;
+  current(now: string): Promise<GateSafetyDecision | null>;
 }
 
 export interface DemoQuoteSource {
@@ -155,6 +157,8 @@ export interface IntentView {
   brokerPositionIds: number[];
   lastStatusId: number | null;
   lastStatusName: string | null;
+  /** O22: the product type the broker stated in an order status read (cfd, real, ...), or null. */
+  brokerSettlementType: string | null;
   gateReasons: readonly string[];
   history: { state: IntentState; at: string; reason: string }[];
 }
@@ -170,6 +174,7 @@ interface Projection {
   brokerOrderId: number | null;
   positionIds: number[];
   lastStatusId: number | null;
+  settlementType: string | null;
   gateReasons: readonly string[];
 }
 
@@ -452,6 +457,7 @@ export class EtoroDemoExecutionService {
       statusId: status.statusId,
       outcome: status.outcome,
       errorCode: status.errorCode,
+      ...(status.settlementType !== null ? { settlementType: status.settlementType } : {}),
     });
     const target = OUTCOME_STATE[status.outcome];
     if (target === p.state) return;
@@ -601,7 +607,7 @@ export class EtoroDemoExecutionService {
         if (!e.intent) continue;
         map.set(e.intentId, {
           intent: e.intent, state: 'CREATED', events: [e], exposureUsd: Decimal.from(0), approvedBy: null, submitRequestId: null, submittingAt: null,
-          brokerOrderId: null, positionIds: [], lastStatusId: null, gateReasons: [],
+          brokerOrderId: null, positionIds: [], lastStatusId: null, settlementType: null, gateReasons: [],
         });
         continue;
       }
@@ -625,6 +631,7 @@ export class EtoroDemoExecutionService {
       }
       for (const id of c.brokerPositionIds) if (!p.positionIds.includes(id)) p.positionIds.push(id);
       if (c.statusId !== null) p.lastStatusId = c.statusId;
+      if (c.settlementType !== undefined && c.settlementType !== null) p.settlementType = c.settlementType;
     }
     return map;
   }
@@ -639,6 +646,7 @@ export class EtoroDemoExecutionService {
       brokerPositionIds: [...p.positionIds],
       lastStatusId: p.lastStatusId,
       lastStatusName: statusName(p.lastStatusId),
+      brokerSettlementType: p.settlementType,
       gateReasons: p.gateReasons,
       history: p.events.map((e) => ({ state: e.state, at: e.at, reason: e.reason })),
     };
