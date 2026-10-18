@@ -2,6 +2,7 @@
 
 Status: **implemented and tested offline; not released.** Base: `519233d` (merge of PR #24, O21C).
 - No eToro request was sent while building O22: no authenticated read, no demo write, no metadata read.
+- Afterwards, one operator-approved read was made: exactly one `GET /api/v1/trading/info/demo/pnl` through the observation tool (2026-10-18). It returned a **non-empty** response, and the parser accepted it. Results are in section 12. The evidence record was **not** changed by it.
 - `BUILD_LOCKS.etoroDemoExecution = true` refuses every demo write in this build.
 - The demo account safety source (B2, variant A, section 5) is built and wired. It answers `null` until a non-empty `/demo/pnl` has been observed live and recorded, so every open is still refused with `PORTFOLIO_SAFETY_NOT_CONNECTED`.
 - The first demo buy therefore cannot happen with this build. Section 9 lists what is still open; section 8 gives the exact sequence for afterwards.
@@ -67,7 +68,7 @@ Positions are identified by the `positionID` from an eToro order status read, ne
 | `credit` | `/demo/pnl` and `/demo/portfolio` schema; guides use it for Available Cash | present as a positive number in empty and non-empty `/demo/portfolio`, and in an empty `/demo/pnl` |
 | `accountCurrencyId` ("1 = USD") | `/demo/pnl` schema | **1**, in an empty `/demo/pnl` (direct GET, O21A.1) |
 | `positions[].amount`, `leverage` | both schemas | yes, in `/demo/portfolio` (O21B/O21C) |
-| `positions[].unrealizedPnL.pnL` | `/demo/pnl` schema (nested), guides | **no**: a non-empty `/demo/pnl` has never been observed |
+| `positions[].unrealizedPnL.pnL` | `/demo/pnl` schema (nested), guides | **key present**, nested under `unrealizedPnL` in schema spelling (2026-10-18, section 12). Its JSON kind is **not** in the report: the parser accepts a number or null. |
 | `ordersForOpen[].amount`, `totalExternalCosts`; `orders[].amount` | `/demo/pnl` schema, guides | no (always empty) |
 | Account identity | not in the portfolio; `GET /api/v1/me` returns `demoCid` and `scopes` | the operator reports a successful `/me`; nothing of it is stored |
 | Demo context of the key | Reference: "Each key can only be used for one environment" | the operator confirmed the key environment Demo (O21A section 11) |
@@ -149,9 +150,9 @@ Two ways out, neither taken here:
 Each step is a separate operator action. Every STOP ends this cycle.
 
 1. **Evidence for the valuation.**
-   - Run one approved `npm run etoro:observe-demo -- --source=pnl --confirm-live-read --pseudonymize-ids --show-instrument-ids` while the hand-opened position still exists. It is non-empty now, so this is exactly the missing observation.
-   - STOP unless the parser verdict is `accepted` and `positions[].unrealizedPnL` holds `pnL`.
-   - Record the report as evidence. Then a reviewed code change sets `nonEmptyPnlLiveObserved: true` with that `evidenceRef`.
+   - Done for the structure (2026-10-18, section 12): non-empty, accepted, `unrealizedPnL.pnL` key present.
+   - Still to do: extend the report with the kinds of `unrealizedPnL` fields and the value of `accountCurrencyId`, then make one more approved `--source=pnl` read while the hand-opened position still exists. STOP unless `pnL` is a number and `accountCurrencyId` is 1.
+   - Then a reviewed code change sets `nonEmptyPnlLiveObserved: true` with both reports as `evidenceRef`.
 2. **Identity.**
    - Run one approved metadata read. STOP unless `accepted`, id 100001, type `Crypto`.
    - Register ETH/USD (`POST /api/instruments/register`).
@@ -188,7 +189,7 @@ No ledger booking at any step.
 | # | Blocker | Status after this package | What closes it |
 |---|---|---|---|
 | B1 | `BUILD_LOCKS.etoroDemoExecution = true` | **open** (by design) | a separate, approved code change, last |
-| B2 | Demo portfolio safety | **implemented (variant A); not active** | (1) one approved `/demo/pnl` observation, non-empty and parser-accepted; (2) a reviewed change of the evidence record; (3) the account must fit the limits (close the hand-opened position, or an explicit limit decision) |
+| B2 | Demo portfolio safety | **implemented (variant A); not active.** The structure of a non-empty `/demo/pnl` is live-validated (section 12). | (1) prove the **kinds** of `unrealizedPnL.pnL` and the value of `accountCurrencyId` (the report shows keys only: section 12, next changes); (2) a reviewed change of the evidence record; (3) the account must fit the limits (close the hand-opened position, or an explicit limit decision) |
 | B3 | Identity of 100001 | **open**; read prepared | one approved metadata read (or an explicit decision to accept the UI hint) |
 | B4 | Governed mapping path | **closed** (`etoro:map-instrument`, dry run and apply); not executed | the operator's apply after B3 |
 | B5 | Demo write permission | **not proved in the repository** | the `scopes` from the operator's `/me` result (no new call needed if it is at hand) |
@@ -210,7 +211,51 @@ No ledger booking at any step.
 
 Results: in the PR description.
 
-## 11. Safety boundaries (unchanged)
+## 12. Live observation of a non-empty /demo/pnl (2026-10-18)
+
+### What was run
+
+- Exactly one `GET /api/v1/trading/info/demo/pnl`, approved by the operator. It ran in the operator's session with the existing demo keys, at `f971ea0`.
+- Command: `npm run etoro:observe-demo -- --source=pnl --confirm-live-read --pseudonymize-ids --show-instrument-ids`.
+- No retry, no fallback, no other endpoint, no order, no mapping, no change of a constant or a lock.
+- Evidence: the sanitized report, unchanged, in `docs/evidence/O22_etoro_demo_pnl_observation_2026-10-18.json`. It contains:
+  - no value and no key;
+  - ids only as per-run HMAC pseudonyms;
+  - the instrument id in clear.
+
+### Result
+
+| Item | Report |
+|---|---|
+| Parser verdict (`parseDemoPnl`, REFERENCE_SCHEMA) | **accepted**: positions 1, orders 0, ordersForOpen 0 |
+| `clientPortfolio` keys | All 13 schema keys, including `accountCurrencyId` and the account-level `unrealizedPnL`. None undocumented, none missing. |
+| `credit` / `bonusCredit` | positive non-integer number / integer zero |
+| Containers | `positions` 1; `mirrors`, `orders`, `ordersForOpen`, `ordersForClose`, `ordersForCloseMultiple`, `stockOrders`, `entryOrders`, `exitOrders` all 0 |
+| Position spelling | **Schema spelling** (`positionID`, `instrumentID`, `CID`, `mirrorID`, …). `exampleOnlyPresent` is empty: the reference **example** spelling (`positionId`, flat `pnL`) does **not** occur. |
+| Position fields | 36 of the 37 schema fields present. Only `externalOperation` is missing (`documentedMissing`; not read by NEXUS). None undocumented. |
+| `unrealizedPnL` (per position) | An **object** holding all 11 schema keys: `pnL`, `pnlAssetCurrency`, `exposureInAccountCurrency`, `exposureInAssetCurrency`, `marginInAccountCurrency`, `marginInAssetCurrency`, `marginCurrencyId`, `assetCurrencyId`, `closeRate`, `closeConversionRate`, `timestamp`. `nested.schemaMissing` and `nested.undocumentedPresent` are both empty. |
+| Kinds used by the formulas | `amount`: positive integer. `leverage`: positive integer, as the pnl schema states. `mirrorID` / `parentPositionID`: 0 (not copy trading). `settlementTypeID`: positive, so **not CFD**. |
+| Instrument | `[100001]`, the same as in `/demo/portfolio` (O21B, O21C) |
+
+### B2 evidence gaps
+
+**Closed:**
+- The **live shape of a non-empty `/demo/pnl`**: the nested `unrealizedPnL`, schema spelling not example spelling. This resolves the schema/example contradiction of O21A.1 for positions.
+- Live presence of every input the guide formulas take from **positions**: `amount` (positive) and `unrealizedPnL.pnL` (key present). Also `leverage` (positive integer) for exposure, and `credit` (positive number).
+- No copy trading in the account.
+
+**Open (the report states keys, not the kinds inside `unrealizedPnL`):**
+- **G1 – kind of `unrealizedPnL.pnL`.** The parser accepts `pnL` as a finite number **or null**, and the report lists only the key. Whether it was a number is therefore not proved. The safety source would answer a null with `DATA_HOLD`, never zero, but the evidence for "pnL is a number" is missing.
+- **G2 – value of `accountCurrencyId`.** The key is present and the parser accepted it as a non-negative integer. The report does not state the value. `1` was observed once before, in an empty `/demo/pnl` (direct GET, O21A.1); in this read it is not shown.
+- **G3 – pending orders.** `orders` and `ordersForOpen` (with `totalExternalCosts`) are still not observed non-empty. That is no gap for the cycle: the account limit allows no pending order, so such an order blocks the open.
+
+### Next changes required (none made here)
+
+1. **Observation report, code change.** Report the JSON kind and sign of each `unrealizedPnL` field (as for position fields; no values), and `accountCurrencyId` as its value (a currency code, not an account id). Tests included.
+2. **One more approved `/demo/pnl` read**, while the hand-opened position is still open, to close G1 and G2.
+3. **Evidence record, reviewed change.** Only then set `DEMO_ACCOUNT_VALUATION_EVIDENCE.nonEmptyPnlLiveObserved = true`, with `evidenceRef` naming both reports.
+
+## 13. Safety boundaries (unchanged)
 
 - `BUILD_LOCKS` = `{ liveTrading, brokerOrders, physicalPurchase, etoroDemoExecution }`, all `true`.
 - `TRADING_MODE=paper`, `ALLOW_LIVE_TRADING=false`.
