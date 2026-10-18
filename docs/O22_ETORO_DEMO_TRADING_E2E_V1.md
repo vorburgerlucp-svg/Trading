@@ -192,7 +192,7 @@ No ledger booking at any step.
 |---|---|---|---|
 | B1 | `BUILD_LOCKS.etoroDemoExecution = true` | **open** (by design) | a separate, approved code change, last |
 | B2 | Demo portfolio safety | **evidence closed; source active.** G1 and G2 are proved (section 12), and the evidence record cites both reports. The decision is still `CAPACITY_BLOCK` because of the hand-opened position. | The account must fit the unchanged limits: the operator closes the hand-opened position in the UI. No limit is raised. |
-| B3 | Identity of 100001 | **open**; read prepared | one approved metadata read (or an explicit decision to accept the UI hint) |
+| B3 | Identity of 100001 | **confirmed** (section 14): Crypto, ETH, Ethereum | — (the quote currency of the pair and the product type remain under B6/B8) |
 | B4 | Governed mapping path | **closed** (`etoro:map-instrument`, dry run and apply); not executed | the operator's apply after B3 |
 | B5 | Demo write permission | **not proved in the repository** | the `scopes` from the operator's `/me` result (no new call needed if it is at hand) |
 | B6 | `settlementType` | **narrowed**: not sent, but verified after the fill and flagged unless `real` | decide whether a non-`real` result is acceptable for the test |
@@ -283,7 +283,67 @@ Results: in the PR description.
 
 **Behaviour change.** With `ETORO_DEMO_EXECUTION_ENABLED=1`, creating an intent now makes **one authenticated `/demo/pnl` read**, the safety evaluation of the create gate. Execute is refused by the build lock before its gate runs, so it reads nothing. No other route reads `/demo/pnl`; the cycle status route shows the last evaluation only.
 
-## 13. Safety boundaries (unchanged)
+## 14. Instrument identity of 100001 confirmed (B3, 2026-10-18)
+
+### Observation
+
+- **What was run.** Exactly one `GET https://public-api.etoro.com/api/v2/market-data/instruments?instrumentsIds=100001`, approved by the operator.
+  - It went through the observation tool: `--source=instrument-metadata --confirm-live-read`, at `b5001bd`.
+  - Authorization: the existing key (market-data scope).
+  - No retry, no fallback, no portfolio or PnL read.
+- **Evidence.** `docs/evidence/O22_etoro_instrument_metadata_100001_2026-10-18.json`, byte-identical with the tool's report (sha256 `3e898fcd9578b862180e7a824c2cde904e44fde64b9dc27454d35b782340528c`).
+
+| Field | Value |
+|---|---|
+| verdict | **accepted**: exactly one result, for the requested id, with a documented type |
+| `instrumentId` | 100001 |
+| `type` | **Crypto** |
+| `symbol` | **ETH** |
+| `displayName` | **Ethereum** |
+
+**B3 is confirmed** for the identity: eToro instrument 100001 is Ethereum, type Crypto. It agrees with the operator's UI comparison (O21B) and with the arithmetic of the observed position.
+
+**Still to verify separately.** The metadata names the asset, not the pair or the execution:
+- The quote currency of eToro's ETH price. `openRate` is "in the instrument's currency" and the payload states no currency. NEXUS maps 100001 to a **USD** instrument because eToro orders are in USD and the account currency is USD (G2). That ETH is quoted in USD at eToro is an assumption, not proved by this read.
+- The product type of a NEXUS order: `settlementType` is not sent; it is verified after the fill (B6).
+
+### Mapping dry run (B4); no write
+
+- **The real tool, as requested.** `npm run etoro:map-instrument -- --instrument-id=… --metadata-report=docs/evidence/O22_etoro_instrument_metadata_100001_2026-10-18.json --valid-from=… --operator=…` without `--apply`. In this session it ends with `MAPPING_FAILED: the registry could not be opened or written`: there is no `DATABASE_URL`, so nothing was opened and nothing was written.
+- **The same dry run on a throwaway PostgreSQL** (`test/pg/o22-map-instrument.pg.test.ts`, with a TEST ETH/USD instrument and the real evidence file). It plans exactly:
+  - `{ instrumentId: <NEXUS ETH/USD>, provider: 'etoro', providerSymbol: '100001', providerInstrumentId: '100001', validFrom: <the human's instant> }`;
+  - `by: { kind: 'human', id: <operator> }`;
+  - reason: `O22 governed eToro mapping by a named human; evidence 3e898fcd… (type Crypto, symbol ETH)`.
+
+  It writes no event. Without an ETH/USD instrument it refuses (`MAPPING_INSTRUMENT_INVALID`) and creates none. An instrument that already has an eToro mapping is refused (`MAPPING_CONFLICT`).
+
+### Existing registry entries
+
+The production registry could **not** be checked from this session: no `DATABASE_URL`, and no NEXUS database is reachable. The repository contains **no** ETH instrument (only TEST ETH/USD fixtures in tests). Whether the operator's registry already holds an ETH instrument is unknown. The mapping tool refuses a second eToro mapping, and the registry refuses a second mapping of the same Twelve Data symbol in an overlapping period, so a duplicate cannot be written either way.
+
+### Missing before the mapping can be applied
+
+1. **Look up or create the NEXUS ETH/USD instrument in the operator's registry.**
+   - With `DATABASE_URL`: list the instruments and look for `crypto` / `ETH/USD`.
+   - If there is none: `POST /api/instruments/register` with Twelve Data `ETH/USD`.
+   - Not verifiable offline: whether Twelve Data's symbol search returns `currency: USD` for `ETH/USD`. Without it, the registration is refused ("metadata incomplete").
+2. **Requirements for the mapping:** the instrument must be `crypto`, `USD` and active.
+3. **The governed mapping:** a dry run with `DATABASE_URL`, then `--apply --confirm-human-mapping`. That is a human decision.
+
+### Risks
+
+- **The hand-opened ETH position.**
+  - After the mapping, the O20 sync maps it to ETH/USD. The ledger reconciliation then reports `missing_in_ledger` for it (not a NEXUS booking; nothing is booked).
+  - The cycle reconciliation identifies by `positionID` and keeps it **external**.
+  - The demo account safety counts it in exposure and positions, so every cycle open stays `CAPACITY_BLOCK` until the operator closes it in the UI.
+  - NEXUS never closes it. A buy while it exists would also put two ETH positions in the account, which the identification by `positionID` keeps apart.
+- **The ETH/USD quote (B8).**
+  - The gate needs a production quote at create **and** at execute, no older than 60 s, with `currency: 'USD'`.
+  - If the Twelve Data crypto quote does not state its currency, the gate refuses (`INSTRUMENT_NOT_USD`). It fails closed, but the cycle cannot start. This must be checked with production market data before the release.
+  - Twelve Data's ETH/USD (an exchange or aggregate price) is not eToro's execution price. The order is by **amount**, so the quote only checks freshness and sanity; the units come from eToro.
+- **Currency assumption.** If eToro's ETH were not quoted in USD, `openRate` and the units/rate arithmetic would not be USD. The valuation does not depend on it: `amount` and `pnL` are in the account currency, USD (G2).
+
+## 15. Safety boundaries (unchanged)
 
 - `BUILD_LOCKS` = `{ liveTrading, brokerOrders, physicalPurchase, etoroDemoExecution }`, all `true`.
 - `TRADING_MODE=paper`, `ALLOW_LIVE_TRADING=false`.
