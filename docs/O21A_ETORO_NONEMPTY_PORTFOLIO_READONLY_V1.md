@@ -6,6 +6,7 @@ Status: implemented and merged (PR #21, merge commit `9a226b4`; original base `a
 - An independent direct `/demo/pnl` GET outside NEXUS was also **empty**.
 - On 2026-10-17 a **non-empty** response was **NOT live-observed**, although a demo position was open in the eToro UI (section 9).
 - **2026-10-18 (O21B, section 12):** a **non-empty** `/demo/portfolio` response is now **LIVE_OBSERVED** once, through a single direct GET outside NEXUS. It held one position that matches the ETH buy position visible in the eToro UI. The unchanged parser accepted the operator's private pseudonymized export offline. The repository fixture has `credit` redacted to `null` and is therefore refused as a whole, by design; its position passes `parsePosition`. Why the earlier responses were empty is still **unexplained**. `/demo/pnl` was **not** read again.
+- **2026-10-18 (O21C, section 13):** a non-empty `/demo/portfolio` response is now **LIVE_OBSERVED through NEXUS**. One read was made with the observation tool (`--source=portfolio`). The O21A parser **accepted** it with 1 position and 0 orders. Not confirmed by this: sync/reconciliation, instrument mapping, cash semantics, portfolio safety connection.
 
 O21A prepares the O20 read-only adapter for a non-empty eToro **demo** portfolio. It reads open positions and pending orders strictly with the documented schema, maps them to NEXUS instruments only through the human-governed `etoro` mapping, and stores the fields NEXUS needs. It also adds a separate read-only observation tool for the first controlled live read. Nothing here writes to the broker, unlocks anything, or touches O17, O19, O21 execution or O22.
 
@@ -23,9 +24,9 @@ O21A prepares the O20 read-only adapter for a non-empty eToro **demo** portfolio
 | All nine containers present and arrays when empty, `credit` a JSON number | LIVE_OBSERVED (O20) |
 | Empty `/demo/portfolio` structure (all 11 documented keys, every container empty) | LIVE_OBSERVED twice (O21A, section 11) |
 | Empty `/demo/pnl` structure (all 13 schema keys, `positions` / `orders` / `ordersForOpen` empty) | LIVE_OBSERVED once through NEXUS, and once independently outside NEXUS (section 11) |
-| Element schema of `positions` | DOCUMENTED + LIVE_OBSERVED once (2026-10-18, one position, direct GET outside NEXUS; section 12) |
+| Element schema of `positions` | DOCUMENTED + LIVE_OBSERVED twice on 2026-10-18, one position each time: a direct GET outside NEXUS (O21B, section 12) and a read through the NEXUS observation tool (O21C, section 13) |
 | Element schema of `orders` | DOCUMENTED only (`orders` was empty in every observed response) |
-| Non-empty `positions`, every other container empty | LIVE_OBSERVED once (2026-10-18, section 12) |
+| Non-empty `positions`, every other container empty | LIVE_OBSERVED (O21B section 12; O21C section 13, through NEXUS, parser accepted) |
 | Any other non-empty container / element shape | **NOT LIVE_OBSERVED** |
 | Meaning and currency of `credit` / `bonusCredit` | DOCUMENTED as "USD"; meaning NOT_VERIFIED |
 | Element schema of `ordersForOpen`, `ordersForClose`, `ordersForCloseMultiple` | NOT documented (`items: { type: object }`, no properties) |
@@ -131,7 +132,13 @@ npm run etoro:observe-demo -- --source=portfolio|pnl --confirm-live-read [--pseu
 
 ## 9. Remaining blockers
 
-1. **`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`** – state of 2026-10-17, **superseded in part on 2026-10-18** (section 12): a non-empty `/demo/portfolio` response with one position was observed through a direct GET outside NEXUS. Still not observed: a non-empty response read through NEXUS itself, a non-empty `orders`, a non-empty `/demo/pnl`. Still unexplained: why the 2026-10-17 responses were empty. The original 2026-10-17 record: no non-empty demo portfolio had been observed live.
+1. **`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`** – state of 2026-10-17.
+   - **Superseded for `positions` via `/demo/portfolio`** on 2026-10-18:
+     - a direct GET outside NEXUS (O21B, section 12);
+     - a read through the NEXUS observation tool, parser accepted (O21C, section 13).
+   - **Not superseded** for a non-empty `orders` (or any other container) or for a non-empty `/demo/pnl`: neither has been observed.
+   - Still **unexplained**: why the 2026-10-17 responses were empty.
+   - The original 2026-10-17 record: no non-empty demo portfolio had been observed live.
    - The demo position open in the eToro UI was visible neither through `/demo/portfolio` nor through `/demo/pnl`.
    - A direct `/demo/pnl` GET outside NEXUS was empty too.
    - Section 11 records the observations and the manual credential/account check.
@@ -312,10 +319,64 @@ No parser or production rule was changed or relaxed. Both runs test the real (ps
 
 - Why both 2026-10-17 `/demo/portfolio` reads and both `/demo/pnl` reads were empty while a position was open in the UI: **unexplained**. Today's response came from a different, direct read path; nothing was compared that would explain the difference.
 - `/demo/pnl` was **not** read again. Its non-empty shape (REFERENCE_SCHEMA vs REFERENCE_EXAMPLE) remains NOT LIVE_OBSERVED.
-- A non-empty read **through NEXUS** (`etoro:observe-demo --source=portfolio`, or the sync adapter) has not been made.
+- A non-empty read **through NEXUS** (`etoro:observe-demo --source=portfolio`, or the sync adapter) had not been made at the time of O21B. Update: the observation-tool read was made later the same day (O21C, section 13); the sync adapter has still not read a non-empty portfolio.
 - Section 9.2 semantics stay NOT_VERIFIED:
   - `units` vs NEXUS quantity;
   - the meaning of `stopLossRate` 0.0001 / `takeProfitRate` 238821.57 (placeholder vs real trigger);
   - `orderType` 17.
 - `instrumentID` 100001 has no human-governed `etoro` mapping. Reconciliation would report `unmapped_broker_instrument`.
 - Cash stays `not_read`. `PORTFOLIO_SAFETY_NOT_CONNECTED` remains. Every `BUILD_LOCKS` entry stays `true`. No order, no write, no new permission.
+
+## 13. O21C – first non-empty /demo/portfolio read through NEXUS (2026-10-18)
+
+### What was run
+
+- Code: the merged state `bf7432f` (merge of PR #23), unchanged, built locally.
+- Tool: the O21A observation tool, run once by the operator with the existing demo keys and `ETORO_TRADING_MODE=demo`:
+  `etoro-observe-cli --source=portfolio --confirm-live-read --pseudonymize-ids --show-instrument-ids`
+- Exactly one `GET /api/v1/trading/info/demo/portfolio` through the O20 transport:
+  - no retry, no `/demo/pnl` read, no fallback;
+  - no write, no order;
+  - no file written by the tool.
+- Evidence: the sanitized JSON report printed by the tool, stored unchanged as `docs/evidence/O21C_etoro_demo_portfolio_observation_2026-10-18.json`. The report contains no value, no key and no account id. Ids appear only as per-run HMAC pseudonyms whose salt was never output. Instrument ids appear in clear, as requested with `--show-instrument-ids`. Nothing else from the operator's session is recorded.
+
+### Result
+
+From the report (it states kinds, signs and counts, never values):
+
+| Item | Report |
+|---|---|
+| Top level | `clientPortfolio` only; no unnamed keys. |
+| `clientPortfolio` | The 11 documented keys; `undocumentedKeys` and `documentedMissing` empty. `credit`: positive non-integer number. `bonusCredit`: integer zero. |
+| `positions` | **count 1**. `schemaDocumentedPresent` lists all **35** documented `TradingDemoApi_Position` fields. `documentedMissing`, `exampleOnlyPresent` and `undocumentedPresent` are empty. |
+| Other containers | `mirrors`, `orders`, `stockOrders`, `entryOrders`, `exitOrders`, `ordersForOpen`, `ordersForClose`, `ordersForCloseMultiple`: arrays, count 0. |
+| Position field kinds | `positionID`, `orderID`, `instrumentID`, `CID`: positive integers. `mirrorID`, `parentPositionID`: integer zero. `openDateTime`: ISO 8601 with `Z`. `units`, `openRate`, `stopLossRate`, `takeProfitRate`: positive non-integer numbers. `amount`, `leverage`: positive integers. `isBuy`, `isNoStopLoss`, `isNoTakeProfit`, `isTslEnabled`: booleans. |
+| Instrument ids | `[100001]` |
+| Pseudonymous ids | One per id field. `mirrorID` and `parentPositionID` share one pseudonym because both are 0 (the tool pseudonymizes the value 0 too). |
+| Parser verdict | **`accepted`, positions 1, orders 0** |
+
+This agrees with the O21B observation (section 12): the same 35 position fields, the same empty containers, the same instrument id. The report does not show values, so it does not by itself prove that the position is the same one; position ids are pseudonymized with a different method and salt in O21B and O21C and cannot be compared.
+
+Exit code 0 of the tool is **not** the evidence for the parser result. The evidence is the `parser` field of the report.
+
+### What O21C does and does not show
+
+| | O21B (section 12) | O21C (this section) |
+|---|---|---|
+| Read path | Direct GET by the operator, **outside NEXUS** | NEXUS observation tool, O20 transport |
+| Parser | Unchanged `parseDemoPortfolio`, run **offline** on a private pseudonymized export (accepted); the repository fixture is credit-redacted and refused as a whole by design | Unchanged `parseDemoPortfolio`, run **in the tool** on the live body (**accepted**) |
+| Evidence in the repository | Pseudonymized, credit-redacted fixture plus offline tests | Sanitized observation report (no values) |
+
+**Not confirmed by O21C:**
+- **Sync and reconciliation:** the sync adapter / broker service has not read a non-empty portfolio; no snapshot was stored; no reconciliation ran.
+- **Instrument mapping:** `instrumentID` 100001 has no human-governed `etoro` mapping. None was registered, and nothing was mapped automatically.
+- **Cash semantics:** `credit` was checked by kind only. Cash stays `not_read`.
+- **Portfolio safety:** `PORTFOLIO_SAFETY_NOT_CONNECTED` remains. No safety source was built or connected.
+- **Section 9.2 semantics:** still NOT_VERIFIED (`units` vs NEXUS quantity, SL/TP values, `orderType`).
+- **Other containers and endpoints:** a non-empty `orders` (or any other container) and a non-empty `/demo/pnl` are still not observed. This observation is not generalized to them.
+- **Earlier empty responses:** why the 2026-10-17 responses were empty remains **unexplained**.
+
+Safety boundaries unchanged:
+- No production code changed.
+- Every `BUILD_LOCKS` entry stays `true`. `TRADING_MODE=paper`, `ALLOW_LIVE_TRADING=false`.
+- No further eToro call.

@@ -1,0 +1,490 @@
+{
+  "schema": "etoro-demo-portfolio-observation:v1",
+  "source": "portfolio",
+  "endpoint": "GET /api/v1/trading/info/demo/portfolio",
+  "topLevelKeys": [
+    "clientPortfolio"
+  ],
+  "topLevelUnnamedKeys": 0,
+  "clientPortfolio": {
+    "kind": "object",
+    "keys": [
+      "bonusCredit",
+      "credit",
+      "entryOrders",
+      "exitOrders",
+      "mirrors",
+      "orders",
+      "ordersForClose",
+      "ordersForCloseMultiple",
+      "ordersForOpen",
+      "positions",
+      "stockOrders"
+    ],
+    "unnamedKeys": 0,
+    "undocumentedKeys": [],
+    "documentedMissing": [],
+    "credit": {
+      "kind": "non_integer_number",
+      "sign": "positive"
+    },
+    "bonusCredit": {
+      "kind": "integer",
+      "sign": "zero"
+    }
+  },
+  "containers": {
+    "entryOrders": {
+      "kind": "array",
+      "count": 0,
+      "documented": "no_element_schema"
+    },
+    "exitOrders": {
+      "kind": "array",
+      "count": 0,
+      "documented": "no_element_schema"
+    },
+    "mirrors": {
+      "kind": "array",
+      "count": 0,
+      "documented": "element_schema"
+    },
+    "orders": {
+      "kind": "array",
+      "count": 0,
+      "documented": "element_schema"
+    },
+    "ordersForClose": {
+      "kind": "array",
+      "count": 0,
+      "documented": "no_element_schema"
+    },
+    "ordersForCloseMultiple": {
+      "kind": "array",
+      "count": 0,
+      "documented": "no_element_schema"
+    },
+    "ordersForOpen": {
+      "kind": "array",
+      "count": 0,
+      "documented": "no_element_schema"
+    },
+    "positions": {
+      "kind": "array",
+      "count": 1,
+      "documented": "element_schema",
+      "fields": {
+        "CID": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "amount": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "initialAmountInDollars": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "initialUnits": {
+          "present": 1,
+          "kinds": {
+            "non_integer_number": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "instrumentID": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "isBuy": {
+          "present": 1,
+          "kinds": {
+            "boolean": 1
+          }
+        },
+        "isDetached": {
+          "present": 1,
+          "kinds": {
+            "boolean": 1
+          }
+        },
+        "isDiscounted": {
+          "present": 1,
+          "kinds": {
+            "boolean": 1
+          }
+        },
+        "isNoStopLoss": {
+          "present": 1,
+          "kinds": {
+            "boolean": 1
+          }
+        },
+        "isNoTakeProfit": {
+          "present": 1,
+          "kinds": {
+            "boolean": 1
+          }
+        },
+        "isPartiallyAltered": {
+          "present": 1,
+          "kinds": {
+            "boolean": 1
+          }
+        },
+        "isSettled": {
+          "present": 1,
+          "kinds": {
+            "boolean": 1
+          }
+        },
+        "isTslEnabled": {
+          "present": 1,
+          "kinds": {
+            "boolean": 1
+          }
+        },
+        "leverage": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "lotCount": {
+          "present": 1,
+          "kinds": {
+            "non_integer_number": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "mirrorID": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 1,
+            "positive": 0,
+            "negative": 0
+          }
+        },
+        "openConversionRate": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "openDateTime": {
+          "present": 1,
+          "kinds": {
+            "string_iso8601_utc_z": 1
+          }
+        },
+        "openPositionActionType": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 1,
+            "positive": 0,
+            "negative": 0
+          }
+        },
+        "openRate": {
+          "present": 1,
+          "kinds": {
+            "non_integer_number": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "orderID": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "orderType": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "parentPositionID": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 1,
+            "positive": 0,
+            "negative": 0
+          }
+        },
+        "pnlVersion": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "positionID": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "redeemStatusID": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 1,
+            "positive": 0,
+            "negative": 0
+          }
+        },
+        "settlementTypeID": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "stopLossRate": {
+          "present": 1,
+          "kinds": {
+            "non_integer_number": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "stopLossVersion": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "takeProfitRate": {
+          "present": 1,
+          "kinds": {
+            "non_integer_number": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "totalExternalFees": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "totalExternalTaxes": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 1,
+            "positive": 0,
+            "negative": 0
+          }
+        },
+        "totalFees": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 1,
+            "positive": 0,
+            "negative": 0
+          }
+        },
+        "units": {
+          "present": 1,
+          "kinds": {
+            "non_integer_number": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        },
+        "unitsBaseValueDollars": {
+          "present": 1,
+          "kinds": {
+            "integer": 1
+          },
+          "sign": {
+            "zero": 0,
+            "positive": 1,
+            "negative": 0
+          }
+        }
+      },
+      "schemaDocumentedPresent": [
+        "CID",
+        "amount",
+        "initialAmountInDollars",
+        "initialUnits",
+        "instrumentID",
+        "isBuy",
+        "isDetached",
+        "isDiscounted",
+        "isNoStopLoss",
+        "isNoTakeProfit",
+        "isPartiallyAltered",
+        "isSettled",
+        "isTslEnabled",
+        "leverage",
+        "lotCount",
+        "mirrorID",
+        "openConversionRate",
+        "openDateTime",
+        "openPositionActionType",
+        "openRate",
+        "orderID",
+        "orderType",
+        "parentPositionID",
+        "pnlVersion",
+        "positionID",
+        "redeemStatusID",
+        "settlementTypeID",
+        "stopLossRate",
+        "stopLossVersion",
+        "takeProfitRate",
+        "totalExternalFees",
+        "totalExternalTaxes",
+        "totalFees",
+        "units",
+        "unitsBaseValueDollars"
+      ],
+      "documentedMissing": [],
+      "exampleOnlyPresent": [],
+      "undocumentedPresent": [],
+      "pseudonymousIds": {
+        "CID": [
+          "id_39b960a3b43be5ae"
+        ],
+        "mirrorID": [
+          "id_f568317a7ee31451"
+        ],
+        "orderID": [
+          "id_87a052f179d9b82e"
+        ],
+        "parentPositionID": [
+          "id_f568317a7ee31451"
+        ],
+        "positionID": [
+          "id_2f7a1624f9056c6f"
+        ]
+      },
+      "instrumentIds": [
+        100001
+      ]
+    },
+    "stockOrders": {
+      "kind": "array",
+      "count": 0,
+      "documented": "no_element_schema"
+    }
+  },
+  "parser": {
+    "outcome": "accepted",
+    "positions": 1,
+    "orders": 0
+  }
+}
