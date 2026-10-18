@@ -251,7 +251,13 @@ Results: in the PR description.
 
 ### Next changes required (none made here)
 
-1. **Observation report, code change.** Report the JSON kind and sign of each `unrealizedPnL` field (as for position fields; no values), and `accountCurrencyId` as its value (a currency code, not an account id). Tests included.
+1. **Observation report, code change. Done.** The `/demo/pnl` report now carries `valuationEvidence` (`valuationEvidenceOf` in `etoro-observation.ts`; tests in `o22-pnl-valuation-evidence.test.ts`):
+   - **`unrealizedPnlObject`:** per position, whether `unrealizedPnL` is an object, null, missing or another type.
+   - **`pnL`:** the type (number, null, missing, other), the number of finite values, and the sign (positive, negative, zero, not_applicable).
+   - **`accountCurrencyId`:** present or not, its JSON kind, and the numeric code when it is a non-negative safe integer.
+   - **`checks`:** `allPositionPnlFiniteNumbers` (G1; null without positions) and `accountCurrencyIsUsd` (G2).
+
+   No amount, PnL value, id or key is reported. The portfolio report is unchanged.
 2. **One more approved `/demo/pnl` read**, while the hand-opened position is still open, to close G1 and G2.
 3. **Evidence record, reviewed change.** Only then set `DEMO_ACCOUNT_VALUATION_EVIDENCE.nonEmptyPnlLiveObserved = true`, with `evidenceRef` naming both reports.
 

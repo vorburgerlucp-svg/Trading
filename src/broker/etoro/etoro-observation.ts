@@ -231,8 +231,82 @@ export interface ObservationReport {
     bonusCredit: { kind: JsonKind | 'missing'; sign?: 'zero' | 'positive' | 'negative' };
   };
   containers: Record<string, ContainerReport>;
+  /** O22, source pnl only: the evidence the demo account safety needs (gaps G1 and G2). Counts, kinds and signs; no amount, no id. */
+  valuationEvidence?: ValuationEvidence;
   /** What the parser of this source does with the response, computed after the report. The detail names a field path, never a value. */
   parser: ParserVerdict;
+}
+
+export type PnlValueType = 'number' | 'null' | 'missing' | 'other';
+export type PnlSign = 'positive' | 'negative' | 'zero' | 'not_applicable';
+
+/**
+ * O22: what a /demo/pnl response proves for the valuation of the demo account safety source.
+ * - G1: every position has a nested unrealizedPnL object whose pnL is a finite JSON number (the guide formula sums it).
+ * - G2: clientPortfolio.accountCurrencyId is the currency code 1 ("1 = USD").
+ * Only counts, JSON types, signs and the currency code are reported: never an amount, a PnL value, an id or a key.
+ */
+export interface ValuationEvidence {
+  readonly positions: number;
+  /** positions[].unrealizedPnL: how many are an object, null, missing, or another type. */
+  readonly unrealizedPnlObject: Readonly<Record<'object' | 'null' | 'missing' | 'other', number>>;
+  /** positions[].unrealizedPnL.pnL, over the positions whose unrealizedPnL is an object. */
+  readonly pnL: {
+    readonly type: Readonly<Record<PnlValueType, number>>;
+    /** How many are a finite number (an overflowing JSON literal parses to Infinity and is not finite). */
+    readonly finite: number;
+    readonly sign: Readonly<Record<PnlSign, number>>;
+  };
+  readonly accountCurrencyId: {
+    readonly present: boolean;
+    readonly kind: JsonKind | 'missing';
+    /** The numeric currency code when it is a non-negative safe integer, else null. A currency code, not an account id. */
+    readonly code: number | null;
+  };
+  /** The two gaps as checks. null for G1 when there is no position (nothing to prove). */
+  readonly checks: {
+    readonly allPositionPnlFiniteNumbers: boolean | null;
+    readonly accountCurrencyIsUsd: boolean;
+  };
+}
+
+/** The valuation evidence of a /demo/pnl body. Pure; reads only the two fields of the gaps. */
+export function valuationEvidenceOf(body: unknown): ValuationEvidence {
+  const cp = isObject(body) && isObject(body.clientPortfolio) ? body.clientPortfolio : null;
+  const positions = cp !== null && Array.isArray(cp.positions) ? cp.positions : [];
+  const container = { object: 0, null: 0, missing: 0, other: 0 };
+  const type: Record<PnlValueType, number> = { number: 0, null: 0, missing: 0, other: 0 };
+  const sign: Record<PnlSign, number> = { positive: 0, negative: 0, zero: 0, not_applicable: 0 };
+  let finite = 0;
+  for (const position of positions) {
+    const u = isObject(position) ? position.unrealizedPnL : undefined;
+    if (u === undefined) container.missing++;
+    else if (u === null) container.null++;
+    else if (isObject(u)) container.object++;
+    else container.other++;
+    if (!isObject(u)) continue;
+    const v = u.pnL;
+    const t: PnlValueType = v === undefined ? 'missing' : v === null ? 'null' : typeof v === 'number' ? 'number' : 'other';
+    type[t]++;
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      finite++;
+      sign[signOf(v)]++;
+    } else {
+      sign.not_applicable++;
+    }
+  }
+  const raw = cp === null ? undefined : cp.accountCurrencyId;
+  const code = typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0 ? raw : null;
+  return {
+    positions: positions.length,
+    unrealizedPnlObject: container,
+    pnL: { type, finite, sign },
+    accountCurrencyId: { present: raw !== undefined, kind: raw === undefined ? 'missing' : kindOf(raw), code },
+    checks: {
+      allPositionPnlFiniteNumbers: positions.length === 0 ? null : finite === positions.length,
+      accountCurrencyIsUsd: code === 1,
+    },
+  };
 }
 
 export interface ObservationOptions {
@@ -404,6 +478,7 @@ export function observeDemoResponse(source: ObservationSource, body: unknown, op
       bonusCredit: scalarSummary(isObject(cp) ? cp.bonusCredit : undefined),
     },
     containers,
+    ...(source === 'pnl' ? { valuationEvidence: valuationEvidenceOf(body) } : {}),
   };
   return { ...described, parser: parserVerdict(source, body) };
 }
