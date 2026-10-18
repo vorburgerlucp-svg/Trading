@@ -69,6 +69,8 @@ export interface RuntimeServices {
   etoroSync(): Promise<unknown>;
   etoroSnapshot(): Promise<unknown>;
   etoroReconciliation(requireFresh: boolean): Promise<unknown>;
+  /** O22: the controlled demo cycle, read only: budget, cycle reconciliation against the stored snapshot, safety readiness. */
+  etoroDemoCycle(): Promise<unknown>;
   /**
    * eToro demo execution (O21). Absent when ETORO_DEMO_EXECUTION_ENABLED is off: every intent route then answers EXECUTION_DISABLED.
    * Every method goes through the EtoroDemoExecutionService; a route never reaches the adapter or the transport.
@@ -126,6 +128,8 @@ const ROUTES: readonly Route[] = Object.freeze([
   { method: 'POST', path: '/api/broker/etoro/sync' },
   { method: 'GET', path: '/api/broker/etoro/snapshot' },
   { method: 'GET', path: '/api/broker/etoro/reconciliation' },
+  // O22: read-only status of the controlled demo cycle (budget, cycle reconciliation, safety readiness). No broker request.
+  { method: 'GET', path: '/api/broker/etoro/demo/cycle' },
 ]);
 
 function invalid(): never {
@@ -389,6 +393,9 @@ export function createRuntimeHandler(services: RuntimeServices, options: Runtime
           return send(res, 200, await services.etoroSnapshot());
         case '/api/broker/etoro/reconciliation':
           return send(res, 200, await services.etoroReconciliation(optionalFlag(params, 'requireFresh')));
+        case '/api/broker/etoro/demo/cycle':
+          if (url.search !== '') throw new RuntimeApiError('REQUEST_INVALID');
+          return send(res, 200, await services.etoroDemoCycle());
         default:
           throw new RuntimeApiError('NOT_FOUND');
       }

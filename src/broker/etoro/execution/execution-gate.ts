@@ -12,12 +12,15 @@ import type { KillSwitchState, PortfolioSafetyDecision } from '../../../safety/p
 import type { ExecutionIntent } from './execution-intent.js';
 
 export const DEMO_EXECUTION_POLICY_VERSION = 'etoro-demo-execution-policy:v1' as const;
+/** O22: the policy of the one controlled demo trading cycle (one open, one close, then nothing). */
+export const DEMO_E2E_CYCLE_POLICY_VERSION = 'etoro-demo-e2e-cycle-policy:v1' as const;
+export type DemoExecutionPolicyVersion = typeof DEMO_EXECUTION_POLICY_VERSION | typeof DEMO_E2E_CYCLE_POLICY_VERSION;
 
 /** The provider name of the human-governed eToro instrument mapping in the instrument registry. */
 export const ETORO_MAPPING_PROVIDER = 'etoro';
 
 export interface DemoExecutionPolicy {
-  readonly version: typeof DEMO_EXECUTION_POLICY_VERSION;
+  readonly version: DemoExecutionPolicyVersion;
   /** The most one open may invest (amount, or units times the quote), in USD. */
   readonly maxOrderInvestmentUsd: string;
   readonly maxLeverage: number;
@@ -30,6 +33,13 @@ export interface DemoExecutionPolicy {
   readonly maxBrokerSyncAgeMs: number;
   /** An MIT trigger rate must be within this distance of the quote, in basis points. */
   readonly maxTriggerDistanceBp: number;
+  /**
+   * O22 cycle budget: how many open (close) intents may ever reach SUBMITTING, counted over the whole persistent intent log, whatever
+   * their outcome (a rejected, ambiguous or crashed write counts). null = no budget. Checked in the reservation step, so it holds
+   * across processes; once spent, no further write of that kind is possible without a code change.
+   */
+  readonly maxOpenSubmissions: number | null;
+  readonly maxCloseSubmissions: number | null;
 }
 
 /** Conservative demo defaults. A change is a code change and a review, never a request field. */
@@ -43,6 +53,28 @@ export const DEFAULT_DEMO_EXECUTION_POLICY: DemoExecutionPolicy = Object.freeze(
   maxSafetyDecisionAgeMs: 5 * 60_000,
   maxBrokerSyncAgeMs: 5 * 60_000,
   maxTriggerDistanceBp: 1000,
+  maxOpenSubmissions: null,
+  maxCloseSubmissions: null,
+});
+
+/**
+ * O22: the policy of the one controlled demo trading cycle, used by the runtime. One market buy of at most 100 USD at leverage 1, one
+ * open position, and exactly one open and one close submission over the lifetime of the intent log: after them, every further write
+ * is refused (CYCLE_*_BUDGET_EXHAUSTED). A timeout, an ambiguous answer or a crash spends the budget too, so it can never lead to a
+ * second order. Stricter than the O21 default in every field.
+ */
+export const DEMO_E2E_CYCLE_POLICY: DemoExecutionPolicy = Object.freeze({
+  version: DEMO_E2E_CYCLE_POLICY_VERSION,
+  maxOrderInvestmentUsd: '100',
+  maxLeverage: 1,
+  maxOpenPositions: 1,
+  maxGrossExposureUsd: '100',
+  maxQuoteAgeMs: 60_000,
+  maxSafetyDecisionAgeMs: 5 * 60_000,
+  maxBrokerSyncAgeMs: 5 * 60_000,
+  maxTriggerDistanceBp: 1000,
+  maxOpenSubmissions: 1,
+  maxCloseSubmissions: 1,
 });
 
 export interface GateQuote {
@@ -66,6 +98,9 @@ export interface GateBook {
   readonly closeTargetKnown: boolean;
   /** For a close: another close of the same position is approved or may be live at the broker. */
   readonly closeTargetAlreadyClosing: boolean;
+  /** O22: open and close intents that ever reached SUBMITTING (any outcome), over the whole intent log. */
+  readonly openSubmissions: number;
+  readonly closeSubmissions: number;
 }
 
 export interface GateInput {
@@ -94,7 +129,7 @@ export interface GateVerdict {
   /** Fixed reason codes of this module, in check order. */
   readonly reasons: readonly string[];
   readonly checks: Readonly<Record<string, GateCheck>>;
-  readonly policyVersion: typeof DEMO_EXECUTION_POLICY_VERSION;
+  readonly policyVersion: DemoExecutionPolicyVersion;
 }
 
 interface BookCheck {
@@ -114,6 +149,9 @@ const BOOK_CHECKS: readonly BookCheck[] = Object.freeze([
   // A close needs a position NEXUS proved from broker-confirmed state, and no other close for it. Identity checks still apply.
   { name: 'closeTargetKnown', reason: 'CLOSE_TARGET_UNKNOWN', applies: (o) => !o, ok: (b) => b.closeTargetKnown },
   { name: 'closeTargetNotClosing', reason: 'CLOSE_TARGET_ALREADY_CLOSING', applies: (o) => !o, ok: (b) => !b.closeTargetAlreadyClosing },
+  // O22 cycle budget: spent by every submission, whatever its outcome. Never reset by a rejection, a timeout or a crash.
+  { name: 'cycleOpenBudget', reason: 'CYCLE_OPEN_BUDGET_EXHAUSTED', applies: (o) => o, ok: (b, _e, p) => p.maxOpenSubmissions === null || b.openSubmissions < p.maxOpenSubmissions },
+  { name: 'cycleCloseBudget', reason: 'CYCLE_CLOSE_BUDGET_EXHAUSTED', applies: (o) => !o, ok: (b, _e, p) => p.maxCloseSubmissions === null || b.closeSubmissions < p.maxCloseSubmissions },
 ]);
 
 /**
@@ -234,5 +272,5 @@ export function evaluateDemoExecutionGate(input: GateInput): GateVerdict {
   check('brokerConnectivity', input.broker.connection === 'connected' && syncAge !== null && syncAge >= 0 && syncAge <= policy.maxBrokerSyncAgeMs, 'BROKER_NOT_CONNECTED_OR_STALE', atExecute && opens);
   check('writePacing', input.writeSlotAvailable, 'BROKER_WRITE_PACING', atExecute);
 
-  return Object.freeze({ passed: reasons.length === 0, reasons: Object.freeze(reasons), checks: Object.freeze(checks), policyVersion: DEMO_EXECUTION_POLICY_VERSION });
+  return Object.freeze({ passed: reasons.length === 0, reasons: Object.freeze(reasons), checks: Object.freeze(checks), policyVersion: policy.version });
 }

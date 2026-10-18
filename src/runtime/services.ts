@@ -21,6 +21,9 @@ import type { PortfolioKillSwitchStore } from '../safety/portfolio-kill-switch-s
 import { BrokerError } from '../broker/broker-errors.js';
 import type { EtoroBrokerService } from '../broker/etoro/etoro-broker-service.js';
 import type { EtoroDemoExecutionService } from '../broker/etoro/execution/etoro-demo-execution-service.js';
+import { reconcileDemoCycle } from '../broker/etoro/execution/demo-cycle-reconciliation.js';
+import { assessDemoSafetyReadiness } from '../broker/etoro/execution/demo-safety-readiness.js';
+import { DEMO_E2E_CYCLE_POLICY } from '../broker/etoro/execution/execution-gate.js';
 import type { BarsRequest, DemoExecutionRoutes, InstrumentRegisterRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
 import { RuntimeApiError } from './errors.js';
 import type { OperatorIdentity } from './operator-auth.js';
@@ -374,6 +377,27 @@ export class RuntimeServiceImpl implements RuntimeServices {
   async etoroReconciliation(requireFresh: boolean): Promise<unknown> {
     const etoro = this.deps.etoro ?? null;
     return { reconciliation: etoro === null ? null : await etoro.latestReconciliation(requireFresh) };
+  }
+
+  /**
+   * O22: the controlled demo cycle, read only. Built from the intent log and the latest stored O20 snapshot: no broker request, no
+   * write. The safety readiness is a report, never a decision: the execution gate still has no demo safety source.
+   */
+  async etoroDemoCycle(): Promise<unknown> {
+    const etoro = this.deps.etoro ?? null;
+    const execution = this.deps.etoroDemoExecution ?? null;
+    const snapshot = etoro === null ? null : await etoro.latestSnapshot();
+    const broker = etoro === null ? { connection: 'not_connected', lastSuccessfulSync: null } : (() => {
+      const s = etoro.status().etoro;
+      return { connection: s.connection, lastSuccessfulSync: s.lastSuccessfulSync };
+    })();
+    await this.deps.killSwitch.sync();
+    const safetyReadiness = assessDemoSafetyReadiness({ now: this.now(), broker, snapshot, killSwitch: this.deps.killSwitch.current(), maxSyncAgeMs: DEMO_E2E_CYCLE_POLICY.maxBrokerSyncAgeMs });
+    if (execution === null) {
+      return { cycle: { execution: 'disabled', buildLocked: BUILD_LOCKS.etoroDemoExecution, budget: null, reconciliation: null, safetyReadiness } };
+    }
+    const [budget, intents] = await Promise.all([execution.cycleBudget(), execution.list()]);
+    return { cycle: { execution: 'enabled', buildLocked: BUILD_LOCKS.etoroDemoExecution, budget, reconciliation: reconcileDemoCycle(intents, snapshot), safetyReadiness } };
   }
 }
 

@@ -729,6 +729,22 @@ export class EtoroDemoExecutionService {
       activeDuplicate: this.activeDuplicate(intent, intent.intentId),
       closeTargetKnown,
       closeTargetAlreadyClosing,
+      // O22 cycle budget: every intent that ever reached SUBMITTING, whatever happened after it (rejected, ambiguous, crashed).
+      openSubmissions: all.filter((p) => p.intent.action === 'open' && p.submittingAt !== null).length,
+      closeSubmissions: all.filter((p) => p.intent.action === 'close' && p.submittingAt !== null).length,
+    };
+  }
+
+  /** O22: the cycle budget of the policy and how much of it the intent log has spent. Read only; no broker request. */
+  async cycleBudget(): Promise<{ policyVersion: string; maxOpenSubmissions: number | null; maxCloseSubmissions: number | null; openSubmissions: number; closeSubmissions: number }> {
+    await this.syncAll();
+    const all = [...this.projections().values()];
+    return {
+      policyVersion: this.policy.version,
+      maxOpenSubmissions: this.policy.maxOpenSubmissions,
+      maxCloseSubmissions: this.policy.maxCloseSubmissions,
+      openSubmissions: all.filter((p) => p.intent.action === 'open' && p.submittingAt !== null).length,
+      closeSubmissions: all.filter((p) => p.intent.action === 'close' && p.submittingAt !== null).length,
     };
   }
 

@@ -39,6 +39,7 @@ function services(overrides: Partial<RuntimeServices> = {}): RuntimeServices {
     etoroSync: async () => ({}),
     etoroSnapshot: async () => ({ snapshot: null }),
     etoroReconciliation: async () => ({ reconciliation: null }),
+    etoroDemoCycle: async () => ({ cycle: null }),
     ...overrides,
   };
 }

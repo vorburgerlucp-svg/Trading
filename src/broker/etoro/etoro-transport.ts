@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import { BrokerError } from '../broker-errors.js';
 import { isValidEtoroKey } from './etoro-credentials.js';
-import { ETORO_ALLOWED_OPERATIONS, ETORO_BASE_URL, type EtoroOperation } from './etoro-readonly.js';
+import { ETORO_ALLOWED_OPERATIONS, etoroOperationUrl, type EtoroOperation } from './etoro-readonly.js';
 
 export const ETORO_DEFAULT_TIMEOUT_MS = 10_000;
 export const ETORO_MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -93,7 +93,7 @@ export class HttpsEtoroTransport implements EtoroTransport {
     };
     let response: Response;
     try {
-      response = await this.fetchFn(ETORO_BASE_URL + spec.path, {
+      response = await this.fetchFn(etoroOperationUrl(operation), {
         method: 'GET',
         headers,
         redirect: 'error',

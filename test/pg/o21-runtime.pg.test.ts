@@ -42,9 +42,9 @@ async function rows(database: string, text: string): Promise<Record<string, unkn
 const databases: TestDatabase[] = [];
 const OPERATOR_TOKEN = 'O21-PG-OPERATOR-TOKEN-0123456789abcdef-xyz';
 
-/** The route takes the intent without createdBy: the creator is the authenticated operator. */
+/** The route takes the intent without createdBy: the creator is the authenticated operator. Since O22 the runtime cycle policy caps an open at 100 USD. */
 function routeIntent(): Record<string, unknown> {
-  const { createdBy: _ignored, ...intent } = openInput();
+  const { createdBy: _ignored, ...intent } = openInput({ amount: '100' });
   void _ignored;
   return intent;
 }
