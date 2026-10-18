@@ -1,6 +1,7 @@
 // O22 B2 variant A: the demo account valuation (official guide formulas over /demo/pnl), the safety decision over it, and the source
-// in this build (evidence record unmocked: no non-empty /demo/pnl observed live, so no decision and no request). Fixture bodies are
+// in this build (evidence record unmocked: two non-empty /demo/pnl observations recorded on 2026-10-18). Fixture bodies are
 // REFERENCE_SCHEMA test data, NOT a live response.
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parseDemoPnlValuationInput } from '../../../src/broker/etoro/etoro-pnl-validation.js';
 import { DEMO_ACCOUNT_VALUATION_EVIDENCE } from '../../../src/broker/etoro/execution/demo-account-evidence.js';
@@ -128,23 +129,33 @@ describe('O22 demo account safety decision', () => {
   });
 });
 
-describe('O22 demo account safety source in this build: no live evidence, no decision, no request', () => {
-  it('the evidence record says a non-empty /demo/pnl was not observed live', () => {
-    expect(DEMO_ACCOUNT_VALUATION_EVIDENCE).toEqual({ nonEmptyPnlLiveObserved: false, evidenceRef: null, accountCurrencyIdObserved: 1, demoKeyEnvironment: 'operator_confirmed' });
+describe('O22 demo account safety source in this build: evidence recorded (2026-10-18)', () => {
+  it('the evidence record cites the two non-empty /demo/pnl reports, and both exist in docs/evidence', () => {
+    expect(DEMO_ACCOUNT_VALUATION_EVIDENCE.nonEmptyPnlLiveObserved).toBe(true);
     expect(Object.isFrozen(DEMO_ACCOUNT_VALUATION_EVIDENCE)).toBe(true);
+    const refs = String(DEMO_ACCOUNT_VALUATION_EVIDENCE.evidenceRef).split('; ');
+    expect(refs).toEqual(['docs/evidence/O22_etoro_demo_pnl_observation_2026-10-18.json', 'docs/evidence/O22_etoro_demo_pnl_observation_2026-10-18_2.json']);
+    const [first, second] = refs.map((ref) => JSON.parse(readFileSync(ref, 'utf8')) as Record<string, any>);
+    expect(first!.parser.outcome).toBe('accepted');
+    expect(first!.containers.positions.count).toBe(1);
+    expect(second!.parser.outcome).toBe('accepted');
+    expect(second!.valuationEvidence.checks).toEqual({ allPositionPnlFiniteNumbers: true, accountCurrencyIsUsd: true });
+    expect(second!.valuationEvidence.accountCurrencyId).toEqual({ present: true, kind: 'integer', code: 1 });
   });
 
-  it('current() answers null and sends nothing, whatever the broker would answer', async () => {
+  it('current() now reads exactly once and decides; the hand-opened position still blocks the cycle open (nothing is released)', async () => {
     const transport = new FixtureEtoroTransport();
-    transport.response = { status: 200, body: schemaPnl() };
+    transport.response = { status: 200, body: schemaPnl({ positions: [manualPosition(-1)] }) };
     const source = new EtoroDemoAccountSafetySource({
       transport,
       killSwitch: await PortfolioKillSwitchStore.open(new InMemoryAppendOnlyStore<KillSwitchState>()),
       valuations: await AppendOnlyLog.open<DemoAccountValuationRecord>('etoro-demo-account-valuations', new InMemoryAppendOnlyStore()),
       nexusPositionIds: async () => NONE,
     });
-    expect(await source.current(AS_OF)).toBeNull();
-    expect(transport.calls).toEqual([]);
-    expect(source.status()).toEqual({ outcome: 'no_evidence', at: AS_OF });
+    const decision = await source.current(AS_OF);
+    expect(transport.calls).toEqual(['pnl.demo']);
+    expect(decision?.state).toBe('CAPACITY_BLOCK');
+    expect(decision?.canIncreaseRisk).toBe(false);
+    expect(decision?.liveOrderAllowed).toBe(false);
   });
 });

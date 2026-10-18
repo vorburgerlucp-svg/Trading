@@ -95,7 +95,11 @@ describe.skipIf(!pgAvailable)('O21 runtime on PostgreSQL' + (pgAvailable ? '' : 
       const created = await post('/api/broker/etoro/demo/intents', routeIntent());
       expect(created.status).toBe(201);
       expect(created.json.intent.state).toBe('REJECTED');
-      expect(created.json.intent.gateReasons).toContain('PORTFOLIO_SAFETY_NOT_CONNECTED');
+      // O22: the demo account safety source is wired and its evidence is recorded, so it reads /demo/pnl once. The fixture answers
+      // with a portfolio body without accountCurrencyId: the valuation is a DATA_HOLD (never read as USD), which blocks the open.
+      expect(created.json.intent.gateReasons).toContain('PORTFOLIO_SAFETY_BLOCKS_RISK_INCREASE');
+      expect(created.json.intent.gateReasons).not.toContain('PORTFOLIO_SAFETY_NOT_CONNECTED');
+      expect(readOnly.calls).toEqual(['portfolio.demo', 'pnl.demo']);
       expect(created.json.intent.intent.createdBy).toEqual({ kind: 'human', id: 'operator-pg' });
       intentId = created.json.intent.intentId;
 

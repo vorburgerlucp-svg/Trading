@@ -21,6 +21,7 @@ import { startHttpServer, type RunningServer } from '../../src/runtime/server.js
 import { AAPL } from '../market-data/fixtures.js';
 import { FixtureEtoroTransport } from '../broker/etoro/o20-fixture.js';
 import { documentedPortfolio } from '../broker/etoro/o21a-documented-fixture.js';
+import { schemaPnl, schemaPnlPosition } from '../broker/etoro/o21a1-pnl-fixture.js';
 import { API_KEY_MARKER, ETORO_AAPL_ID, O21_NOW, ScriptedBroker, USER_KEY_MARKER, freshQuote, normalSafety, openInput } from '../broker/etoro/o21-fixture.js';
 
 const TOKEN = 'O22-OPERATOR-TOKEN-MARKER-0123456789abcdef';
@@ -89,7 +90,7 @@ async function runtime(execution: boolean, options: { injectSafety?: boolean } =
 }
 
 describe('O22 runtime: GET /api/broker/etoro/demo/cycle', () => {
-  it('reports the cycle policy budget, an unknown reconciliation without a snapshot, and safety not connected; no broker request', async () => {
+  it('reports the cycle policy budget, an unknown reconciliation without a snapshot, and the wired safety source not yet evaluated; no broker request', async () => {
     const r = await runtime(true);
     const res = await r.call('GET', '/api/broker/etoro/demo/cycle');
     expect(res.status).toBe(200);
@@ -98,23 +99,41 @@ describe('O22 runtime: GET /api/broker/etoro/demo/cycle', () => {
     expect(res.json.cycle.budget).toEqual({ policyVersion: DEMO_E2E_CYCLE_POLICY_VERSION, maxOpenSubmissions: 1, maxCloseSubmissions: 1, openSubmissions: 0, closeSubmissions: 0 });
     expect(res.json.cycle.reconciliation.verdict).toBe('unknown');
     expect(res.json.cycle.reconciliation.reasons).toContain('SNAPSHOT_MISSING');
-    expect(res.json.cycle.safetyReadiness.connected).toBe(false);
-    expect(res.json.cycle.safetyReadiness.reasons).toContain('PORTFOLIO_SAFETY_NOT_CONNECTED');
+    expect(res.json.cycle.safetyReadiness.connected).toBe(true);
+    expect(res.json.cycle.safetyReadiness.lastDecisionState).toBeNull();
     expect(r.readOnly.calls).toEqual([]);
     expect(r.broker.requests).toEqual([]);
   });
 
-  it('the production wiring passes the demo account safety source; without released evidence it sends nothing and every open is refused', async () => {
+  it('production wiring with recorded evidence: creating an open reads /demo/pnl once; the hand-opened position blocks it; still locked, 0 writes', async () => {
     const r = await runtime(true, { injectSafety: false });
+    r.readOnly.response = { status: 200, body: schemaPnl({ positions: [schemaPnlPosition({ instrumentID: 100001, unrealizedPnL: { pnL: -1 } })] }) };
     const { createdBy: _ignored, ...intent } = openInput({ amount: '100' });
     void _ignored;
     const created = await r.call('POST', '/api/broker/etoro/demo/intents', intent);
     expect(created.json.intent.state).toBe('REJECTED');
-    expect(created.json.intent.gateReasons).toContain('PORTFOLIO_SAFETY_NOT_CONNECTED');
+    expect(created.json.intent.gateReasons).toEqual(expect.arrayContaining(['PORTFOLIO_SAFETY_BLOCKS_RISK_INCREASE', 'DRAWDOWN_OR_CAPACITY_LIMIT']));
+    expect(r.readOnly.calls).toEqual(['pnl.demo']);
     const cycle = await r.call('GET', '/api/broker/etoro/demo/cycle');
-    expect(cycle.json.cycle.safetyReadiness.connected).toBe(false);
-    expect(cycle.json.cycle.safetyReadiness.reasons).toEqual(expect.arrayContaining(['PORTFOLIO_SAFETY_NOT_CONNECTED', 'DEMO_PNL_NONEMPTY_NOT_LIVE_OBSERVED']));
-    expect(r.readOnly.calls).toEqual([]);
+    expect(cycle.json.cycle.safetyReadiness.connected).toBe(true);
+    expect(cycle.json.cycle.safetyReadiness.lastDecisionState).toBe('CAPACITY_BLOCK');
+    expect(cycle.json.cycle.safetyReadiness.reasons).toEqual(['ACCOUNT_EXPOSURE_LIMIT', 'ACCOUNT_POSITION_LIMIT']);
+    expect(r.readOnly.calls).toEqual(['pnl.demo']);
+    expect(r.broker.requests).toEqual([]);
+  });
+
+  it('production wiring, empty demo account: the open is risk-approved, and execute is still EXECUTION_LOCKED_IN_BUILD before any read or write', async () => {
+    const r = await runtime(true, { injectSafety: false });
+    r.readOnly.response = { status: 200, body: schemaPnl() };
+    const { createdBy: _ignored, ...intent } = openInput({ amount: '100' });
+    void _ignored;
+    const created = await r.call('POST', '/api/broker/etoro/demo/intents', intent);
+    expect(created.json.intent.state, JSON.stringify(created.json.intent.gateReasons)).toBe('RISK_APPROVED');
+    const id = created.json.intent.intentId as string;
+    await r.call('POST', '/api/broker/etoro/demo/intents/' + id + '/approve', {});
+    const executed = await r.call('POST', '/api/broker/etoro/demo/intents/' + id + '/execute', {});
+    expect(executed.json.error.code).toBe('EXECUTION_LOCKED_IN_BUILD');
+    expect(r.readOnly.calls).toEqual(['pnl.demo']);
     expect(r.broker.requests).toEqual([]);
   });
 
@@ -125,7 +144,7 @@ describe('O22 runtime: GET /api/broker/etoro/demo/cycle', () => {
     const res = await r.call('GET', '/api/broker/etoro/demo/cycle');
     expect(res.json.cycle.reconciliation.externalPositions).toHaveLength(1);
     expect(res.json.cycle.reconciliation.reasons).toContain('EXTERNAL_POSITIONS_PRESENT');
-    expect(res.json.cycle.safetyReadiness.connected).toBe(false);
+    expect(res.json.cycle.safetyReadiness.connected).toBe(true);
     expect(r.readOnly.calls).toEqual(['portfolio.demo']);
     expect(r.broker.requests).toEqual([]);
   });

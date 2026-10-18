@@ -3,16 +3,22 @@
 // environment variable or route for it. Changing a value is a reviewed code change that cites the observation it rests on.
 //
 // The valuation formulas are DOCUMENTED (official guides, checked 2026-10-18). The account values they use come from
-// GET /api/v1/trading/info/demo/pnl. That response has been LIVE_OBSERVED only EMPTY (O21A.1, 2026-10-17): no position, no order.
-// A non-empty /demo/pnl, the shape the valuation needs (positions with a nested unrealizedPnL), has NOT been observed. Until it is,
-// the safety source answers null: the gate keeps refusing every open with PORTFOLIO_SAFETY_NOT_CONNECTED.
+// GET /api/v1/trading/info/demo/pnl. LIVE_OBSERVED:
+//   - empty (O21A.1, 2026-10-17), with accountCurrencyId 1;
+//   - non-empty, twice (O22, 2026-10-18, one operator-approved read each, sanitized reports in docs/evidence):
+//       1. structure: parser accepted; one position; nested unrealizedPnL with all schema keys; schema spelling; nothing undocumented;
+//       2. the two remaining gaps: G1, every position's unrealizedPnL.pnL is a finite JSON number; G2, accountCurrencyId is 1.
+//     The inputs parseDemoPnlValuationInput reads beyond parseDemoPnl (credit as a number, accountCurrencyId as a code, the external
+//     costs of ordersForOpen) are proved by the same reports (credit: positive number; code 1; ordersForOpen empty).
+// What this does NOT prove: a non-empty orders / ordersForOpen (never observed; any pending order blocks the cycle open anyway), and
+// anything about trading. It enables the source to produce decisions; it releases nothing: the build lock and the account limits stay.
 
 export interface DemoAccountValuationEvidence {
-  /** A non-empty /demo/pnl was observed live, matched the REFERENCE_SCHEMA and was accepted by parseDemoPnlValuationInput. */
+  /** A non-empty /demo/pnl was observed live, matched the REFERENCE_SCHEMA and its valuation inputs were proved (G1, G2). */
   readonly nonEmptyPnlLiveObserved: boolean;
-  /** Where that observation is recorded (a docs/evidence path), null until it exists. */
+  /** Where those observations are recorded (docs/evidence paths), null until they exist. */
   readonly evidenceRef: string | null;
-  /** The account currency observed live: accountCurrencyId 1 ("1 = USD") in an empty /demo/pnl (O21A.1, direct GET). */
+  /** The account currency observed live: accountCurrencyId 1 ("1 = USD") (O21A.1 empty; O22 non-empty, report 2). */
   readonly accountCurrencyIdObserved: 1;
   /**
    * The demo context of the keys: the operator checked that the key environment is Demo (O21A section 11, 2026-10-17), and the
@@ -22,8 +28,8 @@ export interface DemoAccountValuationEvidence {
 }
 
 export const DEMO_ACCOUNT_VALUATION_EVIDENCE: DemoAccountValuationEvidence = Object.freeze({
-  nonEmptyPnlLiveObserved: false,
-  evidenceRef: null,
+  nonEmptyPnlLiveObserved: true,
+  evidenceRef: 'docs/evidence/O22_etoro_demo_pnl_observation_2026-10-18.json; docs/evidence/O22_etoro_demo_pnl_observation_2026-10-18_2.json',
   accountCurrencyIdObserved: 1,
   demoKeyEnvironment: 'operator_confirmed',
 });

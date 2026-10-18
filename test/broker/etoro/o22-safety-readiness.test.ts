@@ -1,10 +1,14 @@
-// O22: the demo safety readiness report. It is never a decision. In this build (evidence not released) it is never connected, the
-// account values are never reported as verified, and stale or unknown inputs are never verified.
+// O22: the demo safety readiness report in this build (evidence recorded 2026-10-18). It is never a decision. Account values are
+// "verified" only from a fresh, complete decision of the source; stale or unknown inputs are never verified. The state without
+// evidence is tested in o22-demo-account-safety-no-evidence.test.ts.
 import { describe, expect, it } from 'vitest';
 import { assessDemoSafetyReadiness } from '../../../src/broker/etoro/execution/demo-safety-readiness.js';
+import { DEMO_ACCOUNT_SAFETY_POLICY, evaluateDemoAccountSafety, valueDemoAccount } from '../../../src/broker/etoro/execution/demo-account-safety.js';
+import { parseDemoPnlValuationInput } from '../../../src/broker/etoro/etoro-pnl-validation.js';
 import type { EtoroSnapshotView } from '../../../src/broker/etoro/etoro-broker-service.js';
 import type { KillSwitchState } from '../../../src/safety/portfolio-safety-envelope.js';
 import { trippedKillSwitch } from './o21-fixture.js';
+import { schemaPnl } from './o21a1-pnl-fixture.js';
 
 const NOW = '2026-10-20T10:00:00.000Z';
 const ARMED: KillSwitchState = { version: 'portfolio-kill-switch:v1', status: 'ARMED', tripId: null, trippedAt: null, reasons: [], triggeringDecisionFingerprint: null };
@@ -17,29 +21,44 @@ function snapshot(freshness: 'fresh' | 'stale' = 'fresh'): EtoroSnapshotView {
   } as unknown as EtoroSnapshotView;
 }
 
+function decisionAt(asOf: string) {
+  const valuation = valueDemoAccount(parseDemoPnlValuationInput(schemaPnl()), new Set());
+  return evaluateDemoAccountSafety({ asOf, valuation, riskDay: { dayId: asOf.slice(0, 10), startEquityUsd: '10000.5', peakEquityUsd: '10000.5' }, killSwitch: ARMED, policy: DEMO_ACCOUNT_SAFETY_POLICY });
+}
+
 function statusOf(r: ReturnType<typeof assessDemoSafetyReadiness>): Record<string, string> {
   return Object.fromEntries(r.items.map((i) => [i.input, i.status]));
 }
 
-describe('O22 demo safety readiness (evidence not released in this build)', () => {
-  it('source wired, fresh sync, armed switch: still not connected; the account values are not verified', () => {
-    const r = assessDemoSafetyReadiness({ now: NOW, broker: FRESH, snapshot: snapshot(), killSwitch: ARMED, maxSyncAgeMs: 300_000, source: { outcome: 'no_evidence', at: NOW } });
-    expect(r.connected).toBe(false);
-    expect(r.reasons).toEqual(['PORTFOLIO_SAFETY_NOT_CONNECTED', 'DEMO_PNL_NONEMPTY_NOT_LIVE_OBSERVED']);
+describe('O22 demo safety readiness (evidence recorded)', () => {
+  it('source wired, not evaluated yet: connected, evidence verified, account values not available', () => {
+    const r = assessDemoSafetyReadiness({ now: NOW, broker: FRESH, snapshot: snapshot(), killSwitch: ARMED, maxSyncAgeMs: 300_000, source: { outcome: 'not_evaluated' } });
+    expect(r.connected).toBe(true);
+    expect(r.lastDecisionState).toBeNull();
     expect(statusOf(r)).toEqual({
       accountContext: 'operator_confirmed',
-      valuationEvidence: 'not_verified',
+      valuationEvidence: 'verified',
       positionsAndOrders: 'verified',
-      grossExposure: 'not_verified',
-      availableFunds: 'not_verified',
-      drawdownAndLossLimits: 'not_verified',
+      grossExposure: 'not_available',
+      availableFunds: 'not_available',
+      drawdownAndLossLimits: 'not_available',
       dataFreshness: 'verified',
       killSwitch: 'verified',
     });
   });
 
-  it('without a wired source it is not connected either', () => {
-    expect(assessDemoSafetyReadiness({ now: NOW, broker: FRESH, snapshot: snapshot(), killSwitch: ARMED, maxSyncAgeMs: 300_000, source: null }).connected).toBe(false);
+  it('a fresh complete decision verifies the account values; an old one does not', () => {
+    const fresh = assessDemoSafetyReadiness({ now: NOW, broker: FRESH, snapshot: snapshot(), killSwitch: ARMED, maxSyncAgeMs: 300_000, source: { outcome: 'decision', at: NOW, decision: decisionAt('2026-10-20T09:59:30.000Z') } });
+    expect(fresh.lastDecisionState).toBe('NORMAL');
+    expect(statusOf(fresh)).toMatchObject({ grossExposure: 'verified', availableFunds: 'verified', drawdownAndLossLimits: 'verified' });
+    const old = assessDemoSafetyReadiness({ now: NOW, broker: FRESH, snapshot: snapshot(), killSwitch: ARMED, maxSyncAgeMs: 300_000, source: { outcome: 'decision', at: NOW, decision: decisionAt('2026-10-20T09:40:00.000Z') } });
+    expect(statusOf(old)).toMatchObject({ grossExposure: 'not_available', availableFunds: 'not_available', drawdownAndLossLimits: 'not_available' });
+  });
+
+  it('without a wired source it is not connected', () => {
+    const r = assessDemoSafetyReadiness({ now: NOW, broker: FRESH, snapshot: snapshot(), killSwitch: ARMED, maxSyncAgeMs: 300_000, source: null });
+    expect(r.connected).toBe(false);
+    expect(r.reasons).toContain('PORTFOLIO_SAFETY_NOT_CONNECTED');
   });
 
   it('no sync, a stale sync, a stale snapshot or a broker error is stale, never verified', () => {

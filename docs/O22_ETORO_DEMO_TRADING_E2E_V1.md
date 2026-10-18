@@ -2,7 +2,11 @@
 
 Status: **implemented and tested offline; not released.** Base: `519233d` (merge of PR #24, O21C).
 - No eToro request was sent while building O22: no authenticated read, no demo write, no metadata read.
-- Afterwards, one operator-approved read was made: exactly one `GET /api/v1/trading/info/demo/pnl` through the observation tool (2026-10-18). It returned a **non-empty** response, and the parser accepted it. Results are in section 12. The evidence record was **not** changed by it.
+- Afterwards, two operator-approved reads were made, each exactly one `GET /api/v1/trading/info/demo/pnl` through the observation tool (2026-10-18). Both returned a **non-empty** response that the parser accepted. The second proved G1 and G2 (section 12).
+- The evidence record now says `nonEmptyPnlLiveObserved: true` and cites both reports. The demo account safety source is therefore **active**: it reads `/demo/pnl` and decides. A safety decision is **not** a trade release:
+  - the build lock stays closed;
+  - the account limits are unchanged;
+  - the hand-opened ETH position makes the decision `CAPACITY_BLOCK`.
 - `BUILD_LOCKS.etoroDemoExecution = true` refuses every demo write in this build.
 - The demo account safety source (B2, variant A, section 5) is built and wired. It answers `null` until a non-empty `/demo/pnl` has been observed live and recorded, so every open is still refused with `PORTFOLIO_SAFETY_NOT_CONNECTED`.
 - The first demo buy therefore cannot happen with this build. Section 9 lists what is still open; section 8 gives the exact sequence for afterwards.
@@ -68,7 +72,8 @@ Positions are identified by the `positionID` from an eToro order status read, ne
 | `credit` | `/demo/pnl` and `/demo/portfolio` schema; guides use it for Available Cash | present as a positive number in empty and non-empty `/demo/portfolio`, and in an empty `/demo/pnl` |
 | `accountCurrencyId` ("1 = USD") | `/demo/pnl` schema | **1**, in an empty `/demo/pnl` (direct GET, O21A.1) |
 | `positions[].amount`, `leverage` | both schemas | yes, in `/demo/portfolio` (O21B/O21C) |
-| `positions[].unrealizedPnL.pnL` | `/demo/pnl` schema (nested), guides | **key present**, nested under `unrealizedPnL` in schema spelling (2026-10-18, section 12). Its JSON kind is **not** in the report: the parser accepts a number or null. |
+| `positions[].unrealizedPnL.pnL` | `/demo/pnl` schema (nested), guides | **yes**: nested under `unrealizedPnL` in schema spelling (report 1); a **finite JSON number** for every position (report 2, G1). |
+| `accountCurrencyId` = 1 in a non-empty `/demo/pnl` | `/demo/pnl` schema | **yes**: integer, code 1 (report 2, G2) |
 | `ordersForOpen[].amount`, `totalExternalCosts`; `orders[].amount` | `/demo/pnl` schema, guides | no (always empty) |
 | Account identity | not in the portfolio; `GET /api/v1/me` returns `demoCid` and `scopes` | the operator reports a successful `/me`; nothing of it is stored |
 | Demo context of the key | Reference: "Each key can only be used for one environment" | the operator confirmed the key environment Demo (O21A section 11) |
@@ -149,10 +154,7 @@ Two ways out, neither taken here:
 
 Each step is a separate operator action. Every STOP ends this cycle.
 
-1. **Evidence for the valuation.**
-   - Done for the structure (2026-10-18, section 12): non-empty, accepted, `unrealizedPnL.pnL` key present.
-   - Still to do: extend the report with the kinds of `unrealizedPnL` fields and the value of `accountCurrencyId`, then make one more approved `--source=pnl` read while the hand-opened position still exists. STOP unless `pnL` is a number and `accountCurrencyId` is 1.
-   - Then a reviewed code change sets `nonEmptyPnlLiveObserved: true` with both reports as `evidenceRef`.
+1. **Evidence for the valuation. Done** (2026-10-18, section 12): two non-empty reads, G1 and G2 proved, and the evidence record set with both reports.
 2. **Identity.**
    - Run one approved metadata read. STOP unless `accepted`, id 100001, type `Crypto`.
    - Register ETH/USD (`POST /api/instruments/register`).
@@ -189,7 +191,7 @@ No ledger booking at any step.
 | # | Blocker | Status after this package | What closes it |
 |---|---|---|---|
 | B1 | `BUILD_LOCKS.etoroDemoExecution = true` | **open** (by design) | a separate, approved code change, last |
-| B2 | Demo portfolio safety | **implemented (variant A); not active.** The structure of a non-empty `/demo/pnl` is live-validated (section 12). | (1) prove the **kinds** of `unrealizedPnL.pnL` and the value of `accountCurrencyId` (the report shows keys only: section 12, next changes); (2) a reviewed change of the evidence record; (3) the account must fit the limits (close the hand-opened position, or an explicit limit decision) |
+| B2 | Demo portfolio safety | **evidence closed; source active.** G1 and G2 are proved (section 12), and the evidence record cites both reports. The decision is still `CAPACITY_BLOCK` because of the hand-opened position. | The account must fit the unchanged limits: the operator closes the hand-opened position in the UI. No limit is raised. |
 | B3 | Identity of 100001 | **open**; read prepared | one approved metadata read (or an explicit decision to accept the UI hint) |
 | B4 | Governed mapping path | **closed** (`etoro:map-instrument`, dry run and apply); not executed | the operator's apply after B3 |
 | B5 | Demo write permission | **not proved in the repository** | the `scopes` from the operator's `/me` result (no new call needed if it is at hand) |
@@ -258,8 +260,28 @@ Results: in the PR description.
    - **`checks`:** `allPositionPnlFiniteNumbers` (G1; null without positions) and `accountCurrencyIsUsd` (G2).
 
    No amount, PnL value, id or key is reported. The portfolio report is unchanged.
-2. **One more approved `/demo/pnl` read**, while the hand-opened position is still open, to close G1 and G2.
-3. **Evidence record, reviewed change.** Only then set `DEMO_ACCOUNT_VALUATION_EVIDENCE.nonEmptyPnlLiveObserved = true`, with `evidenceRef` naming both reports.
+2. **One more approved `/demo/pnl` read. Done** (second observation, below).
+3. **Evidence record. Done:** `nonEmptyPnlLiveObserved: true`, and `evidenceRef` names both reports.
+
+### Second observation (2026-10-18, G1 and G2)
+
+- **What was run.** Exactly one `GET /api/v1/trading/info/demo/pnl`, approved by the operator, at `b251d34`, with the same command. There was no retry and no other call. The hand-opened position was unchanged.
+- **Evidence.** `docs/evidence/O22_etoro_demo_pnl_observation_2026-10-18_2.json`, unchanged and sanitized. The only numbers in it are counts, 0/1 flags and the instrument id 100001.
+
+| Item | Report 2 |
+|---|---|
+| Parser verdict | **accepted**: positions 1, orders 0, ordersForOpen 0 |
+| Keys | the same as report 1; nothing undocumented, nothing missing in `clientPortfolio`, `exampleOnlyPresent` empty |
+| `valuationEvidence.unrealizedPnlObject` | object 1, null 0, missing 0, other 0 |
+| `valuationEvidence.pnL` | type number 1 (null 0, missing 0, other 0); **finite 1**; sign negative 1 |
+| `valuationEvidence.accountCurrencyId` | present, integer, **code 1** |
+| `checks` | **`allPositionPnlFiniteNumbers: true` (G1)**, **`accountCurrencyIsUsd: true` (G2)** |
+
+**Valuation inputs.** The inputs `parseDemoPnlValuationInput` reads beyond `parseDemoPnl` are proved by the same reports: `credit` is a positive number, `accountCurrencyId` is the code 1, and `ordersForOpen` is empty, so no external costs are needed. The condition of the evidence record is therefore met.
+
+**Not proved.** A non-empty `orders` or `ordersForOpen` (G3) is still not observed. That is not needed for the cycle: any pending order makes the decision `CAPACITY_BLOCK`.
+
+**Behaviour change.** With `ETORO_DEMO_EXECUTION_ENABLED=1`, creating an intent now makes **one authenticated `/demo/pnl` read**, the safety evaluation of the create gate. Execute is refused by the build lock before its gate runs, so it reads nothing. No other route reads `/demo/pnl`; the cycle status route shows the last evaluation only.
 
 ## 13. Safety boundaries (unchanged)
 
