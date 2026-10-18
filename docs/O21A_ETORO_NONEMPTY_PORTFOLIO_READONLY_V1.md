@@ -4,7 +4,8 @@ Status: implemented and merged (PR #21, merge commit `9a226b4`; original base `a
 - `/demo/portfolio`: LIVE_OBSERVED twice through NEXUS (2026-10-17), HTTP 200, **empty** both times.
 - `/demo/pnl` (O21A.1, section 11): LIVE_OBSERVED once through NEXUS (2026-10-17), HTTP 200, **empty**.
 - An independent direct `/demo/pnl` GET outside NEXUS was also **empty**.
-- A **non-empty** response is still **NOT live-observed**, although a demo position was open in the eToro UI. Blocker: **`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`** (section 9).
+- On 2026-10-17 a **non-empty** response was **NOT live-observed**, although a demo position was open in the eToro UI (section 9).
+- **2026-10-18 (O21B, section 12):** a **non-empty** `/demo/portfolio` response is now **LIVE_OBSERVED** once, through a single direct GET outside NEXUS. It held one position that matches the ETH buy position visible in the eToro UI. The unchanged parser accepted the operator's private pseudonymized export offline. The repository fixture has `credit` redacted to `null` and is therefore refused as a whole, by design; its position passes `parsePosition`. Why the earlier responses were empty is still **unexplained**. `/demo/pnl` was **not** read again.
 
 O21A prepares the O20 read-only adapter for a non-empty eToro **demo** portfolio. It reads open positions and pending orders strictly with the documented schema, maps them to NEXUS instruments only through the human-governed `etoro` mapping, and stores the fields NEXUS needs. It also adds a separate read-only observation tool for the first controlled live read. Nothing here writes to the broker, unlocks anything, or touches O17, O19, O21 execution or O22.
 
@@ -22,8 +23,10 @@ O21A prepares the O20 read-only adapter for a non-empty eToro **demo** portfolio
 | All nine containers present and arrays when empty, `credit` a JSON number | LIVE_OBSERVED (O20) |
 | Empty `/demo/portfolio` structure (all 11 documented keys, every container empty) | LIVE_OBSERVED twice (O21A, section 11) |
 | Empty `/demo/pnl` structure (all 13 schema keys, `positions` / `orders` / `ordersForOpen` empty) | LIVE_OBSERVED once through NEXUS, and once independently outside NEXUS (section 11) |
-| Element schema of `positions` and `orders` | DOCUMENTED only. The REFERENCE_SCHEMA is the only basis for non-empty parsing. |
-| Any non-empty container / non-empty element shape | **NOT LIVE_OBSERVED** (`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`) |
+| Element schema of `positions` | DOCUMENTED + LIVE_OBSERVED once (2026-10-18, one position, direct GET outside NEXUS; section 12) |
+| Element schema of `orders` | DOCUMENTED only (`orders` was empty in every observed response) |
+| Non-empty `positions`, every other container empty | LIVE_OBSERVED once (2026-10-18, section 12) |
+| Any other non-empty container / element shape | **NOT LIVE_OBSERVED** |
 | Meaning and currency of `credit` / `bonusCredit` | DOCUMENTED as "USD"; meaning NOT_VERIFIED |
 | Element schema of `ordersForOpen`, `ordersForClose`, `ordersForCloseMultiple` | NOT documented (`items: { type: object }`, no properties) |
 | `stockOrders`, `entryOrders`, `exitOrders` | DOCUMENTED as "Obsolete" |
@@ -128,7 +131,7 @@ npm run etoro:observe-demo -- --source=portfolio|pnl --confirm-live-read [--pseu
 
 ## 9. Remaining blockers
 
-1. **`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`**: no non-empty demo portfolio has been observed live.
+1. **`NON_EMPTY_DEMO_PORTFOLIO_NOT_LIVE_OBSERVED`** – state of 2026-10-17, **superseded in part on 2026-10-18** (section 12): a non-empty `/demo/portfolio` response with one position was observed through a direct GET outside NEXUS. Still not observed: a non-empty response read through NEXUS itself, a non-empty `orders`, a non-empty `/demo/pnl`. Still unexplained: why the 2026-10-17 responses were empty. The original 2026-10-17 record: no non-empty demo portfolio had been observed live.
    - The demo position open in the eToro UI was visible neither through `/demo/portfolio` nor through `/demo/pnl`.
    - A direct `/demo/pnl` GET outside NEXUS was empty too.
    - Section 11 records the observations and the manual credential/account check.
@@ -251,3 +254,68 @@ New: `o21a1-pnl-validation.test.ts` (61 tests) and `o21a1-observation.test.ts` (
 - Cash stays `not_read`.
 - `PORTFOLIO_SAFETY_NOT_CONNECTED` remains.
 - `BUILD_LOCKS.etoroDemoExecution` remains `true`.
+
+## 12. O21B – first non-empty /demo/portfolio observation (2026-10-18)
+
+### Observation
+
+| Item | Value |
+|---|---|
+| Request | Exactly one direct `GET /api/v1/trading/info/demo/portfolio`, made manually by the operator in Windows PowerShell 5.1 (`$global:demoCheck`, a parsed `PSCustomObject`), **outside NEXUS**, with the existing demo credentials. |
+| `clientPortfolio` keys | The 11 documented keys; none missing, none undocumented. |
+| `positions` | **1 entry**. |
+| Every other container | `mirrors`, `orders`, `stockOrders`, `entryOrders`, `exitOrders`, `ordersForOpen`, `ordersForClose`, `ordersForCloseMultiple`: empty arrays. |
+| The position | `instrumentID` 100001, `isBuy` true, `units` 0.04229, `openRate` 2364.57, `amount` 100, `leverage` 1, `openDateTime` `2026-10-18T16:38:25.877Z`. Direction, units, open rate and time match the ETH buy position visible in the eToro UI (checked by the operator). |
+| Position keys | Exactly the **35 documented `TradingDemoApi_Position` fields**, spelled as documented (`positionID`, `orderID`, …): none missing, none undocumented. |
+| Values relevant to section 9.2 | `openDateTime` carries `Z`. `positionID` and `orderID` are positive integers within the safe range; the export script would have stopped otherwise. `stopLossRate` 0.0001 with `isNoStopLoss` true; `takeProfitRate` 238821.57 with `isNoTakeProfit` false; `isTslEnabled` false; `orderType` 17; `mirrorID` and `parentPositionID` 0. |
+
+Not observed in this response: a pending order, a non-empty `ordersForOpen`, any account identity. NEXUS itself did not make this read. The mapping `instrumentID` 100001 → ETH is the operator's comparison with the UI. It is **not** a human-governed `etoro` mapping, and none was registered.
+
+The key and kind statements above come from the pseudonymized export, which saw the response only after PowerShell parsed it. They are not a complete check of the original response text.
+
+### Private pseudonymized export (operator's machine, not in the repository)
+
+The operator exported `$global:demoCheck` with a local script. No new eToro call was made. The export:
+- keeps the fields `parseDemoPortfolio` reads, with the values as PowerShell parsed them;
+- leaves absent fields absent, and matches field names case-sensitively (no aliasing);
+- replaces every non-zero `positionID` / `orderID` / `mirrorID` / `parentPositionID` with a sequential pseudonym from `9100000001` (here: `positionID` → `9100000001`, `orderID` → `9100000002`). The JSON type is kept and the mapping is not stored;
+- keeps `instrumentID` (a public market identifier) and the original `credit`;
+- drops `CID`, `bonusCredit` and every other field the parser does not read, and lists them in `droppedFields` by **name and JSON kind only**.
+
+Limits:
+- The values passed through PowerShell's JSON parser, not the raw response text. `amount` appears as `100.0` (a PowerShell decimal); JSON reads it as the number 100.
+- The raw response is not stored anywhere in the repository.
+
+### Repository fixture: additional privacy transformation
+
+`test/broker/etoro/o21b-live-demo-portfolio-2026-10-18.pseudonymized.json` is that export with **one additional privacy transformation**: `clientPortfolio.credit` (a positive number in the export) is set to **`null`**. The transformation is recorded in the file as `provenance.repositoryRedaction`.
+
+The repository fixture is therefore **not byte-identical** with the private export. Position values and the pseudonymized ids are unchanged.
+
+Because `parseDemoPortfolio` requires `credit` to be present and non-null (O20 rule, unchanged), the redacted fixture **does not pass** the full portfolio parser.
+
+### Offline parser tests
+
+1. **Before the redaction, private export (one run, 2026-10-18, not reproducible from the repository):**
+   - The unchanged `parseDemoPortfolio` received the private export's `body`, with the original `credit`.
+   - Result: **accepted**, 1 position, 0 orders, every field read as listed above.
+   - `openOrder` was `{ orderId: 9100000002, orderType: 17 }`.
+2. **Reproducible repository tests (`test/broker/etoro/o21b-live-portfolio.test.ts`, redacted fixture):**
+   - `parseDemoPortfolio` **refuses** the redacted whole response with `BROKER_RESPONSE_INVALID` / `clientPortfolio.credit is missing`. This is expected and pinned.
+   - The existing `parsePosition` **accepts** the single position, with exactly the values of run 1.
+   - The fixture has one position and every other container empty.
+   - Kept plus dropped position keys are exactly the 35 documented fields.
+
+No parser or production rule was changed or relaxed. Both runs test the real (pseudonymized) response, not a reconstructed example. The documented fixture of section 6 stays as it is.
+
+### Still open
+
+- Why both 2026-10-17 `/demo/portfolio` reads and both `/demo/pnl` reads were empty while a position was open in the UI: **unexplained**. Today's response came from a different, direct read path; nothing was compared that would explain the difference.
+- `/demo/pnl` was **not** read again. Its non-empty shape (REFERENCE_SCHEMA vs REFERENCE_EXAMPLE) remains NOT LIVE_OBSERVED.
+- A non-empty read **through NEXUS** (`etoro:observe-demo --source=portfolio`, or the sync adapter) has not been made.
+- Section 9.2 semantics stay NOT_VERIFIED:
+  - `units` vs NEXUS quantity;
+  - the meaning of `stopLossRate` 0.0001 / `takeProfitRate` 238821.57 (placeholder vs real trigger);
+  - `orderType` 17.
+- `instrumentID` 100001 has no human-governed `etoro` mapping. Reconciliation would report `unmapped_broker_instrument`.
+- Cash stays `not_read`. `PORTFOLIO_SAFETY_NOT_CONNECTED` remains. Every `BUILD_LOCKS` entry stays `true`. No order, no write, no new permission.

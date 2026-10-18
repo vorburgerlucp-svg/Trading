@@ -1,0 +1,96 @@
+{
+    "provenance":  {
+                       "kind":  "live_observed_pseudonymized",
+                       "endpoint":  "GET /api/v1/trading/info/demo/portfolio",
+                       "observedOn":  "2026-10-18",
+                       "capturedVia":  "single direct GET by the operator in Windows PowerShell, outside NEXUS ($global:demoCheck)",
+                       "sourceVariableType":  "System.Management.Automation.PSCustomObject",
+                       "powershellVersion":  "5.1.26100.9711",
+                       "exportedAt":  "2026-10-18T17:16:50Z",
+                       "idPseudonymization":  "positionID, orderID, mirrorID, parentPositionID: every non-zero value replaced by a sequential pseudonym starting at 9100000001, identical originals share one pseudonym, JSON type kept; 0 and null unchanged; the mapping is not stored",
+                       "unchanged":  "instrumentID and every other kept value exactly as parsed by PowerShell; absent fields stay absent",
+                       "dropped":  "fields not read by parseDemoPortfolio (root keys other than clientPortfolio, CID, fees, bonusCredit, ...): only name and JSON kind are listed in droppedFields, never a value",
+                       "repositoryRedaction":  "privacy transformation applied after the export, for the repository copy only: clientPortfolio.credit (a positive number in the export) set to null. This file is therefore NOT byte-identical with the operator's export, and parseDemoPortfolio refuses it (credit must be present and non-null). Position values and pseudonymized ids are unchanged."
+                   },
+    "droppedFields":  {
+                          "root":  [
+
+                                   ],
+                          "clientPortfolio":  [
+                                                  "bonusCredit:integer"
+                                              ],
+                          "positions":  [
+                                            "CID:integer",
+                                            "initialAmountInDollars:integer",
+                                            "initialUnits:non_integer_number",
+                                            "isDetached:boolean",
+                                            "isDiscounted:boolean",
+                                            "isPartiallyAltered:boolean",
+                                            "isSettled:boolean",
+                                            "lotCount:non_integer_number",
+                                            "openConversionRate:integer",
+                                            "openPositionActionType:integer",
+                                            "pnlVersion:integer",
+                                            "redeemStatusID:integer",
+                                            "settlementTypeID:integer",
+                                            "stopLossVersion:integer",
+                                            "totalExternalFees:integer",
+                                            "totalExternalTaxes:integer",
+                                            "totalFees:integer",
+                                            "unitsBaseValueDollars:integer"
+                                        ],
+                          "orders":  [
+
+                                     ]
+                      },
+    "body":  {
+                 "clientPortfolio":  {
+                                         "positions":  [
+                                                           {
+                                                               "positionID":  9100000001,
+                                                               "instrumentID":  100001,
+                                                               "isBuy":  true,
+                                                               "units":  0.04229,
+                                                               "openRate":  2364.57,
+                                                               "leverage":  1,
+                                                               "amount":  100.0,
+                                                               "openDateTime":  "2026-10-18T16:38:25.877Z",
+                                                               "stopLossRate":  0.0001,
+                                                               "takeProfitRate":  238821.57,
+                                                               "isNoStopLoss":  true,
+                                                               "isNoTakeProfit":  false,
+                                                               "isTslEnabled":  false,
+                                                               "orderID":  9100000002,
+                                                               "orderType":  17,
+                                                               "mirrorID":  0,
+                                                               "parentPositionID":  0
+                                                           }
+                                                       ],
+                                         "mirrors":  [
+
+                                                     ],
+                                         "credit":  null,
+                                         "orders":  [
+
+                                                    ],
+                                         "stockOrders":  [
+
+                                                         ],
+                                         "entryOrders":  [
+
+                                                         ],
+                                         "exitOrders":  [
+
+                                                        ],
+                                         "ordersForOpen":  [
+
+                                                           ],
+                                         "ordersForClose":  [
+
+                                                            ],
+                                         "ordersForCloseMultiple":  [
+
+                                                                    ]
+                                     }
+             }
+}
