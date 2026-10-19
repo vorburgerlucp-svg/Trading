@@ -30,7 +30,7 @@ Naming note: an unrelated, uncommitted work package "O22 OpenAI shadow provider"
 
 | File | Change |
 |---|---|
-| `execution/execution-gate.ts` | `DEMO_E2E_CYCLE_POLICY` with the open and close budget. `GateSafetyDecision`: the narrow safety shape the gate reads; the checks themselves are unchanged. |
+| `execution/execution-gate.ts` | `DEMO_E2E_CYCLE_POLICY` with the open and close budget, long-only and market-only. `GateSafetyDecision`: the narrow safety shape the gate reads; the checks themselves are unchanged. |
 | `execution/etoro-demo-execution-service.ts` | Submission counts and `cycleBudget()`. The broker's `settlementType` is kept from order status reads. |
 | `execution/etoro-demo-execution-validation.ts` | `asset.settlementType` of `orders:lookup`: an enum, strictly validated. |
 | `execution/demo-account-evidence.ts` | The compile-time evidence record. Non-empty `/demo/pnl` live-observed: **false**. |
@@ -47,7 +47,15 @@ Naming note: an unrelated, uncommitted work package "O22 OpenAI shadow provider"
 
 `DEMO_E2E_CYCLE_POLICY` is the runtime policy:
 - at most 100 USD per open, leverage 1, one position, at most 100 USD gross exposure of NEXUS intents;
-- **one open and one close submission over the whole intent log**.
+- **one open and one close submission over the whole intent log**;
+- **the open is a buy (long) at market only** (since policy version `etoro-demo-e2e-cycle-policy:v2`).
+
+**Long-only, market-only (v2).**
+- `DemoExecutionPolicy` has two optional fields, `allowedOpenSides` and `allowedOpenOrderTypes`. Absent means no restriction.
+- Only `DEMO_E2E_CYCLE_POLICY` sets them, to `['buy']` and `['mkt']` (frozen). `DEFAULT_DEMO_EXECUTION_POLICY` (O21) is unchanged and has neither field.
+- A sell (short) open is refused with `CYCLE_SIDE_NOT_ALLOWED`; an MIT open with `CYCLE_ORDER_TYPE_NOT_ALLOWED`.
+- The checks are in the gate's book-check table. So they run at creation, again at execute with fresh input, and once more in the reservation step, inside the intent log's critical section immediately before `SUBMITTING`. A refusal sends nothing and spends no budget.
+- A close is not affected: it closes the broker-confirmed position by its id, at market.
 
 **Budget.**
 - Every submission spends it, whatever its outcome: accepted, rejected, timeout, AMBIGUOUS, or a crash after the reservation.
@@ -203,7 +211,7 @@ No ledger booking at any step.
 
 | File | What |
 |---|---|
-| `o22-cycle.test.ts` (17) | Policy; full cycle; timeout, AMBIGUOUS, 403; close ambiguity; crash and restart; races; kill switch; product type from the order status |
+| `o22-cycle.test.ts` (24) | Policy; long-only and market-only (sell and MIT refused at creation, at execute and in the reservation table; the close stays possible); full cycle; timeout, AMBIGUOUS, 403; close ambiguity; crash and restart; races; kill switch; product type from the order status |
 | `o22-demo-account-safety.test.ts` (14) | Guide formulas; external positions; data holds; decision limits; the hand-opened position blocks the open; the source sends nothing without evidence |
 | `o22-account-safety-cycle.test.ts` (10) | Evidence released for the module only: <ul><li>one GET per evaluation; null on 4xx/5xx, timeout or invalid response;</li><li>risk day start, peak and new day;</li><li>DATA_HOLD not recorded; kill switch;</li><li>the cycle with the real source: open refused with the hand-opened position;</li><li>the position appearing before execute (refused, budget kept);</li><li>a failed read refuses the open;</li><li>the full open; the close without a safety read;</li><li>an ambiguous close is never repeated.</li></ul> |
 | `o22-cycle-reconciliation.test.ts` (8), `o22-safety-readiness.test.ts` (4) | Reconciliation and readiness |

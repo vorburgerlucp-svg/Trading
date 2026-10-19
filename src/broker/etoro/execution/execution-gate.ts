@@ -9,11 +9,11 @@
 import { Decimal } from '../../../money/decimal.js';
 import type { Instrument, ProviderInstrumentMapping } from '../../../market-data/market-data-types.js';
 import type { KillSwitchState } from '../../../safety/portfolio-safety-envelope.js';
-import type { ExecutionIntent } from './execution-intent.js';
+import type { ExecutionIntent, IntentOrderType, IntentSide } from './execution-intent.js';
 
 export const DEMO_EXECUTION_POLICY_VERSION = 'etoro-demo-execution-policy:v1' as const;
-/** O22: the policy of the one controlled demo trading cycle (one open, one close, then nothing). */
-export const DEMO_E2E_CYCLE_POLICY_VERSION = 'etoro-demo-e2e-cycle-policy:v1' as const;
+/** O22: the policy of the one controlled demo trading cycle (one market buy, one close, then nothing). v2: long-only, market-only. */
+export const DEMO_E2E_CYCLE_POLICY_VERSION = 'etoro-demo-e2e-cycle-policy:v2' as const;
 export type DemoExecutionPolicyVersion = typeof DEMO_EXECUTION_POLICY_VERSION | typeof DEMO_E2E_CYCLE_POLICY_VERSION;
 
 /** The provider name of the human-governed eToro instrument mapping in the instrument registry. */
@@ -40,6 +40,12 @@ export interface DemoExecutionPolicy {
    */
   readonly maxOpenSubmissions: number | null;
   readonly maxCloseSubmissions: number | null;
+  /**
+   * O22: the only sides and order types an open may have. Absent = no restriction (the O21 default). Checked by the gate at
+   * creation and at execute, and again in the reservation step. A close is not affected: it closes a position by its id.
+   */
+  readonly allowedOpenSides?: readonly IntentSide[];
+  readonly allowedOpenOrderTypes?: readonly IntentOrderType[];
 }
 
 /** Conservative demo defaults. A change is a code change and a review, never a request field. */
@@ -61,7 +67,8 @@ export const DEFAULT_DEMO_EXECUTION_POLICY: DemoExecutionPolicy = Object.freeze(
  * O22: the policy of the one controlled demo trading cycle, used by the runtime. One market buy of at most 100 USD at leverage 1, one
  * open position, and exactly one open and one close submission over the lifetime of the intent log: after them, every further write
  * is refused (CYCLE_*_BUDGET_EXHAUSTED). A timeout, an ambiguous answer or a crash spends the budget too, so it can never lead to a
- * second order. Stricter than the O21 default in every field.
+ * second order. The open may only be a buy (long) at market: a sell (short) or an MIT open is refused (CYCLE_SIDE_NOT_ALLOWED,
+ * CYCLE_ORDER_TYPE_NOT_ALLOWED). Stricter than the O21 default in every field.
  */
 export const DEMO_E2E_CYCLE_POLICY: DemoExecutionPolicy = Object.freeze({
   version: DEMO_E2E_CYCLE_POLICY_VERSION,
@@ -75,6 +82,8 @@ export const DEMO_E2E_CYCLE_POLICY: DemoExecutionPolicy = Object.freeze({
   maxTriggerDistanceBp: 1000,
   maxOpenSubmissions: 1,
   maxCloseSubmissions: 1,
+  allowedOpenSides: Object.freeze(['buy'] as const),
+  allowedOpenOrderTypes: Object.freeze(['mkt'] as const),
 });
 
 export interface GateQuote {
@@ -165,6 +174,10 @@ const BOOK_CHECKS: readonly BookCheck[] = Object.freeze([
   // O22 cycle budget: spent by every submission, whatever its outcome. Never reset by a rejection, a timeout or a crash.
   { name: 'cycleOpenBudget', reason: 'CYCLE_OPEN_BUDGET_EXHAUSTED', applies: (o) => o, ok: (b, _e, p) => p.maxOpenSubmissions === null || b.openSubmissions < p.maxOpenSubmissions },
   { name: 'cycleCloseBudget', reason: 'CYCLE_CLOSE_BUDGET_EXHAUSTED', applies: (o) => !o, ok: (b, _e, p) => p.maxCloseSubmissions === null || b.closeSubmissions < p.maxCloseSubmissions },
+  // O22 open restrictions: they read only the intent and the policy, and are in this table so that the reservation step checks
+  // them again, immediately before SUBMITTING.
+  { name: 'openSide', reason: 'CYCLE_SIDE_NOT_ALLOWED', applies: (o) => o, ok: (_b, _e, p, i) => p.allowedOpenSides === undefined || p.allowedOpenSides.includes(i.side) },
+  { name: 'openOrderType', reason: 'CYCLE_ORDER_TYPE_NOT_ALLOWED', applies: (o) => o, ok: (_b, _e, p, i) => p.allowedOpenOrderTypes === undefined || p.allowedOpenOrderTypes.includes(i.orderType) },
 ]);
 
 /**

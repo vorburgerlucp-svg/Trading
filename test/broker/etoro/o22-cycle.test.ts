@@ -10,7 +10,8 @@ vi.mock('../../../src/nexus/safety.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/nexus/safety.js')>();
   return { ...actual, BUILD_LOCKS: Object.freeze({ ...actual.BUILD_LOCKS, etoroDemoExecution: false }) };
 });
-import { DEFAULT_DEMO_EXECUTION_POLICY, DEMO_E2E_CYCLE_POLICY, DEMO_E2E_CYCLE_POLICY_VERSION, type GateQuote } from '../../../src/broker/etoro/execution/execution-gate.js';
+import { DEFAULT_DEMO_EXECUTION_POLICY, DEMO_E2E_CYCLE_POLICY, DEMO_E2E_CYCLE_POLICY_VERSION, bookRefusals, type GateBook, type GateQuote } from '../../../src/broker/etoro/execution/execution-gate.js';
+import { parseExecutionIntent } from '../../../src/broker/etoro/execution/execution-intent.js';
 import { DemoExecutionError } from '../../../src/broker/etoro/execution/etoro-demo-execution-errors.js';
 import { Decimal } from '../../../src/money/decimal.js';
 import { CREATOR, ETORO_AAPL_ID, ETORO_MSFT_ID, HUMAN, MSFT, ScriptedBroker, closeInput, freshQuote, inMemoryStores, lookupAnswer, o21Fixture, openInput, orderAccepted, trippedKillSwitch, type Fixture } from './o21-fixture.js';
@@ -73,8 +74,12 @@ describe('O22 cycle policy: a code constant, stricter than the O21 default in ev
       maxTriggerDistanceBp: 1000,
       maxOpenSubmissions: 1,
       maxCloseSubmissions: 1,
+      allowedOpenSides: ['buy'],
+      allowedOpenOrderTypes: ['mkt'],
     });
     expect(Object.isFrozen(DEMO_E2E_CYCLE_POLICY)).toBe(true);
+    expect(Object.isFrozen(DEMO_E2E_CYCLE_POLICY.allowedOpenSides)).toBe(true);
+    expect(Object.isFrozen(DEMO_E2E_CYCLE_POLICY.allowedOpenOrderTypes)).toBe(true);
     const d = DEFAULT_DEMO_EXECUTION_POLICY;
     const c = DEMO_E2E_CYCLE_POLICY;
     expect(Decimal.from(c.maxOrderInvestmentUsd).lte(d.maxOrderInvestmentUsd)).toBe(true);
@@ -86,6 +91,9 @@ describe('O22 cycle policy: a code constant, stricter than the O21 default in ev
     expect(c.maxBrokerSyncAgeMs).toBeLessThanOrEqual(d.maxBrokerSyncAgeMs);
     expect(d.maxOpenSubmissions).toBeNull();
     expect(d.maxCloseSubmissions).toBeNull();
+    // The O21 default has no side or order type restriction.
+    expect(d).not.toHaveProperty('allowedOpenSides');
+    expect(d).not.toHaveProperty('allowedOpenOrderTypes');
   });
 
   it('an open above 100 USD is refused at creation, before anything could be sent', async () => {
@@ -105,6 +113,97 @@ describe('O22 cycle policy: a code constant, stricter than the O21 default in ev
     expect(event.gate?.policyVersion).toBe(DEMO_E2E_CYCLE_POLICY_VERSION);
     expect(event.gate?.checks.cycleOpenBudget).toBe('pass');
     expect(event.gate?.checks.cycleCloseBudget).toBe('not_applicable');
+  });
+});
+
+/** A short open: a sell needs a stop loss above and a take profit below the quote (200). */
+const SELL = { side: 'sell', stopLoss: '220', takeProfit: '180' };
+/** An MIT buy: the trigger is close to the quote (200). */
+const MIT = { orderType: 'mit', triggerRate: '199' };
+
+describe('O22 cycle: long-only and market-only', () => {
+  it('a sell (short) open is refused at creation; nothing is sent', async () => {
+    const f = await cycle();
+    const created = await f.service.create(openInput({ amount: '100', ...SELL }), CREATOR);
+    expect(created.state).toBe('REJECTED');
+    expect(created.gateReasons).toEqual(['CYCLE_SIDE_NOT_ALLOWED']);
+    expect(f.broker.requests).toHaveLength(0);
+  });
+
+  it('an MIT open is refused at creation; nothing is sent', async () => {
+    const f = await cycle();
+    const created = await f.service.create(openInput({ amount: '100', ...MIT }), CREATOR);
+    expect(created.state).toBe('REJECTED');
+    expect(created.gateReasons).toEqual(['CYCLE_ORDER_TYPE_NOT_ALLOWED']);
+    const both = await f.service.create(openInput({ amount: '100', ...SELL, ...MIT, triggerRate: '201', strategyRunId: 'run-o22-both' }), CREATOR);
+    expect(both.gateReasons).toEqual(['CYCLE_SIDE_NOT_ALLOWED', 'CYCLE_ORDER_TYPE_NOT_ALLOWED']);
+    expect(f.broker.requests).toHaveLength(0);
+  });
+
+  it('the market buy passes both checks, and they are recorded in the verdict', async () => {
+    const f = await cycle();
+    const created = await f.service.create(openInput({ amount: '100' }), CREATOR);
+    expect(created.state).toBe('RISK_APPROVED');
+    const event = f.intents.all().find((r) => r.payload.intentId === created.intentId && r.payload.state === 'RISK_APPROVED')!.payload;
+    expect(event.gate?.checks.openSide).toBe('pass');
+    expect(event.gate?.checks.openOrderType).toBe('pass');
+  });
+
+  it.each([
+    ['a sell', SELL, 'CYCLE_SIDE_NOT_ALLOWED'],
+    ['an MIT buy', MIT, 'CYCLE_ORDER_TYPE_NOT_ALLOWED'],
+  ])('%s approved under the O21 default is refused immediately before execution under the cycle policy; no write', async (_name, overrides, reason) => {
+    // The intent passed creation and approval in a process with the O21 default policy; the cycle process executes it.
+    const stores = inMemoryStores();
+    const broker = new ScriptedBroker();
+    const o21 = await o21Fixture({ stores, sharedBroker: broker });
+    const created = await o21.service.create(openInput({ amount: '100', ...overrides }), CREATOR);
+    expect(created.state, created.gateReasons.join(',')).toBe('RISK_APPROVED');
+    await o21.service.approve(created.intentId, HUMAN);
+
+    const c = await cycle({ stores, sharedBroker: broker });
+    broker.next(orderAccepted());
+    const refused = await refusal(c.service.execute(created.intentId, HUMAN));
+    expect(refused.code).toBe('GATE_REFUSED');
+    expect(refused.reasons).toEqual([reason]);
+    expect(broker.writes).toHaveLength(0);
+    expect((await c.service.get(created.intentId)).state).toBe('APPROVED');
+    expect(c.intents.all().some((r) => r.payload.intentId === created.intentId && r.payload.state === 'SUBMITTING')).toBe(false);
+    expect(await c.service.cycleBudget()).toMatchObject({ openSubmissions: 0, closeSubmissions: 0 });
+  });
+
+  it('the reservation step checks side and order type again (bookRefusals is the table it runs in the critical section)', () => {
+    const book: GateBook = {
+      liveIntentCount: 0, grossExposureUsd: Decimal.from(0), instrumentHasLiveIntent: false, anyAmbiguous: false, activeDuplicate: false,
+      closeTargetKnown: false, closeTargetAlreadyClosing: false, openSubmissions: 0, closeSubmissions: 0,
+    };
+    const exposure = Decimal.from(100);
+    const buy = parseExecutionIntent(openInput({ amount: '100' }), CREATOR);
+    const sell = parseExecutionIntent(openInput({ amount: '100', ...SELL }), CREATOR);
+    const mit = parseExecutionIntent(openInput({ amount: '100', ...MIT }), CREATOR);
+    expect(bookRefusals(buy, book, exposure, DEMO_E2E_CYCLE_POLICY)).toEqual([]);
+    expect(bookRefusals(sell, book, exposure, DEMO_E2E_CYCLE_POLICY)).toEqual(['CYCLE_SIDE_NOT_ALLOWED']);
+    expect(bookRefusals(mit, book, exposure, DEMO_E2E_CYCLE_POLICY)).toEqual(['CYCLE_ORDER_TYPE_NOT_ALLOWED']);
+    // The O21 default is unchanged: no side or order type restriction.
+    expect(bookRefusals(sell, book, exposure, DEFAULT_DEMO_EXECUTION_POLICY)).toEqual([]);
+    expect(bookRefusals(mit, book, exposure, DEFAULT_DEMO_EXECUTION_POLICY)).toEqual([]);
+  });
+
+  it('the close of the long position stays possible: the open restrictions do not apply to a close', async () => {
+    const f = await cycle();
+    const open = await filledCycleOpen(f);
+    const created = await f.service.create(closeInput(open), CREATOR);
+    expect(created.state, created.gateReasons.join(',')).toBe('RISK_APPROVED');
+    const event = f.intents.all().find((r) => r.payload.intentId === created.intentId && r.payload.state === 'RISK_APPROVED')!.payload;
+    expect(event.gate?.checks.openSide).toBe('not_applicable');
+    expect(event.gate?.checks.openOrderType).toBe('not_applicable');
+    await f.service.approve(created.intentId, HUMAN);
+    f.broker.next(closeSubmitted);
+    expect((await f.service.execute(created.intentId, HUMAN)).state).toBe('SUBMITTED');
+    f.broker.next(closeFilled);
+    expect((await f.service.refresh(created.intentId)).state).toBe('FILLED');
+    expect(f.broker.writes.map((w) => w.method)).toEqual(['POST', 'POST']);
+    expect(f.broker.writes[1]!.url).toBe('https://public-api.etoro.com/api/v1/trading/execution/demo/market-close-orders/positions/' + POSITION);
   });
 });
 
