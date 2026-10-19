@@ -23,6 +23,7 @@ import { BrokerError } from '../broker/broker-errors.js';
 import type { EtoroBrokerService } from '../broker/etoro/etoro-broker-service.js';
 import type { EtoroDemoExecutionService } from '../broker/etoro/execution/etoro-demo-execution-service.js';
 import { reconcileDemoCycle } from '../broker/etoro/execution/demo-cycle-reconciliation.js';
+import { evaluateDemoCycleTest } from '../broker/etoro/execution/demo-cycle-test-verdict.js';
 import { assessDemoSafetyReadiness } from '../broker/etoro/execution/demo-safety-readiness.js';
 import type { EtoroDemoAccountSafetySource } from '../broker/etoro/execution/demo-account-safety.js';
 import { DEMO_E2E_CYCLE_POLICY } from '../broker/etoro/execution/execution-gate.js';
@@ -418,10 +419,12 @@ export class RuntimeServiceImpl implements RuntimeServices {
       source: accountSafety === null ? null : accountSafety.status(),
     });
     if (execution === null) {
-      return { cycle: { execution: 'disabled', buildLocked: BUILD_LOCKS.etoroDemoExecution, budget: null, reconciliation: null, safetyReadiness } };
+      return { cycle: { execution: 'disabled', buildLocked: BUILD_LOCKS.etoroDemoExecution, budget: null, reconciliation: null, test: null, safetyReadiness } };
     }
-    const [budget, intents] = await Promise.all([execution.cycleBudget(), execution.list()]);
-    return { cycle: { execution: 'enabled', buildLocked: BUILD_LOCKS.etoroDemoExecution, budget, reconciliation: reconcileDemoCycle(intents, snapshot), safetyReadiness } };
+    const [budget, intents, snapshots] = await Promise.all([execution.cycleBudget(), execution.list(), etoro === null ? Promise.resolve([]) : etoro.snapshotHistory()]);
+    // O22 C1: the test verdict of the operator's success criterion, from stored state only; separate from the reconciliation verdict.
+    const test = evaluateDemoCycleTest({ intents, snapshots });
+    return { cycle: { execution: 'enabled', buildLocked: BUILD_LOCKS.etoroDemoExecution, budget, reconciliation: reconcileDemoCycle(intents, snapshot), test, safetyReadiness } };
   }
 }
 

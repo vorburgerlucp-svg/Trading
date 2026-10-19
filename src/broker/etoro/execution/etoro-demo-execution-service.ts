@@ -23,7 +23,7 @@ import { hashOf } from '../../../persistence/canonical-json.js';
 import type { InstrumentRegistry } from '../../../market-data/instrument-registry.js';
 import type { PortfolioKillSwitchStore } from '../../../safety/portfolio-kill-switch-store.js';
 import { DemoExecutionError, type DemoExecutionErrorCode } from './etoro-demo-execution-errors.js';
-import type { EToroDemoExecutionAdapter, ReadOutcome, WriteOutcome } from './etoro-demo-execution-adapter.js';
+import type { EToroDemoExecutionAdapter, PreparedWrite, ReadOutcome, WriteOutcome } from './etoro-demo-execution-adapter.js';
 import { CANCELLABLE_STATUS_IDS, ETORO_ORDER_STATUS, type BrokerOrderOutcome, type BrokerOrderStatus } from './etoro-demo-execution-validation.js';
 import {
   DEFAULT_DEMO_EXECUTION_POLICY,
@@ -329,14 +329,27 @@ export class EtoroDemoExecutionService {
     }
 
     const { verdict, exposure } = await this.runGate(p.intent, 'execute');
-    const nowMs = this.deps.clock().getTime();
-    if (!verdict.passed || !this.deps.adapter.pacer.tryAcquire(nowMs)) {
-      const reasons = verdict.passed ? ['BROKER_WRITE_PACING'] : [...verdict.reasons];
-      await this.recordGateRefusal(intentId, reasons);
-      throw new DemoExecutionError('GATE_REFUSED', reasons.join(','), reasons);
+    if (!verdict.passed) {
+      await this.recordGateRefusal(intentId, verdict.reasons);
+      throw new DemoExecutionError('GATE_REFUSED', verdict.reasons.join(','), verdict.reasons);
     }
 
+    // O22 C3: the request is built and checked (body, URL, request id, the transport's own checks) BEFORE the reservation. A request
+    // that could never be sent is refused like a gate refusal: nothing is sent, the intent stays APPROVED, and no budget is spent.
     const requestId = this.nextRequestId().toLowerCase();
+    let prepared: PreparedWrite<{ brokerOrderId?: number; closeOrderId?: number; statusId?: number }>;
+    try {
+      prepared = p.intent.action === 'open' ? this.deps.adapter.prepareOpen(p.intent, requestId) : this.deps.adapter.prepareClose(p.intent, requestId);
+    } catch (error) {
+      if (!(error instanceof DemoExecutionError)) throw error;
+      await this.recordGateRefusal(intentId, ['REQUEST_NOT_SENDABLE']);
+      throw new DemoExecutionError('GATE_REFUSED', 'REQUEST_NOT_SENDABLE', ['REQUEST_NOT_SENDABLE']);
+    }
+    if (!this.deps.adapter.pacer.tryAcquire(this.deps.clock().getTime())) {
+      await this.recordGateRefusal(intentId, ['BROKER_WRITE_PACING']);
+      throw new DemoExecutionError('GATE_REFUSED', 'BROKER_WRITE_PACING', ['BROKER_WRITE_PACING']);
+    }
+
     const operation = p.intent.action === 'open' ? 'demo.order.open' : 'demo.position.close';
     const attemptId = 'eatt_' + hashOf({ intentId, operation, requestId }).slice(0, 40);
     // The reservation step and the at-most-once guard. SUBMITTING is entered once, only from APPROVED, and only if the book limits
@@ -362,11 +375,11 @@ export class EtoroDemoExecutionService {
 
     let outcome: WriteOutcome<{ brokerOrderId?: number; closeOrderId?: number; statusId?: number }>;
     try {
-      outcome = p.intent.action === 'open'
-        ? await this.deps.adapter.submitOpen(p.intent, requestId)
-        : await this.deps.adapter.submitClose(p.intent, requestId);
+      // From SUBMITTING on the budget is spent, whatever happens: the prepared request is sent once and never repeated.
+      outcome = await this.deps.adapter.submit(prepared);
     } catch (error) {
-      // A local refusal before the wire: the request was not sent.
+      // A local refusal before the wire: the request was not sent. (The request was checked before the reservation, so this is not
+      // expected; it still spends the budget, because SUBMITTING is recorded.)
       await this.finishAttempt(attemptId, intentId, operation, requestId, { outcome: 'not_sent', httpStatus: null, code: error instanceof DemoExecutionError ? error.code : 'LOCAL_ERROR' });
       await this.transition(intentId, 'REJECTED', 'NOT_SENT_LOCAL_REFUSAL', { attemptId });
       throw error;
@@ -759,7 +772,12 @@ export class EtoroDemoExecutionService {
   private async runGate(intent: ExecutionIntent, phase: 'create' | 'execute'): Promise<{ verdict: GateVerdict; exposure: Decimal }> {
     const now = this.now();
     await this.deps.killSwitch.sync();
-    const [safety, quote] = await Promise.all([this.deps.safety.current(now), this.deps.quotes.latest(intent.instrumentId, now)]);
+    // O22 C2: the account safety decision is read for an open only. No gate check of a close reads it (every safety check applies to
+    // opens), so a close does not depend on the account read, its broker request or its valuation log.
+    const [safety, quote] = await Promise.all([
+      intent.action === 'open' ? this.deps.safety.current(now) : Promise.resolve(null),
+      this.deps.quotes.latest(intent.instrumentId, now),
+    ]);
     const instrument = this.deps.registry.get(intent.instrumentId) ?? null;
     const mapping = instrument === null ? null : this.deps.registry.mappingAt(intent.instrumentId, ETORO_MAPPING_PROVIDER, now);
     const verdict = evaluateDemoExecutionGate({

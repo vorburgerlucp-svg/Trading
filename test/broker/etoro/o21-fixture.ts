@@ -138,6 +138,8 @@ export interface FixtureOptions {
   killSwitch?: KillSwitchState;
   broker?: { connection: string; lastSuccessfulSync: string | null };
   etoroMapping?: string | null;
+  /** O22 C3: replaces the service's request id source (e.g. an id that is not a UUID, to refuse a request before the reservation). */
+  requestId?: () => string;
 }
 
 export interface Fixture {
@@ -222,11 +224,11 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
     executionEnabled: options.executionEnabled ?? true,
     policy: options.policy ?? DEFAULT_DEMO_EXECUTION_POLICY,
     clock: now,
-    requestId: () => {
+    requestId: options.requestId ?? (() => {
       const id = nextUuid();
       requestIds.push(id);
       return id;
-    },
+    }),
   });
   return {
     service, killSwitch, broker, clock, stores, intents, attempts, confirmations, reconciliations, requestIds,
@@ -263,7 +265,7 @@ export function orderAccepted(orderId = 13902598): ScriptedAnswer {
 }
 
 /** The broker answer of "orders:lookup". */
-export function lookupAnswer(statusId: number, options: { orderId?: number; positionIds?: number[]; instrumentId?: number } = {}): Scripted {
+export function lookupAnswer(statusId: number, options: { orderId?: number; positionIds?: number[]; instrumentId?: number; settlementType?: string | null } = {}): Scripted {
   return {
     status: 200,
     body: {
@@ -271,7 +273,11 @@ export function lookupAnswer(statusId: number, options: { orderId?: number; posi
       orderId: options.orderId ?? 13902598,
       action: 'open', transaction: 'buy', type: 'mkt', etoroOrderTypeId: 17,
       status: { id: statusId, name: 'x', errorCode: 0, errorMessage: null },
-      asset: { symbol: 'AAPL', instrumentId: options.instrumentId ?? ETORO_AAPL_ID, currency: 'USD', settlementType: 'real', leverage: 1, side: 'long' },
+      asset: {
+        symbol: 'AAPL', instrumentId: options.instrumentId ?? ETORO_AAPL_ID, currency: 'USD', leverage: 1, side: 'long',
+        // O22: settlementType is 'real' unless a test states another one; null leaves the field out (not stated by the broker).
+        ...(options.settlementType === null ? {} : { settlementType: options.settlementType ?? 'real' }),
+      },
       orderCurrency: 'USD', requestedAmount: 500,
       positionExecutions: (options.positionIds ?? []).map((positionId) => ({ positionId, state: 'open', remainingUnits: 2.5 })),
       requestTime: '2026-10-16T14:00:00.000Z', lastUpdate: '2026-10-16T14:00:01.000Z',

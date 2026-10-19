@@ -314,6 +314,24 @@ export class EtoroBrokerService {
     };
   }
 
+  /**
+   * O22: every successful observation with its stored content, oldest first (the record of the demo cycle test verdict). Read only:
+   * stored state, no broker request. An observation whose snapshot record is missing is left out, never invented.
+   */
+  async snapshotHistory(): Promise<EtoroSnapshotView[]> {
+    await Promise.all([this.deps.syncs.sync(), this.deps.snapshots.sync()]);
+    const nowMs = this.deps.clock().getTime();
+    const views: EtoroSnapshotView[] = [];
+    for (const record of this.deps.syncs.all()) {
+      const payload = record.payload;
+      if (payload.outcome !== 'success') continue;
+      const stored = this.deps.snapshots.get(payload.snapshotId);
+      if (!stored) continue;
+      views.push({ snapshotId: payload.snapshotId, observedAt: payload.observedAt, retrievedAt: payload.retrievedAt, freshness: freshnessOf(payload.observedAt, nowMs, this.maxAgeMs), content: stored.payload.content });
+    }
+    return views.sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt));
+  }
+
   /** The reconciliation of the newest successful sync. With requireFresh, a stale one is refused (BROKER_SNAPSHOT_STALE). */
   async latestReconciliation(requireFresh: boolean): Promise<EtoroReconciliationView | null> {
     const last = this.lastSuccessfulSync();

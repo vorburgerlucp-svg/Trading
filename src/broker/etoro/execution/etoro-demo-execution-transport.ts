@@ -86,6 +86,19 @@ function urlMatchesOperation(operation: DemoExecutionOperation, url: string): bo
   return pattern.test(path) && path.includes('/demo/');
 }
 
+/**
+ * The checks every request must pass before it may be sent: an allowed operation, a URL built for it, a UUID request id, and a body
+ * exactly for open and close. send() runs them first; since O22 (C3) the adapter also runs them while preparing a write, before the
+ * service reserves the submission, so a request that could never be sent is refused without spending the cycle budget.
+ */
+export function assertSendable(request: DemoWireRequest): void {
+  const spec = ETORO_DEMO_EXECUTION_OPERATIONS[request.operation];
+  if (!spec || !urlMatchesOperation(request.operation, request.url)) throw new DemoExecutionError('INTENT_INVALID', 'operation or URL is not allowed');
+  if (!isUuid(request.requestId)) throw new DemoExecutionError('INTENT_INVALID', 'requestId must be a UUID');
+  const hasBody = request.operation === 'demo.order.open' || request.operation === 'demo.position.close';
+  if (hasBody !== (request.body !== undefined)) throw new DemoExecutionError('INTENT_INVALID', 'request body does not match the operation');
+}
+
 export class HttpsDemoExecutionTransport implements DemoExecutionTransport {
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
@@ -101,11 +114,9 @@ export class HttpsDemoExecutionTransport implements DemoExecutionTransport {
   }
 
   async send(request: DemoWireRequest): Promise<DemoWireResult> {
+    assertSendable(request);
     const spec = ETORO_DEMO_EXECUTION_OPERATIONS[request.operation];
-    if (!spec || !urlMatchesOperation(request.operation, request.url)) throw new DemoExecutionError('INTENT_INVALID', 'operation or URL is not allowed');
-    if (!isUuid(request.requestId)) throw new DemoExecutionError('INTENT_INVALID', 'requestId must be a UUID');
     const hasBody = request.operation === 'demo.order.open' || request.operation === 'demo.position.close';
-    if (hasBody !== (request.body !== undefined)) throw new DemoExecutionError('INTENT_INVALID', 'request body does not match the operation');
     const headers: Record<string, string> = {
       accept: 'application/json',
       'x-api-key': this.options.credentials.apiKey,
