@@ -8,7 +8,8 @@ Status: **implemented and tested offline; not released.** Base: `519233d` (merge
   - the account limits are unchanged;
   - the hand-opened ETH position makes the decision `CAPACITY_BLOCK`.
 - `BUILD_LOCKS.etoroDemoExecution = true` refuses every demo write in this build.
-- The demo account safety source (B2, variant A, section 5) is built and wired. It answers `null` until a non-empty `/demo/pnl` has been observed live and recorded, so every open is still refused with `PORTFOLIO_SAFETY_NOT_CONNECTED`.
+- The demo account safety source (B2, variant A, section 5) is built and wired. It answers `null` (`PORTFOLIO_SAFETY_NOT_CONNECTED`) only when its one `/demo/pnl` read fails or is refused; the evidence gate itself is open. With the hand-opened position, its decision refuses every cycle open with `CAPACITY_BLOCK`.
+- The local registry was read on 2026-10-19 (section 15): all 13 migrations applied, but no instrument at all, so no ETH/USD and no mapping for 100001.
 - The first demo buy therefore cannot happen with this build. Section 9 lists what is still open; section 8 gives the exact sequence for afterwards.
 
 Naming note: an unrelated, uncommitted work package "O22 OpenAI shadow provider" exists in another local worktree (with a migration `014_model_run_usage.sql`). This package uses its own file and branch names, adds no migration, and touches none of those files. The numbering should be reconciled before both are merged.
@@ -33,7 +34,7 @@ Naming note: an unrelated, uncommitted work package "O22 OpenAI shadow provider"
 | `execution/execution-gate.ts` | `DEMO_E2E_CYCLE_POLICY` with the open and close budget, long-only and market-only. `GateSafetyDecision`: the narrow safety shape the gate reads; the checks themselves are unchanged. |
 | `execution/etoro-demo-execution-service.ts` | Submission counts and `cycleBudget()`. The broker's `settlementType` is kept from order status reads. |
 | `execution/etoro-demo-execution-validation.ts` | `asset.settlementType` of `orders:lookup`: an enum, strictly validated. |
-| `execution/demo-account-evidence.ts` | The compile-time evidence record. Non-empty `/demo/pnl` live-observed: **false**. |
+| `execution/demo-account-evidence.ts` | The compile-time evidence record. Non-empty `/demo/pnl` live-observed: **true**, citing both reports of section 12. |
 | `execution/demo-account-safety.ts` | The demo account safety source: the guide formulas, limits, risk day, kill switch. |
 | `execution/demo-safety-readiness.ts` | Readiness report: evidence, source status, sync, kill switch. |
 | `execution/demo-cycle-reconciliation.ts` | The cycle against the snapshot; external positions; product type. |
@@ -118,7 +119,7 @@ All of these are "USD balance".
 
 - **Risk day.** Complete valuations are appended to `etoro-demo-account-valuations`. It stores day, time and equity only; no account or position id. All processes share it, so a restart does not reset a drawdown (PostgreSQL test). A breach does not latch the shared kill switch. With an open budget of one, a later recovery cannot allow more than that one open.
 - **Decision.** It has the gate's shape (`state`, `canIncreaseRisk`, `killSwitch`, reasons, `asOf`). It is NORMAL only with every check passing, and `liveOrderAllowed` is always `false`.
-- **Evidence gate.** `DEMO_ACCOUNT_VALUATION_EVIDENCE.nonEmptyPnlLiveObserved = false` is a compile-time constant, read directly like `BUILD_LOCKS`. While it is false, the source returns null and **sends no request**.
+- **Evidence gate.** `DEMO_ACCOUNT_VALUATION_EVIDENCE.nonEmptyPnlLiveObserved` is a compile-time constant, read directly like `BUILD_LOCKS`. It is **`true`** in this build (section 12), so the source reads and decides. Were it false, the source would return null and **send no request** (tested with the record mocked, `o22-demo-account-safety-no-evidence.test.ts`). The evidence enables decisions only; it releases no trade.
 
 ### The hand-opened ETH position
 
@@ -138,10 +139,11 @@ Two ways out, neither taken here:
 | Product type of the NEXUS open | captured from the order status (`asset.settlementType`: cfd, real, realFutures, marginTrade) and flagged unless `real` |
 | `amount` / `units` | `amount` = USD allocated incl. margin; `units` = number of units. They equal an asset quantity only for `real` (to be confirmed by the order status). |
 | `openRate` currency | "in the instrument's currency"; not stated in the payload |
-| NEXUS mapping for 100001 | **none**; nothing registered |
+| NEXUS mapping for 100001 | **none**; the local registry holds no instrument (read-only check 2026-10-19, section 15) |
 
-**Prepared, not executed:**
-- **The metadata read.** `npm run etoro:observe-demo -- --source=instrument-metadata --confirm-live-read`: one GET `/api/v2/market-data/instruments?instrumentsIds=100001`. The report keeps four fields: id, type, symbol and display name.
+**The metadata read (executed once, section 14).** `npm run etoro:observe-demo -- --source=instrument-metadata --confirm-live-read`: one GET `/api/v2/market-data/instruments?instrumentsIds=100001`. The report keeps four fields: id, type, symbol and display name.
+
+**Prepared, not applied:**
 - **The governed mapping.** `npm run etoro:map-instrument -- --instrument-id=<ETH/USD> --metadata-report=<saved report> --valid-from=<UTC> --operator=<id>`.
   - It runs as a dry run by default; `--apply --confirm-human-mapping` writes the one registry event.
   - The evidence is the report file, cited by its sha256.
@@ -164,8 +166,9 @@ Each step is a separate operator action. Every STOP ends this cycle.
 
 1. **Evidence for the valuation. Done** (2026-10-18, section 12): two non-empty reads, G1 and G2 proved, and the evidence record set with both reports.
 2. **Identity.**
-   - Run one approved metadata read. STOP unless `accepted`, id 100001, type `Crypto`.
-   - Register ETH/USD (`POST /api/instruments/register`).
+   - Metadata read. **Done** (2026-10-18, section 14): `accepted`, id 100001, type `Crypto`.
+   - Register ETH/USD (`POST /api/instruments/register`). **Open:** the registry is empty (2026-10-19), and the runtime has no `TWELVE_DATA_API_KEY` (section 15).
+   - Check the production ETH/USD quote: `USD`, valid timestamp, at most 60 s old.
    - Dry-run `etoro:map-instrument`, then apply it with confirmation.
 3. **Write permission.** The operator confirms a demo write scope from the `/me` result.
 4. **Clear the account.** The operator closes the hand-opened ETH position in the eToro UI. NEXUS does not touch it.
@@ -201,25 +204,29 @@ No ledger booking at any step.
 | B1 | `BUILD_LOCKS.etoroDemoExecution = true` | **open** (by design) | a separate, approved code change, last |
 | B2 | Demo portfolio safety | **evidence closed; source active.** G1 and G2 are proved (section 12), and the evidence record cites both reports. The decision is still `CAPACITY_BLOCK` because of the hand-opened position. | The account must fit the unchanged limits: the operator closes the hand-opened position in the UI. No limit is raised. |
 | B3 | Identity of 100001 | **confirmed** (section 14): Crypto, ETH, Ethereum | — (the quote currency of the pair and the product type remain under B6/B8) |
-| B4 | Governed mapping path | **closed** (`etoro:map-instrument`, dry run and apply); not executed | the operator's apply after B3 |
-| B5 | Demo write permission | **not proved in the repository** | the `scopes` from the operator's `/me` result (no new call needed if it is at hand) |
+| B4 | Governed mapping path | **tool closed** (`etoro:map-instrument`, dry run and apply); not applied. The read-only dry run against the local registry refuses with `MAPPING_INSTRUMENT_INVALID` (no ETH/USD instrument, 2026-10-19) | ETH/USD registered; then the dry run, and the operator's apply |
+| B5 | Demo write permission | **not proved**: no `/me` scopes are recorded in the repository or its evidence | the `scopes` from the operator's `/me` result (no new call needed if it is at hand) |
 | B6 | `settlementType` | **narrowed**: not sent, but verified after the fill and flagged unless `real` | decide whether a non-`real` result is acceptable for the test |
 | B7 | AMBIGUOUS close | accepted (unchanged): stays AMBIGUOUS, no further close, manual UI check | — |
-| B8 | Production ETH/USD quote | **open** | production market data configuration |
+| B8 | Production ETH/USD quote | **open**: no `TWELVE_DATA_API_KEY` in the local environment (2026-10-19); registration and quote not checked | the key in the runtime environment; then the registration and one quote check |
 
 ## 10. Tests
 
 | File | What |
 |---|---|
 | `o22-cycle.test.ts` (24) | Policy; long-only and market-only (sell and MIT refused at creation, at execute and in the reservation table; the close stays possible); full cycle; timeout, AMBIGUOUS, 403; close ambiguity; crash and restart; races; kill switch; product type from the order status |
-| `o22-demo-account-safety.test.ts` (14) | Guide formulas; external positions; data holds; decision limits; the hand-opened position blocks the open; the source sends nothing without evidence |
+| `o22-demo-account-safety.test.ts` (14) | Guide formulas; external positions; data holds; decision limits; the hand-opened position blocks the open; the evidence record cites both reports; the source reads once and decides |
+| `o22-demo-account-safety-no-evidence.test.ts` (2) | With the evidence record mocked to "not observed": the source answers null and sends nothing; readiness not connected |
+| `o22-pnl-valuation-evidence.test.ts` (15) | The `valuationEvidence` of the `/demo/pnl` report (G1, G2); no value, id or key reported |
 | `o22-account-safety-cycle.test.ts` (10) | Evidence released for the module only: <ul><li>one GET per evaluation; null on 4xx/5xx, timeout or invalid response;</li><li>risk day start, peak and new day;</li><li>DATA_HOLD not recorded; kill switch;</li><li>the cycle with the real source: open refused with the hand-opened position;</li><li>the position appearing before execute (refused, budget kept);</li><li>a failed read refuses the open;</li><li>the full open; the close without a safety read;</li><li>an ambiguous close is never repeated.</li></ul> |
-| `o22-cycle-reconciliation.test.ts` (8), `o22-safety-readiness.test.ts` (4) | Reconciliation and readiness |
+| `o22-cycle-reconciliation.test.ts` (8), `o22-safety-readiness.test.ts` (5) | Reconciliation and readiness |
 | `o22-instrument-metadata.test.ts` (23), `o22-governed-mapping.test.ts` (6), `o22-map-instrument-cli.test.ts` (6) | Metadata read, mapping, tool |
-| `test/runtime/o22-runtime.test.ts` (8) | The route; the production wiring with the demo account source and no evidence (open refused, 0 eToro requests); locked build without mock; every lock closed |
+| `test/market-data/o22-twelve-data-crypto-quote.test.ts` (8) | Quote currency: `currency`, ISO `currency_quote`, no translation of names, never from the symbol; `INSTRUMENT_NOT_USD` without a stated currency |
+| `test/runtime/o22-runtime.test.ts` (9) | The route; the production wiring with recorded evidence (creating an open reads `/demo/pnl` once, the hand-opened position blocks it, 0 writes); an empty account (risk-approved, execute still `EXECUTION_LOCKED_IN_BUILD`); every lock closed |
 | `test/pg/o22-cycle-budget.pg.test.ts` (3), `test/pg/o22-account-safety.pg.test.ts` (1) | Budget across pools; a shared risk day across processes and a restart |
+| `test/pg/o22-map-instrument.pg.test.ts` (4), `test/pg/o22-registry-inspect.pg.test.ts` (5) | Mapping dry run on a throwaway database (writes nothing); read-only registry inspection |
 
-Results: in the PR description.
+Results: in the PR description. Local run 2026-10-19 at `141a479`: `npm run typecheck` clean; `vitest --project unit --project pg` 169 files, 3037 tests, all passed (143 of them in the 16 O22 files above).
 
 ## 12. Live observation of a non-empty /demo/pnl (2026-10-18)
 
@@ -254,12 +261,12 @@ Results: in the PR description.
 - Live presence of every input the guide formulas take from **positions**: `amount` (positive) and `unrealizedPnL.pnL` (key present). Also `leverage` (positive integer) for exposure, and `credit` (positive number).
 - No copy trading in the account.
 
-**Open (the report states keys, not the kinds inside `unrealizedPnL`):**
+**Open after report 1 (the report states keys, not the kinds inside `unrealizedPnL`); G1 and G2 are closed by report 2 below:**
 - **G1 – kind of `unrealizedPnL.pnL`.** The parser accepts `pnL` as a finite number **or null**, and the report lists only the key. Whether it was a number is therefore not proved. The safety source would answer a null with `DATA_HOLD`, never zero, but the evidence for "pnL is a number" is missing.
 - **G2 – value of `accountCurrencyId`.** The key is present and the parser accepted it as a non-negative integer. The report does not state the value. `1` was observed once before, in an empty `/demo/pnl` (direct GET, O21A.1); in this read it is not shown.
 - **G3 – pending orders.** `orders` and `ordersForOpen` (with `totalExternalCosts`) are still not observed non-empty. That is no gap for the cycle: the account limit allows no pending order, so such an order blocks the open.
 
-### Next changes required (none made here)
+### Follow-up changes after report 1 (all done)
 
 1. **Observation report, code change. Done.** The `/demo/pnl` report now carries `valuationEvidence` (`valuationEvidenceOf` in `etoro-observation.ts`; tests in `o22-pnl-valuation-evidence.test.ts`):
    - **`unrealizedPnlObject`:** per position, whether `unrealizedPnL` is an object, null, missing or another type.
@@ -317,7 +324,7 @@ Results: in the PR description.
 
 ### Mapping dry run (B4); no write
 
-- **The real tool, as requested.** `npm run etoro:map-instrument -- --instrument-id=… --metadata-report=docs/evidence/O22_etoro_instrument_metadata_100001_2026-10-18.json --valid-from=… --operator=…` without `--apply`. In this session it ends with `MAPPING_FAILED: the registry could not be opened or written`: there is no `DATABASE_URL`, so nothing was opened and nothing was written.
+- **The real tool, as requested.** `npm run etoro:map-instrument -- --instrument-id=… --metadata-report=docs/evidence/O22_etoro_instrument_metadata_100001_2026-10-18.json --valid-from=… --operator=…` without `--apply`. On 2026-10-18 it ended with `MAPPING_FAILED: the registry could not be opened or written` (no database). On 2026-10-19, against the local registry through the read-only path, it ends with `MAPPING_INSTRUMENT_INVALID` because no ETH/USD instrument exists (section 15); nothing was written.
 - **The same dry run on a throwaway PostgreSQL** (`test/pg/o22-map-instrument.pg.test.ts`, with a TEST ETH/USD instrument and the real evidence file). It plans exactly:
   - `{ instrumentId: <NEXUS ETH/USD>, provider: 'etoro', providerSymbol: '100001', providerInstrumentId: '100001', validFrom: <the human's instant> }`;
   - `by: { kind: 'human', id: <operator> }`;
@@ -327,7 +334,7 @@ Results: in the PR description.
 
 ### Existing registry entries
 
-The production registry could **not** be checked from this session: no `DATABASE_URL`, and no NEXUS database is reachable. The repository contains **no** ETH instrument (only TEST ETH/USD fixtures in tests). Whether the operator's registry already holds an ETH instrument is unknown. The mapping tool refuses a second eToro mapping, and the registry refuses a second mapping of the same Twelve Data symbol in an overlapping period, so a duplicate cannot be written either way.
+On 2026-10-18 the registry could not be checked (no database reachable). **Superseded by section 15:** on 2026-10-19 the local NEXUS database was read read-only; it holds **no instrument**, so no ETH/USD and no mapping. The repository contains **no** ETH instrument either (only TEST ETH/USD fixtures in tests). The mapping tool refuses a second eToro mapping, and the registry refuses a second mapping of the same Twelve Data symbol in an overlapping period, so a duplicate cannot be written either way.
 
 ### Missing before the mapping can be applied
 
@@ -353,7 +360,29 @@ The production registry could **not** be checked from this session: no `DATABASE
 
 ## 15. Registry, database and ETH/USD market data (B4, B8)
 
-### Database status (2026-10-18, this session)
+### Database status (2026-10-19, read-only check)
+
+The operator has since set up the local NEXUS database (PostgreSQL 17 on loopback, database `nexus`, an application role and a read-only role, passwords only in the user's `pgpass.conf`). It was read with the read-only role and `default_transaction_read_only=on`; no credential was printed, no migration was run and no database was created.
+
+| Check | Result |
+|---|---|
+| Migrations | `schema_migrations` holds versions 1–13; each checksum equals the sha256 of the file in `db/migrations` at `141a479`. Nothing pending. |
+| Instruments | **0** rows in `instruments`, `instrument_events` and `provider_instrument_mappings`. |
+| `npm run registry:inspect -- --symbol=ETH --etoro-instrument-id=100001` | `instrumentCount: 0`, no match, eToro 100001 `resolvesTo: null`. |
+| ETH/USD instrument | **does not exist**: it must be registered once. |
+| Twelve Data mapping for ETH/USD; eToro mapping for 100001 | **none** |
+| Mapping dry run (read-only path) | `MAPPING_INSTRUMENT_INVALID`; afterwards still 0 instruments, 0 mappings, 0 log rows |
+| `TWELVE_DATA_API_KEY` | **not set** in the process, user or machine environment, and not in a `.env`. Registration and the quote check therefore were **not** run (B8). |
+| `NEXUS_OPERATOR_ID` | **not set**: `operatorAuth: not_configured`. |
+
+A local runtime start (loopback, `TRADING_MODE=paper`, `ALLOW_LIVE_TRADING=false`, eToro and Twelve Data not configured) answered:
+- `/api/health`: database connected, market data not configured, live trading locked, all four `buildLocks` `true`;
+- `/api/safety/status`: kill switch ARMED, `canIncreaseRisk: false`, `liveTradingAllowed: false`;
+- `/api/broker/etoro/demo/cycle`: execution disabled, `buildLocked: true`, safety readiness not connected, `valuationEvidence: verified`.
+
+Its bootstrap created the two empty log heads `instruments` and `portfolio-kill-switch` (sequence 0, no record). Nothing else was written: no instrument, mapping, ledger row, intent or order, and no eToro or Twelve Data request was sent.
+
+### Database status (2026-10-18, superseded)
 
 - No authorized database access:
   - `DATABASE_URL` and `PG*` are not set (neither process nor user scope);
@@ -395,8 +424,8 @@ The production registry could **not** be checked from this session: no `DATABASE
 
 ### Missing before registration and mapping
 
-1. **Read the operator's registry.** The operator runs `npm run registry:inspect -- --symbol=ETH --etoro-instrument-id=100001` in the NEXUS environment (with `DATABASE_URL`). It is read-only.
-2. **If no ETH/USD instrument exists,** register it. This needs approval: it is a productive write and an authenticated Twelve Data request.
+1. **Read the operator's registry. Done** (2026-10-19, above): no ETH/USD instrument.
+2. **Register ETH/USD** (approved by the operator for this preparation; blocked only by the missing `TWELVE_DATA_API_KEY`). It is a productive write and an authenticated Twelve Data request.
    - Run the runtime with `TWELVE_DATA_API_KEY` (production) and `POST /api/instruments/register` `{ "providerSymbol": "ETH/USD", "validFrom": "<UTC now>" }`.
    - It is refused unless Twelve Data states `currency` and a time zone for it.
    - If ETH/USD already exists: no registration, and nothing is duplicated.
