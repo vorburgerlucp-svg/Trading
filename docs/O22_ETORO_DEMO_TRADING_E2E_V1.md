@@ -579,7 +579,7 @@ Nothing in this section has been run. It prepares the review and the one control
 | 4 | `POST /api/broker/etoro/demo/intents` with the open below | 201, `RISK_APPROVED` (creation reads `/demo/pnl` once for the safety decision) | `REJECTED`: read `gateReasons`, stop |
 | 5 | `POST …/intents/{openId}/approve` | `APPROVED` by `luc-vorburger` | anything else |
 | 6 | step 3 again, then `POST …/intents/{openId}/execute` **once** | `SUBMITTED` | `REJECTED`: stop (budget spent, the cycle is over). `AMBIGUOUS`: only `refresh`, never execute again. `GATE_REFUSED` (e.g. stale quote): nothing was sent and no budget spent; fix the cause and execute again before `expiresAt`. |
-| 7 | `POST …/intents/{openId}/refresh` until `FILLED`; then sync and cycle | exactly one `brokerPositionIds` entry; `brokerSettlementType` noted (B6); reconciliation verdict `consistent`, item `open_position_confirmed` | verdict `inconsistent` (`open_position_missing`, `position_mismatch`); verdict `unknown` (`snapshot_predates_intent`, `outcome_pending`): one more sync, then stop if unchanged |
+| 7 | `POST …/intents/{openId}/refresh` until `FILLED`; then sync and cycle | exactly one `brokerPositionIds` entry; `brokerSettlementType` noted (B6); reconciliation verdict `consistent`, item `open_position_confirmed` | more than one `brokerPositionIds` entry: stop and follow 17.5 (A3); verdict `inconsistent` (`open_position_missing`, `position_mismatch`); verdict `unknown` (`snapshot_predates_intent`, `outcome_pending`): one more sync, then stop if unchanged |
 | 8 | `POST /api/broker/etoro/demo/intents` with the close below, `approve` (a new approval), `execute` **once**, `refresh` until `FILLED` | `SUBMITTED`, then `FILLED` | `AMBIGUOUS`: no further close; check the eToro UI by hand |
 | 9 | sync, then cycle | verdict `consistent`, item `close_confirmed`, budget open 1/1, close 1/1; every further write refused | verdict `inconsistent` (`closed_position_still_open`) or `unknown` after one more sync |
 | 10 | afterwards | `ETORO_DEMO_EXECUTION_ENABLED=0`; the build lock closed again by a reviewed change; the result documented with sanitized evidence | — |
@@ -600,16 +600,16 @@ Nothing in this section has been run. It prepares the review and the one control
 
 No ledger booking at any step. The external ETH position, if B2 found it still open, is never touched.
 
-### 17.4 Review result (2026-10-19, code at `74aaf90`; later commits are docs only)
+### 17.4 Review result (2026-10-19, code reviewed at `74aaf90`; later commits change docs and comments only)
 
 **Method.** The safety-critical paths were read in full at the current head: `execution-gate.ts`, `etoro-demo-execution-service.ts`, `demo-account-safety.ts`, `demo-cycle-reconciliation.ts`, the demo execution adapter, transport and endpoints, `append-only-log.ts` and the PostgreSQL store's `writeExclusive`, `runtime/compose.ts`, `runtime/config.ts`, `demo-execution-sources.ts`, the sync adapter; the tests of each property were matched to it.
 
-**Tests.** `npm run typecheck` clean. `vitest --project unit --project pg`: 171 files, 3078 tests, **3077 passed, 1 failed**. The failure is a 5 s timeout (5.9 s) in `test/patterns/v1c-regression.test.ts` ("V1B instance-id golden"), a file this PR does not change; the whole run was slow (the PostgreSQL files took up to 190 s each). Run alone it passed twice (about 2.2 s). It is a load-dependent timeout outside O22, not an O22 finding. The earlier full run at `1efd532` (same code) passed 3078/3078. CI is green at every pushed head.
+**Tests.** `npm run typecheck` clean. `vitest --project unit --project pg`: 171 files, 3078 tests, **3077 passed, 1 failed**. The failure is a 5 s timeout (5.9 s) in `test/patterns/v1c-regression.test.ts` ("V1B instance-id golden"), a file this PR does not change; the whole run was slow (the PostgreSQL files took up to 190 s each). Run alone it passed twice (about 2.2 s). Suspected cause: machine load during that run (the run was markedly slower than earlier ones); the cause is not proven. The earlier full run at `1efd532` (same code) passed 3078/3078. CI is green at every pushed head. The later commits of the review (S1–S3) change comments only; for them only `npm run typecheck` was run (clean), not the full suite again.
 
 | Property | Result | Where |
 |---|---|---|
 | At most one open and one close, durably | **Holds.** The budget is derived from the persistent intent log (every intent that reached `SUBMITTING`, whatever followed) and checked by the gate and again in the reservation precondition inside the log's critical section; the PostgreSQL store serializes appends with `SELECT … FOR UPDATE` on the log head and applies newer records before the precondition runs. Not resettable by configuration. | `execution-gate.ts` L175–176, `etoro-demo-execution-service.ts` L342–355 and L740–742, `append-only-log.ts` L176–186, `postgres-append-only-store.ts` L52–65; tests `o22-cycle.test.ts`, `test/pg/o22-cycle-budget.pg.test.ts` |
-| Safety re-checked before execution and reservation | **Holds, with one accepted gap.** `execute` re-runs the full gate with a fresh `/demo/pnl` decision, a fresh stored quote, the kill switch and the mapping; the reservation re-runs the book checks (budget, side, order type, exposure, positions, ambiguity, duplicates). The account decision itself is not re-read inside the critical section (a network call cannot run there): an order placed by hand between the gate and the reservation is not seen. | `etoro-demo-execution-service.ts` L331–355, L759–787; test "the position appears between approval and execute" |
+| Safety re-checked before execution and reservation | **Holds, with one documented gap (A1).** `execute` re-runs the full gate with a fresh `/demo/pnl` decision, a fresh stored quote, the kill switch and the mapping; the reservation re-runs the book checks (budget, side, order type, exposure, positions, ambiguity, duplicates). The account decision itself is not re-read inside the critical section (a network call cannot run there): an order placed by hand between the gate and the reservation is not seen. | `etoro-demo-execution-service.ts` L331–355, L759–787; test "the position appears between approval and execute" |
 | Timeout, restart, concurrency | **Holds.** Writes are never retried (`etoro-demo-execution-transport.ts`); a timeout, 5xx or unreadable answer is AMBIGUOUS and spends the budget; an AMBIGUOUS open is resolved only by positive evidence found by its `x-request-id`; an AMBIGUOUS close is never reconciled or resent; a crash after `SUBMITTING` becomes AMBIGUOUS after 30 s; the same approved intent executed twice at once writes once (fixed record ids). | adapter L131–150, service L404–447; tests "times out", "crashed after SUBMITTING", "executed twice at once", pg "two processes", "restarted process" |
 | Unique position binding, external positions | **Holds.** A close needs `closesIntentId` of a FILLED NEXUS open on the same instrument and side with **exactly one** position confirmed by an eToro order status read; the position id never comes from a request. A hand-opened position can therefore never be closed by NEXUS; the account safety counts it fully and the cycle reconciliation reports it as external. | service L534–561, L723–730; `demo-cycle-reconciliation.ts`; `demo-account-safety.ts` L104 |
 | Currency, freshness, demo/real separation | **Holds.** Open needs a stored production quote ≤ 60 s old and `currency` and instrument currency both `USD`; the crypto currency comes only from the reviewed reference rule. Config refuses `ETORO_TRADING_MODE=real` before anything else and needs `demo` for execution; every execution path is built from fixed `/demo/` segments; the GET allowlist has no real path; the key has no real scope (`/me`). | `execution-gate.ts` L249–260, `twelve-data.ts` getQuote, `config.ts` L123–146, `etoro-demo-execution-endpoints.ts` L14–34 |
@@ -618,19 +618,37 @@ No ledger booking at any step. The external ETH position, if B2 found it still o
 - **M1 PR description** is outdated and must be replaced (prepared text; `gh` is not available on this machine).
 - **M2 Draft status:** the PR leaves Draft only after M1 and the human reviewer's approval.
 
-**Should fix (not blocking; comments that contradict the code, misleading in a safety module):**
-- **S1** `execution-gate.ts` L295–296: "the O20 sync refuses a non-empty portfolio" – the sync reads non-empty portfolios (`etoro-sync-adapter.ts` L40–45).
-- **S2** `demo-execution-sources.ts` L1–6: "no source exists yet … always answers null" – the runtime wires `EtoroDemoAccountSafetySource` (`compose.ts` L103–109); `NO_DEMO_SAFETY_SOURCE` is only the fallback without eToro.
-- **S3** `etoro-sync-adapter.ts` L5–7: non-empty positions "not yet observed in a live response" – observed in O21B/O21C and in both `/demo/pnl` reports.
+**Stale comments S1–S3 (found in the review; fixed, comments only, no behaviour change):**
+- **S1** `execution-gate.ts` L295–296 said "the O20 sync refuses a non-empty portfolio"; the sync reads non-empty portfolios. Now: a close does not depend on the sync because a broker-confirmed NEXUS position must stay closable even when the sync is failing or stale.
+- **S2** `demo-execution-sources.ts` L1–6 said "no source exists yet … always answers null". Now: the runtime wires `EtoroDemoAccountSafetySource` (`compose.ts`); `NO_DEMO_SAFETY_SOURCE` is only the fallback when that source cannot be built.
+- **S3** `etoro-sync-adapter.ts` L5–7 said non-empty positions are "not yet observed in a live response". Now: positions have been observed live (O21B/O21C, O22 `/demo/pnl`), pending orders have not; the coverage label stays `documented_schema` in this build.
 
-**Accepted residual risks (documented, no change proposed):**
+The diff of S1–S3 contains comment lines only (checked line by line); `npm run typecheck` is clean.
+
+**Documented residual risks; acceptance before the execution release is open** (a human decides before B1; no change is proposed here):
 - **A1** The account decision is read before, not inside, the reservation (see above). The cycle budget limits the effect to the one open.
 - **A2** A local refusal after `SUBMITTING` (before the wire) also spends the budget: conservative; a new cycle needs a code change.
-- **A3** A fill with more than one position makes the NEXUS close impossible (`confirmed.length !== 1`); the position would have to be closed in the UI.
+- **A3** A fill with more than one position makes the NEXUS close impossible: a close needs exactly one broker-confirmed position (`closePositionOf`, `confirmed.length !== 1`). Manual procedure, see 17.5.
 - **A4** The close, too, makes one `/demo/pnl` read (`runGate` reads the source for every phase); its result does not decide a close.
 - **A5** Quote freshness depends on the minute candle (R4); a stale refusal sends nothing and spends no budget.
 - **A6** The runtime registry is not re-synced per gate run: a mapping applied while the runtime runs is seen after a restart (fail closed until then).
 
 **Prerequisites of the demo cycle (not merge blockers):** B2 open (position still open, untouched), B6 undecided, B1 closed; then the runbook 17.3.
 
-**Verdict.** The review of the safety-critical behaviour found no merge blocker. The PR is ready to leave Draft once M1 and the human approval are done; S1–S3 are recommended in the same step. This is not a release: the build lock stays closed.
+**Verdict.** The review of the safety-critical behaviour found no merge blocker; S1–S3 are fixed. The PR stays Draft until M1 and the human reviewer's approval; the acceptance of A1–A6 is a separate decision before the execution release. This is not a release: the build lock stays closed.
+
+### 17.5 Procedure when a fill creates more than one position (A3)
+
+**How it shows.** There is no dedicated reason code. The signals are: after `refresh`, the open intent is `FILLED` (or `PARTIALLY_FILLED`) and its `brokerPositionIds` has **more than one** entry; for a `FILLED` open the cycle route lists one item per position (a `PARTIALLY_FILLED` open appears as one `outcome_pending` item); creating the close intent is refused with `INTENT_INVALID` ("the close target is not a known, broker-confirmed position of NEXUS").
+
+**What NEXUS does and does not do.**
+- No further order of any kind: the open budget is spent, and no close is created or sent.
+- No safety check is bypassed: the rule "exactly one broker-confirmed position" is not overridden, and no position id is ever taken from a request.
+
+**Manual procedure (operator).**
+1. STOP the runbook at step 7. Do not create, approve or execute any further intent.
+2. Record what NEXUS shows: the open intent (`GET …/intents/{openId}`: state, `brokerPositionIds`, `brokerSettlementType`) and `GET /api/broker/etoro/demo/cycle` after one read-only sync. Store only ids and states, no keys.
+3. Clarify in the eToro demo account (UI): which positions belong to the order, their units and amounts.
+4. Any close of these positions is a manual action of the operator in the eToro UI, taken by a separate, explicit decision. NEXUS does not close them.
+5. Afterwards one approved read-only sync. The account must show none of these positions; the cycle route then reports them as `open_position_missing` (verdict `inconsistent`), which is the expected record of a close outside NEXUS and is not resolved by NEXUS. Document the case with sanitized evidence. A new cycle needs a reviewed code change (the budget is spent).
+

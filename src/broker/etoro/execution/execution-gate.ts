@@ -293,7 +293,7 @@ export function evaluateDemoExecutionGate(input: GateInput): GateVerdict {
   for (const c of BOOK_CHECKS) check(c.name, c.ok(input.book, exposure, policy, intent), c.reason, c.applies(opens));
 
   // Broker connectivity: the last read-only sync succeeded recently. Checked before an open is written. A close does not depend on
-  // it: the O20 sync refuses a non-empty portfolio, and a known position must stay closable.
+  // it: a position NEXUS opened and the broker confirmed must stay closable even when the read-only sync is failing or stale.
   const syncAge = ageMs(now, input.broker.lastSuccessfulSync);
   check('brokerConnectivity', input.broker.connection === 'connected' && syncAge !== null && syncAge >= 0 && syncAge <= policy.maxBrokerSyncAgeMs, 'BROKER_NOT_CONNECTED_OR_STALE', atExecute && opens);
   check('writePacing', input.writeSlotAvailable, 'BROKER_WRITE_PACING', atExecute);

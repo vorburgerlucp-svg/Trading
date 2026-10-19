@@ -3,8 +3,9 @@
 // to the ledger and never maps an instrument: eToro instrumentId is the broker identity, and mappings are human-governed.
 //
 // Coverage is stated, not implied. An empty demo portfolio is a verified empty state (live observed in O20). Positions and pending
-// orders of a non-empty portfolio are read with the documented schema (O21A), which is not yet observed in a live response; the
-// coverage says so. Cash is not read, and no account identifier is observed, so none is invented.
+// orders of a non-empty portfolio are read with the documented schema (O21A). Non-empty positions have since been observed live
+// (O21B/O21C portfolio, O22 /demo/pnl); pending orders have not. The coverage label of a non-empty portfolio is unchanged in this
+// build ('documented_schema'). Cash is not read, and no account identifier is observed, so none is invented.
 //
 // The generic BrokerSnapshot positions and openOrders stay empty: they need a cost currency and an instrument the payload does not
 // state. The eToro entries are carried in the eToro-specific fields instead, with the eToro instrument id as their identity.
