@@ -208,7 +208,7 @@ No ledger booking at any step.
 | B2 | Demo portfolio safety | **evidence closed; source active.** G1 and G2 are proved (section 12), and the evidence record cites both reports. The decision is still `CAPACITY_BLOCK` because of the hand-opened position. | The account must fit the unchanged limits: the operator closes the hand-opened position in the UI. No limit is raised. |
 | B3 | Identity of 100001 | **confirmed** (section 14): Crypto, ETH, Ethereum | — (the quote currency of the pair and the product type remain under B6/B8) |
 | B4 | Governed mapping path | **closed** (2026-10-19): `etoro / 100001 → ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`, applied by `human/luc-vorburger` after a read-only dry run with the same parameters; read-only check: 100001 resolves to exactly this instrument, one new event | — |
-| B5 | Demo write permission | **not proved** (checked 2026-10-19): no `/me` result or scope list in the repository, `docs/evidence` or `C:\NEXUS\setup`; no new call was made | one approved read `npm run etoro:observe-demo -- --source=me --confirm-live-read` (prepared: fixed `GET /api/v1/me`, report = scope names and checks only); it needs the demo keys in the worktree `.env` |
+| B5 | Demo write permission | **not granted** (one `/me` read, 2026-10-19): `demoRead=true`, `demoWrite=false`, `realRead=false`, `realWrite=false`. The key pair can read the demo account but not trade on it; eToro would refuse every demo order. | a new demo user key created with write permission, entered by the operator; then one approved `/me` read with `demoWrite=true` and `realWrite=false` |
 | B6 | `settlementType` | **narrowed**: not sent, but verified after the fill and flagged unless `real` | decide whether a non-`real` result is acceptable for the test |
 | B7 | AMBIGUOUS close | accepted (unchanged): stays AMBIGUOUS, no further close, manual UI check | — |
 | B8 | Production ETH/USD quote | **closed for the currency** (2026-10-19): production quote, `currency: USD` from the `/cryptocurrencies` reference, 51.7 s old. Freshness must hold again at create and execute (`observedAt` is the last minute candle). | — (refresh the quote right before create and before execute) |
@@ -461,16 +461,36 @@ Approved by the operator only for eToro 100001 → `ins_adcd4ec5-84ff-402c-8971-
 | Registry after (read-only) | `registry:inspect`: eToro 100001 `resolvesTo: ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`; checks `openEtoroMapping: 100001`, `openTwelveDataMapping: ETH/USD @ Binance`; 2 mappings in total (no exchange on the eToro one). |
 | Events | log `instruments` at sequence 2: exactly one new record, `mapping_added`, by `human/luc-vorburger`, reason `O22 governed eToro mapping by a named human; evidence 3e898fcd… (type Crypto, symbol ETH)`. Still 1 instrument, 0 ledger transactions; the kill switch log at sequence 0. |
 
-### eToro demo configuration and write scope (checked 2026-10-19, no eToro call)
+### eToro demo configuration and write scope (2026-10-19)
 
 - **eToro keys and switches: not configured on this machine.** The worktree `.env` has no `ETORO_*` line, and neither the process nor the user or machine environment holds `ETORO_API_KEY`, `ETORO_USER_KEY`, `ETORO_ENABLED`, `ETORO_TRADING_MODE` or `ETORO_DEMO_EXECUTION_ENABLED`. The earlier reads ran in the operator's own session.
 - **Operator auth: configured** (`NEXUS_OPERATOR_ID`, `NEXUS_OPERATOR_TOKEN`).
-- **`/me` scopes: no evidence.** `docs/evidence` holds the portfolio, `/demo/pnl` and metadata reports only; no `/me` result or scope list exists in the repository or `C:\NEXUS\setup`. B5 stays open.
+- **`/me` scopes, before the read: no evidence.** `docs/evidence` held the portfolio, `/demo/pnl` and metadata reports only; no `/me` result or scope list existed in the repository or `C:\NEXUS\setup`.
+- **Afterwards:** the operator entered the demo keys into the worktree `.env` (`ETORO_ENABLED=1`, `ETORO_TRADING_MODE=demo`, `ETORO_DEMO_EXECUTION_ENABLED=0`).
+
+### `/me` scope check (B5, 2026-10-19)
+
+- **What was run.** Exactly one `GET /api/v1/me`, approved by the operator: `npm run etoro:observe-demo -- --source=me --confirm-live-read`, at `1efd532`. Exit 0, verdict `accepted`, no retry, no other call. Only the scope names and the checks were reported; no key, header, account id or raw response was printed or stored.
+- **Granted scopes:**
+  - `etoro-public:market-data:read`
+  - `etoro-public:money.balance:read`
+  - `etoro-public:money.cash-transactions:read`
+  - `etoro-public:trade.demo:read`
+  - `etoro-public:user-info:read`
+
+| Check | Result |
+|---|---|
+| `demoRead` | **true** (`trade.demo:read`) |
+| `demoWrite` | **false**: neither `etoro-public:demo:write` nor `etoro-public:trade.demo:write` |
+| `realRead` | **false** |
+| `realWrite` | **false** |
+
+**B5 is confirmed as a blocker.** The key pair matches the reads made so far (portfolio, `/demo/pnl`, metadata) but cannot place a demo order. The write permission is set when a user key is created; a new demo user key with write permission is needed. No real-account scope is granted.
 
 ### Remaining before the controlled demo test
 
-1. **eToro demo configuration.** The worktree `.env` now holds `ETORO_ENABLED=1`, `ETORO_TRADING_MODE=demo`, `ETORO_DEMO_EXECUTION_ENABLED=0` and **empty** `ETORO_API_KEY` / `ETORO_USER_KEY` (no demo keys were found in the NEXUS configuration locations; the operator enters them). With `ETORO_ENABLED=1` and empty keys the runtime refuses to start (`CONFIG_INVALID`) until they are entered.
-2. **B5, write scope.** One approved read through the observation tool, `--source=me` (O22): the fixed operation `identity.me` (`GET /api/v1/me`, documented as the first call with a key pair; `scopes` is the array of granted scopes, `etoro-public:demo:write` includes `trade.demo:write`). The report (`etoro-me-scopes.ts`) keeps only the scope names, checked against a strict pattern, and `demoWrite`, `demoRead`, `realWrite`, `realRead`; no identifier, name or profile field. No retry. Tested in `o22-me-scopes.test.ts` (18). Not yet executed: the keys are missing.
+1. **eToro demo configuration. Done** (2026-10-19): the demo keys and `ETORO_ENABLED=1`, `ETORO_TRADING_MODE=demo`, `ETORO_DEMO_EXECUTION_ENABLED=0` are in the worktree `.env`.
+2. **B5, write scope. Open.** The read path is the observation tool, `--source=me` (O22): the fixed operation `identity.me` (`GET /api/v1/me`, documented as the first call with a key pair; `scopes` is the array of granted scopes, `etoro-public:demo:write` includes `trade.demo:write`). The report (`etoro-me-scopes.ts`) keeps only the scope names, checked against a strict pattern, and `demoWrite`, `demoRead`, `realWrite`, `realRead`; no identifier, name or profile field. No retry. Tested in `o22-me-scopes.test.ts` (18). The first read gave `demoWrite=false` (above). Next: the operator creates a demo user key with write permission and enters it; then exactly one approved `/me` read, expected `demoWrite=true` and `realWrite=false`; any other result stops the preparation.
 3. **B2, account.** The operator closes the hand-opened ETH position in the eToro UI. NEXUS never closes it.
 4. **B6.** Decide whether a non-`real` `settlementType` after the fill is acceptable for the test.
 5. **B1, release.** A separate reviewed change opens `BUILD_LOCKS.etoroDemoExecution`; `TRADING_MODE=paper` and `ALLOW_LIVE_TRADING=false` stay.
