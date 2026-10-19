@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { closePositionBody, openOrderBody, type ExecutionIntent } from './execution-intent.js';
 import { demoOperationUrl, type DemoLookupQuery } from './etoro-demo-execution-endpoints.js';
 import { DemoExecutionError } from './etoro-demo-execution-errors.js';
-import { assertSendable, type DemoExecutionTransport, type DemoWireRequest, type DemoWireResult } from './etoro-demo-execution-transport.js';
+import { assertSendable, serializeRequestBody, type DemoExecutionTransport, type DemoWireRequest, type DemoWireResult } from './etoro-demo-execution-transport.js';
 import {
   parseCancelAccepted,
   parseCloseOrderInfo,
@@ -96,11 +96,13 @@ export class EToroDemoExecutionAdapter {
   }
 
   /**
-   * O22 C3: builds and validates the open request without sending anything (body, URL, request id, the transport's own checks). A
-   * request that could never be sent throws here, before the service reserves the submission.
+   * O22 C3/F10: builds and validates the open request without sending anything (body, its exact JSON text, URL, request id, the
+   * transport's own checks). A request that could never be sent throws here, before the service reserves the submission; the
+   * transport then sends exactly this text.
    */
   prepareOpen(intent: ExecutionIntent, requestId: string): PreparedWrite<OpenOrderAccepted> {
-    const request: DemoWireRequest = { operation: 'demo.order.open', url: demoOperationUrl('demo.order.open'), requestId, body: openOrderBody(intent) };
+    const body = openOrderBody(intent);
+    const request: DemoWireRequest = { operation: 'demo.order.open', url: demoOperationUrl('demo.order.open'), requestId, body, serializedBody: serializeRequestBody(body) };
     assertSendable(request);
     return Object.freeze({ request, parse: (raw: unknown) => parseOpenOrderAccepted(raw, requestId) });
   }
@@ -109,7 +111,8 @@ export class EToroDemoExecutionAdapter {
   prepareClose(intent: ExecutionIntent, requestId: string): PreparedWrite<CloseSubmitted> {
     const positionId = intent.positionId;
     if (positionId === null) throw new DemoExecutionError('INTENT_INVALID', 'a close needs a positionId');
-    const request: DemoWireRequest = { operation: 'demo.position.close', url: demoOperationUrl('demo.position.close', { positionId }), requestId, body: closePositionBody(intent) };
+    const body = closePositionBody(intent);
+    const request: DemoWireRequest = { operation: 'demo.position.close', url: demoOperationUrl('demo.position.close', { positionId }), requestId, body, serializedBody: serializeRequestBody(body) };
     assertSendable(request);
     return Object.freeze({ request, parse: (raw: unknown) => parseCloseSubmitted(raw, { positionId, instrumentId: intent.etoroInstrumentId }) });
   }

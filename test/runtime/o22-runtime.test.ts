@@ -102,7 +102,7 @@ describe('O22 runtime: GET /api/broker/etoro/demo/cycle', () => {
     expect(res.json.cycle.safetyReadiness.connected).toBe(true);
     expect(res.json.cycle.safetyReadiness.lastDecisionState).toBeNull();
     // O22 C1: the test verdict is separate from the reconciliation verdict; with nothing submitted it is incomplete, never passed.
-    expect(res.json.cycle.test).toMatchObject({ schema: 'etoro-demo-cycle-test-verdict:v1', result: 'incomplete', failures: [], pending: ['NO_OPEN_SUBMITTED'] });
+    expect(res.json.cycle.test).toMatchObject({ schema: 'etoro-demo-cycle-test-verdict:v2', result: 'incomplete', failures: [], pending: ['NO_OPEN_SUBMITTED'] });
     expect(r.readOnly.calls).toEqual([]);
     expect(r.broker.requests).toEqual([]);
   });

@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { evaluateDemoCycleTest } from '../../../src/broker/etoro/execution/demo-cycle-test-verdict.js';
 import type { IntentView } from '../../../src/broker/etoro/execution/etoro-demo-execution-service.js';
-import type { EtoroSnapshotView } from '../../../src/broker/etoro/etoro-broker-service.js';
+import type { DemoCycleSnapshot } from '../../../src/broker/etoro/execution/demo-cycle-test-verdict.js';
 
 const ETH = 100001;
 const POS = 3000000001;
@@ -34,7 +34,11 @@ function view(v: {
     brokerSettlementType: v.settlementType === undefined ? null : v.settlementType,
     intent: { action: v.action, etoroInstrumentId: ETH, side: v.side ?? 'buy', positionId: v.positionId ?? null, closesIntentId: v.closesIntentId ?? null, createdAt: T.created },
     brokerPositionIds: v.positionIds ?? [],
-    history: v.history.map(([state, at]) => ({ state, at, reason: 'x' })),
+    // The fill of a FILLED open rests on one recorded status read (F6): it carries the positions and the product type.
+    statusReads: v.action === 'open' && v.state === 'FILLED'
+      ? [{ confirmationId: 'econf_fill', kind: 'order_status', outcome: 'filled', settlementType: v.settlementType ?? null, brokerPositionIds: v.positionIds ?? [], observedAt: T.filled }]
+      : [],
+    history: v.history.map(([state, at]) => ({ state, at, reason: 'x', ...(v.action === 'open' && state === 'FILLED' ? { confirmationId: 'econf_fill' } : {}) })),
   } as unknown as IntentView;
 }
 
@@ -49,17 +53,21 @@ function closeView(over: Partial<Parameters<typeof view>[0]> = {}): IntentView {
   return view({ id: 'eint_close', action: 'close', state: 'FILLED', history: CLOSE_HISTORY, positionId: POS, closesIntentId: 'eint_open', brokerOrderId: CLOSE_ORDER, ...over });
 }
 
-function snap(observedAt: string, positions: Array<{ positionId: number; etoroInstrumentId?: number; direction?: 'buy' | 'sell' }>, options: { freshness?: 'fresh' | 'stale'; orderIds?: number[] } = {}): EtoroSnapshotView {
+let sequence = 0;
+/** A stored observation: storedAt two seconds after observedAt unless stated (F2: its own times decide, never the time of reading). */
+function snap(observedAt: string, positions: Array<{ positionId: number; etoroInstrumentId?: number; direction?: 'buy' | 'sell' }>, options: { storedAt?: string; orderIds?: number[] } = {}): DemoCycleSnapshot {
+  sequence += 1;
   return {
     snapshotId: 'esnap_' + observedAt,
     observedAt,
     retrievedAt: observedAt,
-    freshness: options.freshness ?? 'fresh',
+    storedAt: options.storedAt ?? new Date(Date.parse(observedAt) + 2000).toISOString(),
+    sequence,
     content: {
       positions: positions.map((p) => ({ positionId: p.positionId, etoroInstrumentId: p.etoroInstrumentId ?? ETH, direction: p.direction ?? 'buy', units: '0.04', instrumentId: null })),
       ...(options.orderIds ? { orders: options.orderIds.map((orderId) => ({ orderId })) } : {}),
     },
-  } as unknown as EtoroSnapshotView;
+  } as unknown as DemoCycleSnapshot;
 }
 
 const BASELINE = snap('2026-10-20T09:59:30.000Z', []);
@@ -73,7 +81,7 @@ function passing() {
 describe('O22 C1 test verdict: passed only with every criterion proved', () => {
   it('the full cycle with every proof is passed, and the open product type is kept after the close', () => {
     const v = evaluateDemoCycleTest(passing());
-    expect(v).toMatchObject({ result: 'passed', failures: [], pending: [], openIntentId: 'eint_open', closeIntentId: 'eint_close', positionId: POS, settlementType: 'real', finalSnapshot: { observedAt: T.final } });
+    expect(v).toMatchObject({ result: 'passed', failures: [], pending: [], openIntentId: 'eint_open', closeIntentId: 'eint_close', positionId: POS, settlementType: 'real', closingSnapshot: { observedAt: T.final }, period: { from: T.created, to: T.final } });
   });
 
   it('dropping any single proof never gives passed', () => {
@@ -86,7 +94,7 @@ describe('O22 C1 test verdict: passed only with every criterion proved', () => {
       ['no close', { intents: [openView()], snapshots: [BASELINE, SEEN] }],
       ['close not filled', { intents: [openView(), closeView({ state: 'SUBMITTED', history: CLOSE_HISTORY.slice(0, 5) })], snapshots: [BASELINE, SEEN, FINAL] }],
       ['no snapshot after the close', { intents: [openView(), closeView()], snapshots: [BASELINE, SEEN] }],
-      ['final snapshot stale', { intents: [openView(), closeView()], snapshots: [BASELINE, SEEN, snap(T.final, [], { freshness: 'stale' })] }],
+      ['final snapshot not fresh when taken (stored late)', { intents: [openView(), closeView()], snapshots: [BASELINE, SEEN, snap(T.final, [], { storedAt: '2026-10-20T11:00:00.000Z' })] }],
       ['position still in the final snapshot', { intents: [openView(), closeView()], snapshots: [BASELINE, SEEN, snap(T.final, [{ positionId: POS }])] }],
       ['no snapshots at all', { intents: [openView(), closeView()], snapshots: [] }],
     ];
@@ -134,11 +142,14 @@ describe('O22 C1 test verdict: passed only with every criterion proved', () => {
     expect(evaluateDemoCycleTest({ intents: [openView(), ambiguous], snapshots: [BASELINE, SEEN, FINAL] }).failures).toEqual(['CLOSE_AMBIGUOUS']);
   });
 
-  it('the open position must have been observed by a sync after the fill and before the close was submitted', () => {
-    expect(evaluateDemoCycleTest({ intents: [openView()], snapshots: [BASELINE] })).toMatchObject({ result: 'incomplete', pending: ['NO_CLOSE_SUBMITTED', 'OPEN_POSITION_NOT_YET_OBSERVED'] });
+  it('the open position must have been observed by a sync after the open was submitted and before the close was filled (missing: incomplete, F3)', () => {
+    expect(evaluateDemoCycleTest({ intents: [openView()], snapshots: [BASELINE] })).toMatchObject({ result: 'incomplete', pending: ['NO_CLOSE_SUBMITTED', 'OPEN_POSITION_NOT_OBSERVED'] });
     // A snapshot only after the close was submitted does not count; once the close is submitted this is a failure.
     const late = snap('2026-10-20T10:20:03.000Z', [{ positionId: POS }]);
-    expect(evaluateDemoCycleTest({ intents: [openView(), closeView()], snapshots: [BASELINE, late, FINAL] }).failures).toEqual(['OPEN_POSITION_NOT_OBSERVED']);
+    // Observed after the close was submitted but before it was filled: it counts.
+    expect(evaluateDemoCycleTest({ intents: [openView(), closeView()], snapshots: [BASELINE, late, FINAL] }).result).toBe('passed');
+    // Never observed before the close was filled: missing evidence, incomplete – never an invented failure.
+    expect(evaluateDemoCycleTest({ intents: [openView(), closeView()], snapshots: [BASELINE, FINAL] })).toMatchObject({ result: 'incomplete', failures: [], pending: ['OPEN_POSITION_NOT_OBSERVED'] });
   });
 
   it('external activity during the cycle fails the test, and it stays failed after a clean close (D1)', () => {
@@ -172,7 +183,8 @@ describe('O22 C1 test verdict: passed only with every criterion proved', () => {
     const wrong = snap(T.seen, [{ positionId: POS, direction: 'sell' }]);
     const v = evaluateDemoCycleTest({ intents: [openView(), closeView()], snapshots: [BASELINE, wrong, FINAL] });
     expect(v.result).toBe('failed');
-    expect(v.failures).toEqual(['OPEN_POSITION_NOT_OBSERVED', 'POSITION_MISMATCH']);
+    expect(v.failures).toEqual(['POSITION_MISMATCH']);
+    expect(v.pending).toEqual(['OPEN_POSITION_NOT_OBSERVED']);
   });
 
   it('a close of another position or of another open is a target mismatch; two submitted closes fail', () => {

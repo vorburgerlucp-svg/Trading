@@ -159,8 +159,24 @@ export interface IntentView {
   lastStatusName: string | null;
   /** O22: the product type the broker stated in an order status read (cfd, real, ...), or null. */
   brokerSettlementType: string | null;
+  /**
+   * O22 F6: every broker status read of this intent, in log order, each as the broker stated it (no merging). The test verdict takes
+   * its product type and position binding from the one read that confirmed the fill, not from the merged fields above.
+   */
+  statusReads: readonly IntentStatusRead[];
   gateReasons: readonly string[];
-  history: { state: IntentState; at: string; reason: string }[];
+  /** confirmationId: the stored broker confirmation a broker-confirmed state rests on (present only for those states). */
+  history: { state: IntentState; at: string; reason: string; confirmationId?: string }[];
+}
+
+/** O22 F6: one order status read of an intent, exactly as recorded. */
+export interface IntentStatusRead {
+  readonly confirmationId: string;
+  readonly kind: 'order_status' | 'close_order_status';
+  readonly outcome: BrokerOrderOutcome | null;
+  readonly settlementType: string | null;
+  readonly brokerPositionIds: readonly number[];
+  readonly observedAt: string;
 }
 
 interface Projection {
@@ -660,9 +676,28 @@ export class EtoroDemoExecutionService {
       lastStatusId: p.lastStatusId,
       lastStatusName: statusName(p.lastStatusId),
       brokerSettlementType: p.settlementType,
+      statusReads: this.statusReadsOf(p.intent.intentId),
       gateReasons: p.gateReasons,
-      history: p.events.map((e) => ({ state: e.state, at: e.at, reason: e.reason })),
+      history: p.events.map((e) => ({ state: e.state, at: e.at, reason: e.reason, ...(e.confirmationId !== undefined ? { confirmationId: e.confirmationId } : {}) })),
     };
+  }
+
+  /** O22 F6: the order status reads of an intent, in log order, unmerged. */
+  private statusReadsOf(intentId: string): IntentStatusRead[] {
+    const reads: IntentStatusRead[] = [];
+    for (const record of this.deps.confirmations.all()) {
+      const c = record.payload;
+      if (c.intentId !== intentId || (c.kind !== 'order_status' && c.kind !== 'close_order_status')) continue;
+      reads.push(Object.freeze({
+        confirmationId: c.confirmationId,
+        kind: c.kind,
+        outcome: c.outcome,
+        settlementType: c.settlementType ?? null,
+        brokerPositionIds: Object.freeze([...c.brokerPositionIds]),
+        observedAt: c.observedAt,
+      }));
+    }
+    return reads;
   }
 
   private async appendEvent(event: IntentEvent): Promise<void> {

@@ -126,6 +126,35 @@ interface SuccessfulSync {
   reconciliationId: string;
   observedAt: string;
   retrievedAt: string;
+  sequence: number;
+}
+
+/**
+ * O22: one stored successful observation, as the demo cycle test verdict reads it. `storedAt` is when its sync record was stored
+ * (the log's time); `sequence` is that record's position in the sync log, the tie-break between equal `observedAt`. No freshness:
+ * a historical observation is judged by its own times, never against the time of reading.
+ */
+export interface EtoroSnapshotObservation {
+  readonly snapshotId: string;
+  readonly observedAt: string;
+  readonly retrievedAt: string;
+  readonly storedAt: string;
+  readonly sequence: number;
+  readonly content: EtoroSnapshotContent;
+}
+
+/** O22: the stored history; `missingSnapshotRecords` counts successful syncs whose snapshot record could not be read. */
+export interface EtoroSnapshotHistory {
+  readonly observations: readonly EtoroSnapshotObservation[];
+  readonly missingSnapshotRecords: number;
+}
+
+/**
+ * The one order of observations: by `observedAt`, then by sync log sequence (the later stored record is the later observation).
+ * Used for the history and for the latest snapshot, so both name the same newest observation.
+ */
+export function compareObservations(a: { readonly observedAt: string; readonly sequence: number }, b: { readonly observedAt: string; readonly sequence: number }): number {
+  return Date.parse(a.observedAt) - Date.parse(b.observedAt) || a.sequence - b.sequence;
 }
 
 function ledgerFingerprintOf(balances: ReadonlyMap<AccountKey, AccountBalance>): string {
@@ -287,15 +316,14 @@ export class EtoroBrokerService {
     await this.deps.syncs.append(syncId, { schema: 'etoro-sync:v1', syncId, outcome: 'failed', errorCode: code, attemptedAt }).catch(() => undefined);
   }
 
-  /** The newest successful observation, or null before the first one. */
+  /** The newest successful observation (compareObservations: observedAt, then the later stored record), or null before the first one. */
   private lastSuccessfulSync(): SuccessfulSync | null {
     let last: SuccessfulSync | null = null;
     for (const record of this.deps.syncs.all()) {
       const payload = record.payload;
       if (payload.outcome !== 'success') continue;
-      if (last === null || payload.observedAt > last.observedAt) {
-        last = { snapshotId: payload.snapshotId, reconciliationId: payload.reconciliationId, observedAt: payload.observedAt, retrievedAt: payload.retrievedAt };
-      }
+      const candidate = { snapshotId: payload.snapshotId, reconciliationId: payload.reconciliationId, observedAt: payload.observedAt, retrievedAt: payload.retrievedAt, sequence: record.sequence };
+      if (last === null || compareObservations(candidate, last) > 0) last = candidate;
     }
     return last;
   }
@@ -315,21 +343,27 @@ export class EtoroBrokerService {
   }
 
   /**
-   * O22: every successful observation with its stored content, oldest first (the record of the demo cycle test verdict). Read only:
-   * stored state, no broker request. An observation whose snapshot record is missing is left out, never invented.
+   * O22: every successful observation with its stored content, in compareObservations order (the record of the demo cycle test
+   * verdict). Read only: stored state, no broker request. The sync log is read first and the snapshot log after it: sync() appends
+   * the snapshot before its sync record, so every sync seen here has its snapshot visible. A snapshot record that still cannot be
+   * read is counted in `missingSnapshotRecords`, never skipped silently and never invented.
    */
-  async snapshotHistory(): Promise<EtoroSnapshotView[]> {
-    await Promise.all([this.deps.syncs.sync(), this.deps.snapshots.sync()]);
-    const nowMs = this.deps.clock().getTime();
-    const views: EtoroSnapshotView[] = [];
+  async snapshotHistory(): Promise<EtoroSnapshotHistory> {
+    await this.deps.syncs.sync();
+    await this.deps.snapshots.sync();
+    const observations: EtoroSnapshotObservation[] = [];
+    let missingSnapshotRecords = 0;
     for (const record of this.deps.syncs.all()) {
       const payload = record.payload;
       if (payload.outcome !== 'success') continue;
       const stored = this.deps.snapshots.get(payload.snapshotId);
-      if (!stored) continue;
-      views.push({ snapshotId: payload.snapshotId, observedAt: payload.observedAt, retrievedAt: payload.retrievedAt, freshness: freshnessOf(payload.observedAt, nowMs, this.maxAgeMs), content: stored.payload.content });
+      if (!stored) {
+        missingSnapshotRecords += 1;
+        continue;
+      }
+      observations.push({ snapshotId: payload.snapshotId, observedAt: payload.observedAt, retrievedAt: payload.retrievedAt, storedAt: record.recordedAt, sequence: record.sequence, content: stored.payload.content });
     }
-    return views.sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt));
+    return { observations: observations.sort(compareObservations), missingSnapshotRecords };
   }
 
   /** The reconciliation of the newest successful sync. With requireFresh, a stale one is refused (BROKER_SNAPSHOT_STALE). */

@@ -13,7 +13,7 @@ vi.mock('../../../src/nexus/safety.js', async (importOriginal) => {
 import { DEMO_E2E_CYCLE_POLICY } from '../../../src/broker/etoro/execution/execution-gate.js';
 import { evaluateDemoCycleTest } from '../../../src/broker/etoro/execution/demo-cycle-test-verdict.js';
 import type { DemoSafetySource } from '../../../src/broker/etoro/execution/etoro-demo-execution-service.js';
-import type { EtoroSnapshotView } from '../../../src/broker/etoro/etoro-broker-service.js';
+import type { DemoCycleSnapshot } from '../../../src/broker/etoro/execution/demo-cycle-test-verdict.js';
 import { CREATOR, ETORO_AAPL_ID, HUMAN, ScriptedBroker, closeInput, inMemoryStores, lookupAnswer, normalSafety, o21Fixture, openInput, orderAccepted, type Fixture } from './o21-fixture.js';
 
 const POSITION = 2150941015;
@@ -44,14 +44,18 @@ async function filledOpen(f: Fixture, settlementType: string | null = 'real'): P
   return created.intentId;
 }
 
-function snapshot(observedAt: string, positionIds: number[]): EtoroSnapshotView {
+let sequence = 0;
+/** A stored observation, stored one second after it was taken. */
+function snapshot(observedAt: string, positionIds: number[]): DemoCycleSnapshot {
+  sequence += 1;
   return {
     snapshotId: 'esnap_' + observedAt,
     observedAt,
     retrievedAt: observedAt,
-    freshness: 'fresh',
+    storedAt: new Date(Date.parse(observedAt) + 1000).toISOString(),
+    sequence,
     content: { positions: positionIds.map((positionId) => ({ positionId, etoroInstrumentId: ETORO_AAPL_ID, direction: 'buy', units: '1', instrumentId: null })) },
-  } as unknown as EtoroSnapshotView;
+  } as unknown as DemoCycleSnapshot;
 }
 
 describe('O22 C2: a close reads no account safety decision', () => {

@@ -421,9 +421,12 @@ export class RuntimeServiceImpl implements RuntimeServices {
     if (execution === null) {
       return { cycle: { execution: 'disabled', buildLocked: BUILD_LOCKS.etoroDemoExecution, budget: null, reconciliation: null, test: null, safetyReadiness } };
     }
-    const [budget, intents, snapshots] = await Promise.all([execution.cycleBudget(), execution.list(), etoro === null ? Promise.resolve([]) : etoro.snapshotHistory()]);
-    // O22 C1: the test verdict of the operator's success criterion, from stored state only; separate from the reconciliation verdict.
-    const test = evaluateDemoCycleTest({ intents, snapshots });
+    // O22 C1/F4: the stored sync history is read first, the intents after it, so every intent that could own an entry of a snapshot
+    // is at least as recent as that snapshot. The test verdict is historical (stored state only, never the time of reading); the
+    // reconciliation describes the current account.
+    const history = etoro === null ? { observations: [], missingSnapshotRecords: 0 } : await etoro.snapshotHistory();
+    const [budget, intents] = await Promise.all([execution.cycleBudget(), execution.list()]);
+    const test = evaluateDemoCycleTest({ intents, snapshots: history.observations, missingSnapshotRecords: history.missingSnapshotRecords });
     return { cycle: { execution: 'enabled', buildLocked: BUILD_LOCKS.etoroDemoExecution, budget, reconciliation: reconcileDemoCycle(intents, snapshot), test, safetyReadiness } };
   }
 }

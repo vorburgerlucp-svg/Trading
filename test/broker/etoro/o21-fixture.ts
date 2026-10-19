@@ -38,6 +38,8 @@ export interface RecordedRequest {
   url: string;
   headers: Record<string, string>;
   body: unknown;
+  /** O22 F10: the request body exactly as it went on the wire (text), for tests that compare the sent bytes. */
+  rawBody?: string;
 }
 
 /** An answer can depend on the request (e.g. echo its x-request-id), and can be held back (a pending broker answer). */
@@ -62,6 +64,7 @@ export class ScriptedBroker {
       url,
       headers: { ...(init.headers as Record<string, string>) },
       body: init.body === undefined ? undefined : JSON.parse(String(init.body)),
+      ...(init.body === undefined ? {} : { rawBody: String(init.body) }),
     });
     const scripted = this.queue.shift();
     if (scripted === undefined) throw new Error('unscripted broker request: ' + String(init.method) + ' ' + url);
