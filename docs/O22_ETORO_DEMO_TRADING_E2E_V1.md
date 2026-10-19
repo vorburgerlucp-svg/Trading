@@ -188,7 +188,7 @@ Each step is a separate operator action. Every STOP ends this cycle.
      - `AMBIGUOUS`: only `refresh`, which looks the order up by the original request id. Never execute again.
 8. **Confirm.**
    - `refresh` until `FILLED`. Note the one `brokerPositionIds` and `brokerSettlementType`.
-   - Sync, then cycle. Expect `open_position_confirmed`; STOP on `open_position_missing` or `position_mismatch` (section 17.3).
+   - Sync, then cycle. Expect the reconciliation verdict `consistent` with the item `open_position_confirmed`; STOP on `inconsistent` (`open_position_missing`, `position_mismatch`) or a persisting `unknown` (section 17.3).
    - A `PRODUCT_TYPE_NOT_CONFIRMED_REAL` reason is noted for review.
 9. **Close.**
    - Create the close intent (`closesIntentId`), give a **new** approval, **execute once**.
@@ -579,9 +579,9 @@ Nothing in this section has been run. It prepares the review and the one control
 | 4 | `POST /api/broker/etoro/demo/intents` with the open below | 201, `RISK_APPROVED` (creation reads `/demo/pnl` once for the safety decision) | `REJECTED`: read `gateReasons`, stop |
 | 5 | `POST …/intents/{openId}/approve` | `APPROVED` by `luc-vorburger` | anything else |
 | 6 | step 3 again, then `POST …/intents/{openId}/execute` **once** | `SUBMITTED` | `REJECTED`: stop (budget spent, the cycle is over). `AMBIGUOUS`: only `refresh`, never execute again. `GATE_REFUSED` (e.g. stale quote): nothing was sent and no budget spent; fix the cause and execute again before `expiresAt`. |
-| 7 | `POST …/intents/{openId}/refresh` until `FILLED`; then sync and cycle | exactly one `brokerPositionIds` entry; `brokerSettlementType` noted (B6); cycle `open_position_confirmed` | `open_position_missing` or `position_mismatch`; `snapshot_predates_intent` or `outcome_pending`: one more sync, then stop if unchanged |
+| 7 | `POST …/intents/{openId}/refresh` until `FILLED`; then sync and cycle | exactly one `brokerPositionIds` entry; `brokerSettlementType` noted (B6); reconciliation verdict `consistent`, item `open_position_confirmed` | verdict `inconsistent` (`open_position_missing`, `position_mismatch`); verdict `unknown` (`snapshot_predates_intent`, `outcome_pending`): one more sync, then stop if unchanged |
 | 8 | `POST /api/broker/etoro/demo/intents` with the close below, `approve` (a new approval), `execute` **once**, `refresh` until `FILLED` | `SUBMITTED`, then `FILLED` | `AMBIGUOUS`: no further close; check the eToro UI by hand |
-| 9 | sync, then cycle | `close_confirmed`, budget open 1/1, close 1/1; every further write refused | `closed_position_still_open`, or anything else |
+| 9 | sync, then cycle | verdict `consistent`, item `close_confirmed`, budget open 1/1, close 1/1; every further write refused | verdict `inconsistent` (`closed_position_still_open`) or `unknown` after one more sync |
 | 10 | afterwards | `ETORO_DEMO_EXECUTION_ENABLED=0`; the build lock closed again by a reviewed change; the result documented with sanitized evidence | — |
 
 **The open intent** (times: canonical UTC, `expiresAt` at most 15 minutes after `createdAt`, e.g. 10):
