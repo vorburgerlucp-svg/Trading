@@ -7,7 +7,7 @@ import type { FreshnessUseCase } from './freshness.js';
 import type { InstrumentRegistry } from './instrument-registry.js';
 import { MarketDataError, type MarketDataProvider } from './market-data-provider.js';
 import type { BarQuery, IngestSummary, MarketDataStore } from './market-data-store.js';
-import type { BarInterval, BarSession, DataQualityResult, Instrument, PriceAdjustment, StoredBar, StoredQuote } from './market-data-types.js';
+import type { BarInterval, BarSession, DataQualityResult, Instrument, MarketQuote, PriceAdjustment, StoredBar, StoredQuote } from './market-data-types.js';
 import { calendarForInstrument } from './sessions.js';
 import { toUtcIso } from './time.js';
 
@@ -74,7 +74,7 @@ export class MarketDataService {
     return result;
   }
 
-  async refreshQuote(instrumentId: string, providerId: string): Promise<{ quote: StoredQuote | null; summary: IngestSummary }> {
+  async refreshQuote(instrumentId: string, providerId: string): Promise<{ quote: StoredQuote | null; summary: IngestSummary; fetched: MarketQuote }> {
     const instrument = this.instrument(instrumentId);
     const provider = this.provider(providerId);
     const now = toUtcIso(this.clock().getTime());
@@ -83,7 +83,7 @@ export class MarketDataService {
     const { source, quote } = await provider.getQuote({ instrument, mapping });
     await this.deps.store.registerSource(source);
     const summary = await this.deps.store.ingestQuotes(instrument, [quote], now);
-    return { quote: await this.deps.store.latestQuote({ instrumentId, source: source.sourceId, asOf: toUtcIso(Math.max(this.clock().getTime(), Date.parse(quote.availableAt))) }), summary };
+    return { quote: await this.deps.store.latestQuote({ instrumentId, source: source.sourceId, asOf: toUtcIso(Math.max(this.clock().getTime(), Date.parse(quote.availableAt))) }), summary, fetched: quote };
   }
 
   async syncCorporateActions(instrumentId: string, providerId: string, from: string, to: string): Promise<IngestSummary[]> {

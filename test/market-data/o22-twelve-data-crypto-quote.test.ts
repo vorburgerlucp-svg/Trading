@@ -1,6 +1,8 @@
-// O22 B8: the currency of a Twelve Data crypto quote (ETH/USD) comes only from the response, as an ISO code: `currency`, else
+// O22 B8: the currency of a Twelve Data crypto quote (ETH/USD) comes from the response, as an ISO code: `currency`, else
 // `currency_quote`. A currency name is not translated, the symbol is never parsed for a currency, and conflicting stated currencies
-// are a schema error. Without a stated code the quote has no currency, and the demo gate refuses it (INSTRUMENT_NOT_USD).
+// are a schema error. A quote that states nothing falls back to the /cryptocurrencies reference (o22-twelve-data-crypto-reference.test.ts);
+// here every path answers with the quote body, so that reference is unusable and the quote has no currency: the demo gate refuses it
+// (INSTRUMENT_NOT_USD).
 // TEST DOUBLE: scripted HTTP answers shaped after the official documentation; the numbers are synthetic. No network.
 import { describe, expect, it } from 'vitest';
 import { MarketDataError } from '../../src/market-data/market-data-provider.js';
@@ -51,8 +53,12 @@ describe('O22 Twelve Data crypto quote currency', () => {
     expect((await quoteOf(quoteBody({ currency_quote: 'US Dollar' }))).currency).toBeUndefined();
   });
 
-  it('no stated currency gives no currency: the symbol "ETH/USD" is never parsed for one', async () => {
-    expect((await quoteOf(quoteBody())).currency).toBeUndefined();
+  it('no stated currency and no usable reference gives no currency: the symbol "ETH/USD" is never parsed for one', async () => {
+    const h = provider(quoteBody());
+    const { quote } = await h.p.getQuote({ instrument: ETH_USD, mapping: MAPPING });
+    expect(quote.currency).toBeUndefined();
+    expect(quote.currencyOrigin).toEqual({ kind: 'unresolved', reason: 'REFERENCE_UNAVAILABLE' });
+    expect(h.calls.map((c) => c.pathname)).toEqual(['/quote', '/cryptocurrencies']);
   });
 
   it('two different stated currencies are a schema error', async () => {

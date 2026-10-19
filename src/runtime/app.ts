@@ -4,7 +4,7 @@
 // real-account route.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { BAR_INTERVALS, type BarInterval } from '../market-data/market-data-types.js';
+import { BAR_INTERVALS, type BarInterval, type CurrencyOrigin } from '../market-data/market-data-types.js';
 import { RuntimeApiError, errorBody, toRuntimeApiError } from './errors.js';
 import type { OperatorAuthenticator, OperatorIdentity } from './operator-auth.js';
 
@@ -33,6 +33,8 @@ export interface InstrumentSearchItem {
   mic: string | null;
   currency: string | null;
   timezone: string | null;
+  /** O22: present when the currency did not come from the search row itself (crypto pairs: the provider's reference data). */
+  currencyOrigin?: CurrencyOrigin;
 }
 
 export interface BarsRequest {

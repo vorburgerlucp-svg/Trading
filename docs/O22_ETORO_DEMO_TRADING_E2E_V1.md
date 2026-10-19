@@ -9,7 +9,7 @@ Status: **implemented and tested offline; not released.** Base: `519233d` (merge
   - the hand-opened ETH position makes the decision `CAPACITY_BLOCK`.
 - `BUILD_LOCKS.etoroDemoExecution = true` refuses every demo write in this build.
 - The demo account safety source (B2, variant A, section 5) is built and wired. It answers `null` (`PORTFOLIO_SAFETY_NOT_CONNECTED`) only when its one `/demo/pnl` read fails or is refused; the evidence gate itself is open. With the hand-opened position, its decision refuses every cycle open with `CAPACITY_BLOCK`.
-- The local registry was read on 2026-10-19 (section 15): all 13 migrations applied, but no instrument at all, so no ETH/USD and no mapping for 100001.
+- 2026-10-19 (section 15): the local registry held no instrument. Twelve Data states no currency for ETH/USD in `/symbol_search` or `/quote`; O22 now takes it from Twelve Data's `/cryptocurrencies` reference (`currency_quote` "US Dollar" → `USD` by a reviewed name table). ETH/USD is registered once (`ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`), its production quote showed `USD` at 51.7 s, and the eToro mapping dry run for 100001 plans the mapping. **The mapping is not applied.**
 - The first demo buy therefore cannot happen with this build. Section 9 lists what is still open; section 8 gives the exact sequence for afterwards.
 
 Naming note: an unrelated, uncommitted work package "O22 OpenAI shadow provider" exists in another local worktree (with a migration `014_model_run_usage.sql`). This package uses its own file and branch names, adds no migration, and touches none of those files. The numbering should be reconciled before both are merged.
@@ -41,6 +41,8 @@ Naming note: an unrelated, uncommitted work package "O22 OpenAI shadow provider"
 | `etoro-pnl-validation.ts` | `parseDemoPnlValuationInput`: `credit`, `accountCurrencyId` and the external costs, with the same strictness. |
 | `etoro-readonly.ts`, `etoro-transport.ts`, `etoro-instrument-metadata.ts`, `etoro-observe-cli.ts` | One fixed metadata read, `instrument.metadata.100001`. |
 | `etoro-instrument-mapping.ts`, `etoro-map-instrument-cli.ts`, `package.json` | The governed mapping (plan and apply), and `npm run etoro:map-instrument` (dry run by default). |
+| `market-data/providers/twelve-data-crypto-reference.ts`, `twelve-data.ts`, `twelve-data-schema.ts` | The quote currency of a crypto pair from `/cryptocurrencies` (section 15): strict parser, unique row, reviewed name table, cached reference, origin. |
+| `market-data/market-data-types.ts`, `market-data-provider.ts`, `market-data-service.ts`, `bar-validation.ts`, `runtime/services.ts`, `runtime/app.ts` | `CurrencyOrigin` on quotes and candidates (not hashed, not stored); the registry event names the origin; `/api/market/quote` reports `currency` and `currencyOrigin`. |
 | `runtime/compose.ts`, `bootstrap.ts`, `services.ts`, `app.ts` | Cycle policy; the demo account safety source wired, with the log `etoro-demo-account-valuations`; `GET /api/broker/etoro/demo/cycle`. |
 | Tests | Section 10. |
 
@@ -167,9 +169,9 @@ Each step is a separate operator action. Every STOP ends this cycle.
 1. **Evidence for the valuation. Done** (2026-10-18, section 12): two non-empty reads, G1 and G2 proved, and the evidence record set with both reports.
 2. **Identity.**
    - Metadata read. **Done** (2026-10-18, section 14): `accepted`, id 100001, type `Crypto`.
-   - Register ETH/USD (`POST /api/instruments/register`). **Open:** the registry is empty (2026-10-19), and the runtime has no `TWELVE_DATA_API_KEY` (section 15).
-   - Check the production ETH/USD quote: `USD`, valid timestamp, at most 60 s old.
-   - Dry-run `etoro:map-instrument`, then apply it with confirmation.
+   - Register ETH/USD (`POST /api/instruments/register`). **Done** (2026-10-19, section 15): `ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`.
+   - Check the production ETH/USD quote: `USD`, valid timestamp, at most 60 s old. **Done** (2026-10-19): `USD` from the reference, 51.7 s.
+   - Dry-run `etoro:map-instrument` (**done**, 2026-10-19: plan accepted, nothing written), then apply it with confirmation (**open**, a human decision).
 3. **Write permission.** The operator confirms a demo write scope from the `/me` result.
 4. **Clear the account.** The operator closes the hand-opened ETH position in the eToro UI. NEXUS does not touch it.
 5. **Release.** A separate reviewed change opens `BUILD_LOCKS.etoroDemoExecution` for this build. Set `ETORO_ENABLED=1`, `ETORO_TRADING_MODE=demo`, `ETORO_DEMO_EXECUTION_ENABLED=1` and operator auth. `TRADING_MODE=paper` and `ALLOW_LIVE_TRADING=false` stay.
@@ -204,11 +206,11 @@ No ledger booking at any step.
 | B1 | `BUILD_LOCKS.etoroDemoExecution = true` | **open** (by design) | a separate, approved code change, last |
 | B2 | Demo portfolio safety | **evidence closed; source active.** G1 and G2 are proved (section 12), and the evidence record cites both reports. The decision is still `CAPACITY_BLOCK` because of the hand-opened position. | The account must fit the unchanged limits: the operator closes the hand-opened position in the UI. No limit is raised. |
 | B3 | Identity of 100001 | **confirmed** (section 14): Crypto, ETH, Ethereum | — (the quote currency of the pair and the product type remain under B6/B8) |
-| B4 | Governed mapping path | **tool closed** (`etoro:map-instrument`, dry run and apply); not applied. The read-only dry run against the local registry refuses with `MAPPING_INSTRUMENT_INVALID` (no ETH/USD instrument, 2026-10-19) | ETH/USD registered; then the dry run, and the operator's apply |
+| B4 | Governed mapping path | **ready to apply**: ETH/USD registered; the read-only dry run with the real id plans `etoro / 100001 → ins_adcd4ec5-…` by `luc-vorburger` and writes nothing (2026-10-19). Not applied. | the operator's `--apply --confirm-human-mapping` (section 15) |
 | B5 | Demo write permission | **not proved**: no `/me` scopes are recorded in the repository or its evidence | the `scopes` from the operator's `/me` result (no new call needed if it is at hand) |
 | B6 | `settlementType` | **narrowed**: not sent, but verified after the fill and flagged unless `real` | decide whether a non-`real` result is acceptable for the test |
 | B7 | AMBIGUOUS close | accepted (unchanged): stays AMBIGUOUS, no further close, manual UI check | — |
-| B8 | Production ETH/USD quote | **open**: no `TWELVE_DATA_API_KEY` in the local environment (2026-10-19); registration and quote not checked | the key in the runtime environment; then the registration and one quote check |
+| B8 | Production ETH/USD quote | **closed for the currency** (2026-10-19): production quote, `currency: USD` from the `/cryptocurrencies` reference, 51.7 s old. Freshness must hold again at create and execute (`observedAt` is the last minute candle). | — (refresh the quote right before create and before execute) |
 
 ## 10. Tests
 
@@ -221,12 +223,13 @@ No ledger booking at any step.
 | `o22-account-safety-cycle.test.ts` (10) | Evidence released for the module only: <ul><li>one GET per evaluation; null on 4xx/5xx, timeout or invalid response;</li><li>risk day start, peak and new day;</li><li>DATA_HOLD not recorded; kill switch;</li><li>the cycle with the real source: open refused with the hand-opened position;</li><li>the position appearing before execute (refused, budget kept);</li><li>a failed read refuses the open;</li><li>the full open; the close without a safety read;</li><li>an ambiguous close is never repeated.</li></ul> |
 | `o22-cycle-reconciliation.test.ts` (8), `o22-safety-readiness.test.ts` (5) | Reconciliation and readiness |
 | `o22-instrument-metadata.test.ts` (23), `o22-governed-mapping.test.ts` (6), `o22-map-instrument-cli.test.ts` (6) | Metadata read, mapping, tool |
-| `test/market-data/o22-twelve-data-crypto-quote.test.ts` (8) | Quote currency: `currency`, ISO `currency_quote`, no translation of names, never from the symbol; `INSTRUMENT_NOT_USD` without a stated currency |
+| `test/market-data/o22-twelve-data-crypto-quote.test.ts` (8) | Quote currency: `currency`, ISO `currency_quote`, no translation of stated names, never from the symbol; without a usable reference no currency, and `INSTRUMENT_NOT_USD` |
+| `test/market-data/o22-twelve-data-crypto-reference.test.ts` (23) | `/cryptocurrencies`: the live ETH/USD answer resolves to USD with its origin; unique row (none, several, other pairs); unknown names (no near match, no case folding); ISO code; never the symbol or `currency_base`; venue listed; strict parser; reuse within 24 h, concurrent reads shared, a refused read not kept; a stated quote currency never replaced; a contradiction with the instrument currency refused; stocks unchanged; registration through the runtime services records the origin |
 | `test/runtime/o22-runtime.test.ts` (9) | The route; the production wiring with recorded evidence (creating an open reads `/demo/pnl` once, the hand-opened position blocks it, 0 writes); an empty account (risk-approved, execute still `EXECUTION_LOCKED_IN_BUILD`); every lock closed |
 | `test/pg/o22-cycle-budget.pg.test.ts` (3), `test/pg/o22-account-safety.pg.test.ts` (1) | Budget across pools; a shared risk day across processes and a restart |
 | `test/pg/o22-map-instrument.pg.test.ts` (4), `test/pg/o22-registry-inspect.pg.test.ts` (5) | Mapping dry run on a throwaway database (writes nothing); read-only registry inspection |
 
-Results: in the PR description. Local run 2026-10-19 at `141a479`: `npm run typecheck` clean; `vitest --project unit --project pg` 169 files, 3037 tests, all passed (143 of them in the 16 O22 files above).
+Results: in the PR description. Local run 2026-10-19 with the crypto reference change: `npm run typecheck` clean; `vitest --project unit --project pg` 170 files, 3060 tests, all passed (166 of them in the 17 O22 files above).
 
 ## 12. Live observation of a non-empty /demo/pnl (2026-10-18)
 
@@ -334,14 +337,14 @@ Results: in the PR description. Local run 2026-10-19 at `141a479`: `npm run type
 
 ### Existing registry entries
 
-On 2026-10-18 the registry could not be checked (no database reachable). **Superseded by section 15:** on 2026-10-19 the local NEXUS database was read read-only; it holds **no instrument**, so no ETH/USD and no mapping. The repository contains **no** ETH instrument either (only TEST ETH/USD fixtures in tests). The mapping tool refuses a second eToro mapping, and the registry refuses a second mapping of the same Twelve Data symbol in an overlapping period, so a duplicate cannot be written either way.
+On 2026-10-18 the registry could not be checked (no database reachable). **Superseded by section 15:** on 2026-10-19 the local NEXUS database was read read-only; it held **no instrument**. ETH/USD was then registered once (`ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`, section 15); the eToro mapping for 100001 is planned by a dry run, not applied. The repository contains **no** ETH instrument either (only TEST ETH/USD fixtures in tests). The mapping tool refuses a second eToro mapping, and the registry refuses a second mapping of the same Twelve Data symbol in an overlapping period, so a duplicate cannot be written either way.
 
 ### Missing before the mapping can be applied
 
 1. **Look up or create the NEXUS ETH/USD instrument in the operator's registry.**
    - With `DATABASE_URL`: list the instruments and look for `crypto` / `ETH/USD`.
    - If there is none: `POST /api/instruments/register` with Twelve Data `ETH/USD`.
-   - Not verifiable offline: whether Twelve Data's symbol search returns `currency: USD` for `ETH/USD`. Without it, the registration is refused ("metadata incomplete").
+   - Twelve Data's symbol search returns no currency for `ETH/USD` (observed 2026-10-19); the currency comes from the `/cryptocurrencies` reference (section 15).
 2. **Requirements for the mapping:** the instrument must be `crypto`, `USD` and active.
 3. **The governed mapping:** a dry run with `DATABASE_URL`, then `--apply --confirm-human-mapping`. That is a human decision.
 
@@ -354,13 +357,13 @@ On 2026-10-18 the registry could not be checked (no database reachable). **Super
   - NEXUS never closes it. A buy while it exists would also put two ETH positions in the account, which the identification by `positionID` keeps apart.
 - **The ETH/USD quote (B8).**
   - The gate needs a production quote at create **and** at execute, no older than 60 s, with `currency: 'USD'`.
-  - If the Twelve Data crypto quote does not state its currency, the gate refuses (`INSTRUMENT_NOT_USD`). It fails closed, but the cycle cannot start. This must be checked with production market data before the release.
+  - The Twelve Data crypto quote does not state its currency (observed 2026-10-19). It now comes from the `/cryptocurrencies` reference (section 15); without a usable reference the gate refuses (`INSTRUMENT_NOT_USD`).
   - Twelve Data's ETH/USD (an exchange or aggregate price) is not eToro's execution price. The order is by **amount**, so the quote only checks freshness and sanity; the units come from eToro.
 - **Currency assumption.** If eToro's ETH were not quoted in USD, `openRate` and the units/rate arithmetic would not be USD. The valuation does not depend on it: `amount` and `pnL` are in the account currency, USD (G2).
 
 ## 15. Registry, database and ETH/USD market data (B4, B8)
 
-### Database status (2026-10-19, read-only check)
+### Database status (2026-10-19, read-only check before the registration; superseded where the registration below changed it)
 
 The operator has since set up the local NEXUS database (PostgreSQL 17 on loopback, database `nexus`, an application role and a read-only role, passwords only in the user's `pgpass.conf`). It was read with the read-only role and `default_transaction_read_only=on`; no credential was printed, no migration was run and no database was created.
 
@@ -406,33 +409,48 @@ Its bootstrap created the two empty log heads `instruments` and `portfolio-kill-
 
 **Integration as built.**
 - `TwelveDataMarketDataProvider.getQuote` reads `GET /quote?symbol=ETH/USD`. It refuses a quote for another symbol.
-- `observedAt` is `last_quote_at` (else `timestamp`). The demo gate needs it ≤ 60 s old, from a production source, at create and at execute.
+- `observedAt` is `last_quote_at` (else `timestamp`), the start of the last minute candle. The demo gate needs it ≤ 60 s old, from a production source, at create and at execute.
 
-**Currency.**
-- Before O22, the quote currency came only from `currency`, and only as an ISO code.
-- The Twelve Data documentation lists `currency` for `/quote` but shows no crypto example. For crypto pairs it documents `currency_base` / `currency_quote` (on the cryptocurrencies reference).
-- O22 change: if `currency` is absent, an **ISO** `currency_quote` is used. A name such as "US Dollar" is **not** translated. The symbol `ETH/USD` is **never** parsed for a currency. `currency` and `currency_quote` that disagree are a schema error.
-- Without a stated ISO code the quote has no currency, and the gate refuses with `INSTRUMENT_NOT_USD` (tested).
+**What Twelve Data states (production, 2026-10-19).**
+- `/symbol_search?symbol=ETH/USD`: three rows (Binance, Huobi, Bitfinex), `Digital Currency`, time zone UTC, **no currency**. The registration therefore refused ETH/USD (`instrument metadata is incomplete or invalid`, HTTP 502 at the route), before any write.
+- `/quote?symbol=ETH/USD`: production, fresh, but `currency`, `currency_base` and `currency_quote` are **all absent**. The gate would refuse every quote with `INSTRUMENT_NOT_USD`.
+- `/cryptocurrencies?symbol=ETH/USD` (documented reference for crypto pairs: `currency_base` / `currency_quote` are **names**, documented example "Bitcoin" / "US Dollar"; 1 API credit): `status: ok`, **exactly one row**, `symbol: ETH/USD`, `currency_base: "Ethereum"`, `currency_quote: "US Dollar"`, `available_exchanges: Binance, Bitfinex, Huobi`. Evidence: `docs/evidence/O22_twelvedata_cryptocurrencies_ETH_USD_2026-10-19.json` (the full answer; it holds no key).
 
-**Not verified (no external call made):** whether Twelve Data's ETH/USD `/quote` actually states `USD`, and whether `symbol_search` returns ETH/USD with `currency: USD`. The registration needs the latter; the gate needs the former.
+**The currency of a crypto pair from the reference (`twelve-data-crypto-reference.ts`).**
+- **Used only when nothing is stated.** A quote that states `currency` or an ISO `currency_quote` keeps it; two different stated codes stay a schema error. A stated value that is not an ISO code (for example "US Dollar" in the quote) is not translated and **not** replaced by the reference (`STATED_CURRENCY_NOT_ISO`). Only a crypto quote that states no currency at all reads the reference; other asset classes are unchanged. At registration, only a crypto search row without currency reads it.
+- **Unique row.** Exactly one row whose `symbol` is the requested provider symbol; none is `NO_REFERENCE`, several are `AMBIGUOUS_REFERENCE`. A known venue (the mapping's exchange) must be in `available_exchanges`, else `EXCHANGE_NOT_LISTED`.
+- **Only `currency_quote`, and only explicitly.** An ISO code is used as it is (`rule: iso_code`). A name is used only through the frozen table `twelvedata-currency-names:v1` = `{ "US Dollar": "USD" }`; any other name is `UNKNOWN_CURRENCY_NAME` (no near match, no case folding). The symbol, `currency_base` and the instrument's display name are never read for a currency.
+- **Contradiction.** A reference currency that differs from the registered instrument's currency is a schema error; the quote is refused.
+- **Origin.** The quote and the registration candidate carry `currencyOrigin`: `{ kind: 'reference', source: 'twelvedata:/cryptocurrencies#currency_quote', stated: 'US Dollar', rule: 'twelvedata-currency-names:v1', retrievedAt }` (or `stated` with the field, or `unresolved` with the reason). `/api/market/quote` reports `currency` and `currencyOrigin` for the quote it just fetched. The registry event of a registration names the origin in its reason. The origin is not part of the quote's content hash and is not stored with the quote: `market_quotes` has no column for it, and no migration is added.
+- **API limits.** One reference read per symbol is reused for 24 h (`CRYPTO_REFERENCE_TTL_MS`) by the provider instance; concurrent callers share one read; a failed read is not kept. A failed or refused reference read leaves a quote without currency (`REFERENCE_UNAVAILABLE`, the gate refuses); at registration it fails the registration.
 
-### Planned mapping (unchanged, dry run only)
+### ETH/USD registered, quote checked, mapping dry run (2026-10-19)
+
+The worktree `.env` (ignored by Git, readable only by the operator) holds the existing `DATABASE_URL`, the operator's `TWELVE_DATA_API_KEY`, `NEXUS_OPERATOR_ID=luc-vorburger` and a random 64-hex `NEXUS_OPERATOR_TOKEN`. The runtime ran on loopback with `TRADING_MODE=paper`, `ALLOW_LIVE_TRADING=false`, eToro not configured, every build lock `true`.
+
+| Step | Result |
+|---|---|
+| Registry before | read-only: 0 instruments |
+| `POST /api/instruments/register` `{ "providerSymbol": "ETH/USD", "validFrom": "2026-10-19T11:27:45.000Z" }` (once) | HTTP 201: **`ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`**, `ETH/USD`, "Ethereum US Dollar", `crypto`, **`USD`**, time zone UTC, exchange Binance (the first search row), active. `currencyOrigin`: reference, "US Dollar", `twelvedata-currency-names:v1`, read at 11:27:45.966Z. |
+| Registry after | read-only `registry:inspect`: 1 instrument; checks `crypto: true`, `quotedInUsd: true`, `symbolIsEthUsd: true`, open Twelve Data mapping `ETH/USD @ Binance`, open eToro mapping none. The event `instrument_registered` (by `system/nexus-runtime`) names the currency origin. |
+| `GET /api/market/quote?instrumentId=ins_adcd4ec5-…` | `source: twelvedata:quote:production`, last 2418.71, **`currency: USD`** (origin: the same reference read, no second `/cryptocurrencies` request), `observedAt` 11:27:00Z, `retrievedAt` 11:27:51.681Z: **51.7 s old** (≤ 60 s), `usableForTrading: true`. One quote row stored. |
+| Mapping dry run (read-only role, `default_transaction_read_only=on`) | `npm run etoro:map-instrument -- --instrument-id=ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc --metadata-report=docs/evidence/O22_etoro_instrument_metadata_100001_2026-10-18.json --valid-from=2026-10-19T11:28:13.000Z --operator=luc-vorburger`: `mode: dry_run`, mapping `{ instrumentId: ins_adcd4ec5-…, provider: etoro, providerSymbol: 100001, providerInstrumentId: 100001, validFrom: 2026-10-19T11:28:13.000Z }`, `by: human/luc-vorburger`, `reportSha256: 3e898fcd…340528c`. Afterwards still exactly 1 mapping (Twelve Data) and 1 log record. |
+| Not done | no mapping apply, no eToro request, no order, no ledger booking; build locks, risk limits and kill switch unchanged (kill switch log at sequence 0). |
+
+**Freshness note.** `observedAt` is the start of the last minute candle, so a quote is between 0 and about 60 s old when fetched, and older afterwards. The gate's 60 s limit is not relaxed: the quote must be refreshed right before create and right before execute, and a refusal for staleness is expected behaviour, not a fault.
+
+### Planned mapping (dry run done, not applied)
 
 - **Evidence:** `docs/evidence/O22_etoro_instrument_metadata_100001_2026-10-18.json` (sha256 `3e898fcd…340528c`): 100001, Crypto, ETH, Ethereum.
-- **Plan:** `etoro / 100001 / 100001 → <NEXUS ETH/USD>`, `validFrom` set by the human, actor human, no exchange.
-- **Conditions:** It needs an existing, active, crypto, USD instrument. It refuses a duplicate and never creates an instrument.
+- **Plan:** `etoro / 100001 / 100001 → ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`, `validFrom` set by the human, actor `human/luc-vorburger`, no exchange.
+- **Conditions:** It needs an existing, active, crypto, USD instrument (met). It refuses a duplicate and never creates an instrument.
 
-### Missing before registration and mapping
+### Remaining before the mapping is applied
 
-1. **Read the operator's registry. Done** (2026-10-19, above): no ETH/USD instrument.
-2. **Register ETH/USD** (approved by the operator for this preparation; blocked only by the missing `TWELVE_DATA_API_KEY`). It is a productive write and an authenticated Twelve Data request.
-   - Run the runtime with `TWELVE_DATA_API_KEY` (production) and `POST /api/instruments/register` `{ "providerSymbol": "ETH/USD", "validFrom": "<UTC now>" }`.
-   - It is refused unless Twelve Data states `currency` and a time zone for it.
-   - If ETH/USD already exists: no registration, and nothing is duplicated.
-3. **Quote check.** This also needs approval: an authenticated Twelve Data request.
-   - `GET /api/market/quote?instrumentId=<ETH/USD>` must show `currency: "USD"` and a production source.
-   - If it shows no currency, the cycle cannot start: the gate refuses, and B8 stays open.
-4. **Mapping.** `npm run etoro:map-instrument -- --instrument-id=<ETH/USD> --metadata-report=docs/evidence/O22_etoro_instrument_metadata_100001_2026-10-18.json --valid-from=<UTC> --operator=<id>` as a dry run (read-only); then, by a separate human decision, `--apply --confirm-human-mapping`.
+1. **Read the operator's registry. Done.**
+2. **Register ETH/USD. Done** (`ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`).
+3. **Quote check. Done** (`USD` from the reference, 51.7 s).
+4. **Mapping.** The dry run is done. The apply is a separate human decision: the same command with a fresh `--valid-from` (not in the future), first as a dry run, then with `--apply --confirm-human-mapping`, using a `DATABASE_URL` with the application role.
 
 ## 16. Safety boundaries (unchanged)
 

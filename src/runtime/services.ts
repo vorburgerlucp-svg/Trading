@@ -10,6 +10,7 @@ import {
   INTERVAL_MS,
   type BarInterval,
   type BarSession,
+  type CurrencyOrigin,
   type Instrument,
   type PriceAdjustment,
   type StoredBar,
@@ -95,7 +96,15 @@ function toSearchItem(candidate: InstrumentCandidate, provider: string, registry
     mic: pattern(candidate.mic, /^[A-Z0-9]{4}$/),
     currency: pattern(candidate.currency, /^[A-Z0-9]{3,10}$/),
     timezone: validTimezone(candidate.timezone),
+    ...(candidate.currencyOrigin !== undefined ? { currencyOrigin: candidate.currencyOrigin } : {}),
   };
+}
+
+/** O22: the registry event names where a currency that the search row did not state came from. */
+function registrationReason(origin: CurrencyOrigin | undefined): string {
+  const base = 'explicit local runtime instrument registration with provider mapping';
+  if (origin?.kind !== 'reference') return base;
+  return base + '; currency from ' + origin.source + ' "' + origin.stated + '" by rule ' + origin.rule + ', reference read at ' + origin.retrievedAt;
 }
 
 function adjustmentFor(mode: MarketDataMode): PriceAdjustment {
@@ -128,13 +137,15 @@ function barJson(bar: StoredBar): unknown {
   };
 }
 
-function quoteJson(quote: StoredQuote, freshness: 'fresh' | 'stale', mode: MarketDataMode): unknown {
+function quoteJson(quote: StoredQuote, freshness: 'fresh' | 'stale', mode: MarketDataMode, currencyOrigin: CurrencyOrigin | null): unknown {
   return {
     instrumentId: quote.instrumentId,
     source: quote.source,
     last: quote.last.toString(),
     bid: quote.bid === undefined ? null : quote.bid.toString(),
     ask: quote.ask === undefined ? null : quote.ask.toString(),
+    currency: quote.currency ?? null,
+    currencyOrigin,
     observedAt: quote.observedAt,
     availableAt: quote.availableAt,
     retrievedAt: quote.retrievedAt,
@@ -246,7 +257,7 @@ export class RuntimeServiceImpl implements RuntimeServices {
       providerSymbol: item.providerSymbol,
       validFrom: request.validFrom,
       ...(item.exchange !== null ? { exchange: item.exchange } : {}),
-    }, { at: now, by: { kind: 'system', id: 'nexus-runtime' }, reason: 'explicit local runtime instrument registration with provider mapping' });
+    }, { at: now, by: { kind: 'system', id: 'nexus-runtime' }, reason: registrationReason(candidate.currencyOrigin) });
     return { ...item, instrumentId: instrument.instrumentId };
   }
 
@@ -296,11 +307,13 @@ export class RuntimeServiceImpl implements RuntimeServices {
   async quote(instrumentId: string): Promise<unknown> {
     const provider = this.requireProvider();
     this.requireInstrument(instrumentId);
-    const { quote } = await this.deps.marketData.refreshQuote(instrumentId, provider.providerId);
+    const { quote, fetched } = await this.deps.marketData.refreshQuote(instrumentId, provider.providerId);
     if (!quote) throw new MarketDataError('provider_unavailable', provider.providerId, 'no quote could be stored');
     const ageMs = Date.parse(this.now()) - Date.parse(quote.observedAt);
     const freshness = ageMs >= 0 && ageMs <= QUOTE_MAX_AGE_MS ? 'fresh' : 'stale';
-    return quoteJson(quote, freshness, this.deps.marketDataMode);
+    // The origin is known only for the quote just fetched; for an older stored revision it is reported as unknown (null).
+    const sameQuote = fetched.source === quote.source && fetched.observedAt === quote.observedAt && (fetched.currency ?? null) === (quote.currency ?? null);
+    return quoteJson(quote, freshness, this.deps.marketDataMode, sameQuote ? fetched.currencyOrigin ?? null : null);
   }
 
   async runQuant(request: QuantRequest): Promise<unknown> {

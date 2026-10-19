@@ -18,6 +18,7 @@ import {
   type BarRevisionKnowledge,
   type BarSession,
   type CorporateAction,
+  type CurrencyOrigin,
   type Instrument,
   type LicenseClass,
   type MarketBar,
@@ -32,7 +33,8 @@ import { BAR_VINTAGE_POLICY_VERSION, DEFAULT_CAPTURE_WINDOW_MS, barVintageOf } f
 import { addDays, localDateOf, parseUtc, toUtcIso, zonedToUtc } from '../time.js';
 import { REAL_DEPS, ResilientCaller, parseRetryAfter, type FetchLike, type HttpResponseLike, type ResilienceDeps, type ResiliencePolicy } from './resilience.js';
 import { assertBodyBound, BodyTransportError, readBoundedUtf8, type BodyErrorCode } from './bounded-http-body.js';
-import { errorBody, parseDividends, parseQuote, parseSplits, parseSymbolSearch, parseTimeSeries, sanitizeText, type TdTimeSeries } from './twelve-data-schema.js';
+import { errorBody, parseCryptocurrencies, parseDividends, parseQuote, parseSplits, parseSymbolSearch, parseTimeSeries, sanitizeText, type TdCryptoPair, type TdTimeSeries } from './twelve-data-schema.js';
+import { resolveCryptoQuoteCurrency, type CryptoReferenceCurrency } from './twelve-data-crypto-reference.js';
 
 const PROVIDER = 'twelvedata';
 const MAX_OUTPUT = 5000;
@@ -69,6 +71,12 @@ const TYPE_MAP: Readonly<Record<string, AssetClass>> = {
   Index: 'index',
 };
 const ISO_CURRENCY = /^[A-Z]{3}$/;
+/**
+ * O22: how long one /cryptocurrencies answer is reused per symbol (1 API credit per read). It is reference data, not a price, so a
+ * quote does not read it again within this window; a failed read is not kept. At most CRYPTO_REFERENCE_MAX_ENTRIES symbols are held.
+ */
+export const CRYPTO_REFERENCE_TTL_MS = 24 * 60 * 60 * 1000;
+const CRYPTO_REFERENCE_MAX_ENTRIES = 256;
 const QUERY = /^[A-Za-z0-9.\-/:^ ]{1,64}$/;
 
 export interface TwelveDataOptions {
@@ -135,6 +143,8 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
   private readonly calendarFor: (instrument: Instrument) => TradingCalendar | null;
   /** Non-secret settings only. The key is NEVER kept in an enumerable field (JSON/inspect/log safe). */
   private readonly settings: { environment: 'production' | 'demo'; license?: LicenseClass; licenseNote?: string; maxPages?: number; minimalRequests: boolean };
+  /** O22: the /cryptocurrencies answers by upper-case symbol, with the time they were requested. Concurrent callers share one read. */
+  private readonly cryptoReference = new Map<string, { readonly atMs: number; readonly pairs: Promise<TdCryptoPair[]> }>();
 
   constructor(options: TwelveDataOptions) {
     if (typeof options.apiKey !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(options.apiKey)) throw new MarketDataError('not_configured', PROVIDER, 'API key missing or malformed');
@@ -266,11 +276,36 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
 
   async getInstrument(providerSymbol: string, hint: { mic?: string; exchange?: string } = {}): Promise<InstrumentCandidate | null> {
     const candidates = await this.searchInstruments(providerSymbol);
-    return candidates.find((c) =>
+    const found = candidates.find((c) =>
       c.providerSymbol.toUpperCase() === providerSymbol.toUpperCase()
       && (!hint.mic || (c.mic !== undefined && operatingMic(c.mic) === operatingMic(hint.mic)))
       && (!hint.exchange || c.exchange === hint.exchange)
     ) ?? null;
+    // O22: a crypto pair's search row states no currency; only then is it taken from the reference data (a read error propagates).
+    if (found === null || found.assetClass !== 'crypto' || (found.currency ?? '').trim() !== '') return found;
+    const resolved = await this.cryptoReferenceCurrency(found.providerSymbol, found.exchange);
+    const { currency: _stated, ...rest } = found;
+    return resolved.kind === 'resolved'
+      ? { ...rest, currency: resolved.currency, currencyOrigin: resolved.origin }
+      : { ...rest, currencyOrigin: { kind: 'unresolved', reason: resolved.reason } };
+  }
+
+  /** O22: the reference currency of a crypto pair (twelve-data-crypto-reference.ts), from the cached or one new /cryptocurrencies read. */
+  private async cryptoReferenceCurrency(providerSymbol: string, exchange: string | undefined): Promise<CryptoReferenceCurrency> {
+    const key = providerSymbol.toUpperCase();
+    const nowMs = this.clock().getTime();
+    let entry = this.cryptoReference.get(key);
+    if (entry === undefined || nowMs - entry.atMs > CRYPTO_REFERENCE_TTL_MS || nowMs < entry.atMs) {
+      const created = { atMs: nowMs, pairs: this.request('/cryptocurrencies', { symbol: providerSymbol }).then(parseCryptocurrencies) };
+      created.pairs.catch(() => {
+        if (this.cryptoReference.get(key) === created) this.cryptoReference.delete(key);
+      });
+      this.cryptoReference.delete(key);
+      this.cryptoReference.set(key, created);
+      while (this.cryptoReference.size > CRYPTO_REFERENCE_MAX_ENTRIES) this.cryptoReference.delete(this.cryptoReference.keys().next().value!);
+      entry = created;
+    }
+    return resolveCryptoQuoteCurrency(await entry.pairs, providerSymbol, exchange, entry.atMs);
   }
 
   // -------------------------------------------------------------------------
@@ -422,15 +457,33 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
     const { instrument, mapping } = request;
     const q = parseQuote(await this.request('/quote', { symbol: mapping.providerSymbol, ...(this.settings.minimalRequests ? {} : venueParams(instrument, mapping)) }));
     if (q.symbol.toUpperCase() !== mapping.providerSymbol.toUpperCase()) throw new MarketDataError('schema_invalid', PROVIDER, 'quote is for another symbol');
-    // The quote currency comes only from the response: `currency`, else (O22, crypto pairs) `currency_quote`, and only as an ISO code.
-    // A name such as "US Dollar" is not translated, the symbol (e.g. "ETH/USD") is never parsed for it, and two different stated
-    // currencies are a schema error. Without a stated ISO code the quote has no currency, and the demo gate refuses it.
+    // The quote currency comes from the response: `currency`, else (O22, crypto pairs) `currency_quote`, and only as an ISO code.
+    // A name stated in the quote, such as "US Dollar", is not translated, the symbol (e.g. "ETH/USD") is never parsed for it, and two
+    // different stated currencies are a schema error. Only when the quote of a crypto pair states no currency at all is it taken from
+    // the reference data (O22); a stated value, even one that cannot be used, is never replaced. Without a currency the demo gate refuses.
     const statedCurrency = q.currency && ISO_CURRENCY.test(q.currency) ? q.currency : undefined;
     const statedQuoteCurrency = q.currencyQuote && ISO_CURRENCY.test(q.currencyQuote) ? q.currencyQuote : undefined;
     if (statedCurrency !== undefined && statedQuoteCurrency !== undefined && statedCurrency !== statedQuoteCurrency) {
       throw new MarketDataError('schema_invalid', PROVIDER, 'quote states two different currencies');
     }
-    const currency = statedCurrency ?? statedQuoteCurrency;
+    let currency = statedCurrency ?? statedQuoteCurrency;
+    let currencyOrigin: CurrencyOrigin | undefined = currency === undefined ? undefined : { kind: 'stated', field: statedCurrency !== undefined ? 'currency' : 'currency_quote' };
+    if (currency === undefined) {
+      const statesSomething = (q.currency ?? '').trim() !== '' || (q.currencyQuote ?? '').trim() !== '';
+      if (statesSomething) currencyOrigin = { kind: 'unresolved', reason: 'STATED_CURRENCY_NOT_ISO' };
+      else if (instrument.assetClass === 'crypto') {
+        // A failed reference read leaves the quote without a currency (the gate refuses it); it does not fail the quote itself.
+        const resolved = await this.cryptoReferenceCurrency(mapping.providerSymbol, mapping.exchange).catch((error: unknown) => {
+          if (error instanceof MarketDataError) return { kind: 'unresolved' as const, reason: 'REFERENCE_UNAVAILABLE' };
+          throw error;
+        });
+        if (resolved.kind === 'resolved') {
+          if (resolved.currency !== instrument.currency) throw new MarketDataError('schema_invalid', PROVIDER, 'reference currency contradicts the instrument currency');
+          currency = resolved.currency;
+          currencyOrigin = resolved.origin;
+        } else currencyOrigin = { kind: 'unresolved', reason: resolved.reason };
+      }
+    }
     const retrievedAt = toUtcIso(this.clock().getTime());
     const source = this.source('quote');
     const quote: MarketQuote = {
@@ -443,6 +496,7 @@ export class TwelveDataMarketDataProvider implements MarketDataProvider {
       ...(q.previousClose !== undefined ? { previousClose: Decimal.from(q.previousClose) } : {}),
       ...(q.volume !== undefined && instrument.assetClass !== 'forex' ? { volume: Decimal.from(q.volume) } : {}),
       ...(currency !== undefined ? { currency } : {}),
+      ...(currencyOrigin !== undefined ? { currencyOrigin } : {}),
       marketOpen: q.isMarketOpen,
       // last_quote_at = last minute candle; `timestamp` is only the opening candle (conservative fallback).
       observedAt: toUtcIso((q.lastQuoteAt ?? q.timestamp) * 1000),

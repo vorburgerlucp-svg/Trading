@@ -241,7 +241,9 @@ export function validateQuote(quote: MarketQuote, rules: PriceRules = {}): DataQ
 }
 
 export function normalizeQuote(quote: MarketQuote): MarketQuote {
-  return { ...quote, observedAt: toUtcIso(parseUtc(quote.observedAt)), availableAt: toUtcIso(parseUtc(quote.availableAt)), retrievedAt: toUtcIso(parseUtc(quote.retrievedAt)) };
+  // O22: the currency origin is provider information about this fetch, not stored content (the PostgreSQL store has no column for it).
+  const { currencyOrigin: _origin, ...stored } = quote;
+  return { ...stored, observedAt: toUtcIso(parseUtc(quote.observedAt)), availableAt: toUtcIso(parseUtc(quote.availableAt)), retrievedAt: toUtcIso(parseUtc(quote.retrievedAt)) };
 }
 
 export function quoteContentHash(quote: MarketQuote): string {
