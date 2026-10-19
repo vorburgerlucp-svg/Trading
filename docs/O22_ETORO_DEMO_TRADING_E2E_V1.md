@@ -126,7 +126,7 @@ All of these are "USD balance".
 
 ### The hand-opened ETH position
 
-It is in the account (O21B/O21C: 100 USD at leverage 1). With it, account exposure (≈100 USD) plus the reserved 100 USD order exceeds 100 USD, and the account holds one position already. The decision is `CAPACITY_BLOCK` (`ACCOUNT_EXPOSURE_LIMIT`, `ACCOUNT_POSITION_LIMIT`), and the cycle open stays refused (tested).
+**Closed by the operator in the eToro UI on 2026-10-19 (B2, section 9); the text below describes the state before.** It was in the account (O21B/O21C: 100 USD at leverage 1). With it, account exposure (≈100 USD) plus the reserved 100 USD order exceeds 100 USD, and the account holds one position already. The decision is `CAPACITY_BLOCK` (`ACCOUNT_EXPOSURE_LIMIT`, `ACCOUNT_POSITION_LIMIT`), and the cycle open stays refused (tested).
 
 Two ways out, neither taken here:
 1. **Recommended:** the operator closes the hand-opened position **in the eToro UI** before the test. NEXUS never closes it. The account then has no exposure, and the 100 USD order fits.
@@ -205,11 +205,11 @@ No ledger booking at any step.
 | # | Blocker | Status after this package | What closes it |
 |---|---|---|---|
 | B1 | `BUILD_LOCKS.etoroDemoExecution = true` | **open** (by design) | a separate, approved code change, last |
-| B2 | Demo portfolio safety | **evidence closed; source active; account still blocked.** G1 and G2 are proved (section 12). The operator confirmed on 2026-10-19 that the hand-opened ETH demo position is **still open**; it stays untouched. With it the decision is `CAPACITY_BLOCK` and every cycle open is refused. | the operator closes it in the eToro UI and confirms; then one approved read-only sync shows no position. No limit is raised; NEXUS never closes it. |
+| B2 | Demo portfolio safety | **closed** (2026-10-19). The operator closed the hand-opened ETH demo position in the eToro UI. One read-only `GET /demo/pnl` through the observation tool afterwards: parser `accepted`, **0 positions**, every order container empty (`orders`, `ordersForOpen`, `ordersForClose`, `ordersForCloseMultiple`, `entryOrders`, `exitOrders`, `stockOrders`, `mirrors`), account currency USD (evidence `docs/evidence/O22_etoro_demo_pnl_observation_2026-10-19_b2.json`). No position or order blocks the test. Available cash ≥ 100 USD is not shown by the report (it states `credit` only as positive) and is decided by the safety source at creation. | — |
 | B3 | Identity of 100001 | **confirmed** (section 14): Crypto, ETH, Ethereum | — (the quote currency of the pair and the product type remain under B6/B8) |
 | B4 | Governed mapping path | **closed** (2026-10-19): `etoro / 100001 → ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`, applied by `human/luc-vorburger` after a read-only dry run with the same parameters; read-only check: 100001 resolves to exactly this instrument, one new event | — |
 | B5 | Demo write permission | **closed** (2026-10-19, second `/me` read, about 14:33 UTC, with a new demo user key): `demoRead=true`, `demoWrite=true` through `etoro-public:trade.demo:write`, `realRead=false`, `realWrite=false`. The first read (earlier the same day, previous key) had `demoWrite=false` (section 15). | — |
-| B6 | `settlementType` | **narrowed**: not sent, but verified after the fill and flagged unless `real` | decide whether a non-`real` result is acceptable for the test |
+| B6 | `settlementType` | **decided** (operator, 2026-10-19): the test passes only with open, unique position binding, `settlementType=real`, close and final reconciliation all proved. A missing or other `settlementType` fails the test; a securely bound NEXUS position is still closed through the regular close flow. | the success criterion must be evaluated explicitly (17.6, C1): the reconciliation verdict alone does not carry it |
 | B7 | AMBIGUOUS close | accepted (unchanged): stays AMBIGUOUS, no further close, manual UI check | — |
 | B8 | Production ETH/USD quote | **closed for the currency** (2026-10-19): production quote, `currency: USD` from the `/cryptocurrencies` reference, 51.7 s old. Freshness must hold again at create and execute (`observedAt` is the last minute candle). | — (refresh the quote right before create and before execute) |
 
@@ -513,8 +513,8 @@ Approved by the operator only for eToro 100001 → `ins_adcd4ec5-84ff-402c-8971-
 
 1. **eToro demo configuration. Done** (2026-10-19): the demo keys and `ETORO_ENABLED=1`, `ETORO_TRADING_MODE=demo`, `ETORO_DEMO_EXECUTION_ENABLED=0` are in the worktree `.env`.
 2. **B5, write scope. Closed** (second check above). The read path is the observation tool, `--source=me` (O22): the fixed operation `identity.me` (`GET /api/v1/me`, documented as the first call with a key pair; `scopes` is the array of granted scopes, `etoro-public:demo:write` includes `trade.demo:write`). The report (`etoro-me-scopes.ts`) keeps only the scope names, checked against a strict pattern, and `demoWrite`, `demoRead`, `realWrite`, `realRead`; no identifier, name or profile field. No retry. Tested in `o22-me-scopes.test.ts` (18). The first read gave `demoWrite=false`; after a new demo user key the second gave `demoWrite=true` and `realWrite=false`. A change of keys needs a new check.
-3. **B2, account. Open:** the operator confirmed on 2026-10-19 that the hand-opened ETH position is still open. It stays untouched until the operator closes it in the eToro UI. NEXUS never closes it.
-4. **B6.** Decide whether a non-`real` `settlementType` after the fill is acceptable for the test.
+3. **B2, account. Closed** (2026-10-19): the operator closed the hand-opened position in the eToro UI; a read-only `/demo/pnl` read shows no position and no order (section 9).
+4. **B6. Decided** (2026-10-19): `settlementType=real` is part of the success criterion (17.2).
 5. **B1, release.** A separate reviewed change opens `BUILD_LOCKS.etoroDemoExecution`; `TRADING_MODE=paper` and `ALLOW_LIVE_TRADING=false` stay.
 6. **The cycle (section 8, from step 6).** Sync and cycle status; quote refreshed right before create and before execute; one open, one close; no ledger booking.
 
@@ -561,15 +561,15 @@ Nothing in this section has been run. It prepares the review and the one control
 - **R6 External position.** With the mapping in place, a sync reports the hand-opened ETH position as `missing_in_ledger` (a report, not a booking) until it is gone.
 - **R7 Cosmetic.** Section numbers 11 and 13 are unused.
 
-### 17.2 Open items (kept open on purpose)
+### 17.2 Open items and decisions
 
-- **B2, external ETH demo position: still open (operator confirmation, 2026-10-19).** It is left untouched. While it exists the safety decision is `CAPACITY_BLOCK` and the cycle open is refused (`ACCOUNT_EXPOSURE_LIMIT`, `ACCOUNT_POSITION_LIMIT`). To close B2: the operator closes it in the eToro UI (NEXUS never closes it) and confirms; then one approved read-only sync shows no position.
-- **B6, product type after the fill: to be decided.** `settlementType` is not sent; the order status read records `brokerSettlementType` and the reconciliation flags anything other than `real` (`PRODUCT_TYPE_NOT_CONFIRMED_REAL`). To decide before the release: whether a non-`real` result (or none stated) is acceptable for this test. Proposal for the decision: the procedure does not change (the close follows as planned, nothing is retried), and the cycle is then recorded as "execution path proved, real-asset product not proved".
-- **B1, build lock: stays closed.** `BUILD_LOCKS.etoroDemoExecution = true` until a separate, reviewed change after the review of this PR, B2 and B6.
+- **B2, external ETH demo position: closed (2026-10-19).** The operator closed it in the eToro UI. One read-only `GET /demo/pnl` afterwards (observation tool, no write): 0 positions, all order containers empty, account currency USD. Nothing in the account blocks the test; available cash is checked by the safety source at creation.
+- **B6, product type after the fill: decided (operator, 2026-10-19).** **Success criterion of the whole test:** proved open (`FILLED`), unique position binding (exactly one broker-confirmed position), `settlementType=real` from the order status of the open, proved close (`FILLED`), and a final reconciliation `consistent` with `close_confirmed` on a snapshot taken after the close. A missing or other `settlementType` means **the test is not passed**. A securely bound NEXUS demo position is nevertheless closed through the regular close flow (steps 8–9); no protection is bypassed and nothing is retried.
+- **B1, build lock: stays closed.** `BUILD_LOCKS.etoroDemoExecution = true`, `ETORO_DEMO_EXECUTION_ENABLED=0`. The release is a separate reviewed change (proposal: `docs/O22_DEMO_RELEASE_PROPOSAL.md`), after this PR, the required change C1 and the decisions of 17.6.
 
 ### 17.3 Runbook of the first demo cycle (only after B2, B6 and B1)
 
-**Preconditions (all, else no start):** PR #25 reviewed; the release change for B1 reviewed and in the build; B2 confirmed; B6 decided; the worktree `.env` with the demo keys of the second `/me` check, `ETORO_ENABLED=1`, `ETORO_TRADING_MODE=demo`, `ETORO_DEMO_EXECUTION_ENABLED=1`; `TRADING_MODE=paper`, `ALLOW_LIVE_TRADING=false`; the runtime on loopback. Every `POST` intent route needs `Authorization: Bearer <NEXUS_OPERATOR_TOKEN>`; the token is read from the `.env` and never printed.
+**Preconditions (all, else no start):** PR #25 reviewed; C1 (17.6) in the build; the release change for B1 reviewed and in the build; the decisions D1–D5 (17.6) taken; B2 confirmed again by step 2; the worktree `.env` with the demo keys of the second `/me` check, `ETORO_ENABLED=1`, `ETORO_TRADING_MODE=demo`, `ETORO_DEMO_EXECUTION_ENABLED=1`; `TRADING_MODE=paper`, `ALLOW_LIVE_TRADING=false`; the runtime on loopback. Every `POST` intent route needs `Authorization: Bearer <NEXUS_OPERATOR_TOKEN>`; the token is read from the `.env` and never printed.
 
 | # | Step | Expect | STOP when |
 |---|---|---|---|
@@ -579,10 +579,10 @@ Nothing in this section has been run. It prepares the review and the one control
 | 4 | `POST /api/broker/etoro/demo/intents` with the open below | 201, `RISK_APPROVED` (creation reads `/demo/pnl` once for the safety decision) | `REJECTED`: read `gateReasons`, stop |
 | 5 | `POST …/intents/{openId}/approve` | `APPROVED` by `luc-vorburger` | anything else |
 | 6 | step 3 again, then `POST …/intents/{openId}/execute` **once** | `SUBMITTED` | `REJECTED`: stop (budget spent, the cycle is over). `AMBIGUOUS`: only `refresh`, never execute again. `GATE_REFUSED` (e.g. stale quote): nothing was sent and no budget spent; fix the cause and execute again before `expiresAt`. |
-| 7 | `POST …/intents/{openId}/refresh` until `FILLED`; then sync and cycle | exactly one `brokerPositionIds` entry; `brokerSettlementType` noted (B6); reconciliation verdict `consistent`, item `open_position_confirmed` | more than one `brokerPositionIds` entry: stop and follow 17.5 (A3); verdict `inconsistent` (`open_position_missing`, `position_mismatch`); verdict `unknown` (`snapshot_predates_intent`, `outcome_pending`): one more sync, then stop if unchanged |
+| 7 | `POST …/intents/{openId}/refresh` until `FILLED`; then sync and cycle | exactly one `brokerPositionIds` entry; `brokerSettlementType` = `real`; reconciliation verdict `consistent`, item `open_position_confirmed` | `brokerSettlementType` missing or not `real`: **the test is failed**, but do **not** stop: continue with step 8 to close the securely bound position. More than one `brokerPositionIds` entry: stop and follow 17.5 (A3); verdict `inconsistent` (`open_position_missing`, `position_mismatch`); verdict `unknown` (`snapshot_predates_intent`, `outcome_pending`): one more sync, then stop if unchanged |
 | 8 | `POST /api/broker/etoro/demo/intents` with the close below, `approve` (a new approval), `execute` **once**, `refresh` until `FILLED` | `SUBMITTED`, then `FILLED` | `AMBIGUOUS`: no further close; check the eToro UI by hand |
-| 9 | sync, then cycle | verdict `consistent`, item `close_confirmed`, budget open 1/1, close 1/1; every further write refused | verdict `inconsistent` (`closed_position_still_open`) or `unknown` after one more sync |
-| 10 | afterwards | `ETORO_DEMO_EXECUTION_ENABLED=0`; the build lock closed again by a reviewed change; the result documented with sanitized evidence | — |
+| 9 | sync, then cycle | verdict `consistent`, item `close_confirmed` on a snapshot after the close, budget open 1/1, close 1/1; every further write refused. **Test passed only if** steps 6–9 were all proved and step 7 showed `settlementType=real` (with C1: the test verdict `passed`) | verdict `inconsistent` (`closed_position_still_open`) or `unknown` after one more sync |
+| 10 | afterwards | `ETORO_DEMO_EXECUTION_ENABLED=0`; the build lock closed again by a reviewed change; the result (passed / failed, with the failed criterion) documented with sanitized evidence | — |
 
 **The open intent** (times: canonical UTC, `expiresAt` at most 15 minutes after `createdAt`, e.g. 10):
 ```json
@@ -598,7 +598,7 @@ Nothing in this section has been run. It prepares the review and the one control
   "strategyRunId": "o22-demo-cycle-1", "createdAt": "<UTC now>", "expiresAt": "<UTC now + 10 min>" }
 ```
 
-No ledger booking at any step. The external ETH position, if B2 found it still open, is never touched.
+No ledger booking at any step. NEXUS never touches a position it did not open (the hand-opened one was closed by the operator on 2026-10-19, B2).
 
 ### 17.4 Review result (2026-10-19, code reviewed at `74aaf90`; later commits change docs and comments only)
 
@@ -633,7 +633,7 @@ The diff of S1–S3 contains comment lines only (checked line by line); `npm run
 - **A5** Quote freshness depends on the minute candle (R4); a stale refusal sends nothing and spends no budget.
 - **A6** The runtime registry is not re-synced per gate run: a mapping applied while the runtime runs is seen after a restart (fail closed until then).
 
-**Prerequisites of the demo cycle (not merge blockers):** B2 open (position still open, untouched), B6 undecided, B1 closed; then the runbook 17.3.
+**Prerequisites of the demo cycle (not merge blockers):** B2 closed and B6 decided (2026-10-19); C1 and the decisions D1–D5 of 17.6; then B1 (separate release change) and the runbook 17.3.
 
 **Verdict.** The review of the safety-critical behaviour found no merge blocker; S1–S3 are fixed. The PR stays Draft until M1 and the human reviewer's approval; the acceptance of A1–A6 is a separate decision before the execution release. This is not a release: the build lock stays closed.
 
@@ -652,3 +652,23 @@ The diff of S1–S3 contains comment lines only (checked line by line); `npm run
 4. Any close of these positions is a manual action of the operator in the eToro UI, taken by a separate, explicit decision. NEXUS does not close them.
 5. Afterwards one approved read-only sync. The account must show none of these positions; the cycle route then reports them as `open_position_missing` (verdict `inconsistent`), which is the expected record of a close outside NEXUS and is not resolved by NEXUS. Document the case with sanitized evidence. A new cycle needs a reviewed code change (the budget is spent).
 
+### 17.6 A1–A6 against the success criterion; required changes and open decisions (2026-10-19)
+
+**Finding that changes the picture.** The reconciliation verdict does not carry the success criterion of B6. `PRODUCT_TYPE_NOT_CONFIRMED_REAL` is only a reason: the verdict stays `consistent` (`demo-cycle-reconciliation.ts` L106–109, L117–121). After the close, the open's item is skipped for a closed position (L94), so the final reconciliation no longer shows the product type at all. Read alone, "consistent" after step 9 would report a test as passed that B6 counts as failed.
+
+| Risk | Effect on the success criterion | Technical change | Decision still open |
+|---|---|---|---|
+| **A1** account decision read before, not inside, the reservation | A position or order placed by hand between the gate and the reservation is not seen. The NEXUS position stays uniquely bound by `positionID`, but the account limits could be exceeded for the test; the final reconciliation would report `EXTERNAL_POSITIONS_PRESENT`. | None proposed: a broker read cannot run inside the log's critical section. | **D1**: no manual activity in the demo account from step 2 to step 9; any external position or order seen in steps 2–9 counts as test failed. |
+| **A2** a local refusal after `SUBMITTING` spends the budget | The test fails with no order sent, and a new cycle needs a code change. The refusals possible there are deterministic from the intent (body and URL building, the close's position id, the transport's own pre-check). | **C3 (recommended):** build and validate the request (body, URL) before the reservation, so a deterministic local refusal leaves the intent `APPROVED` and spends nothing. | **D2**: whether C3 is required before the release or A2 is accepted. |
+| **A3** more than one position from one fill | Unique binding fails: the test is failed. NEXUS cannot close (exactly one confirmed position required). | None: the rule must not be weakened. | **D3**: confirm the manual procedure of 17.5 as the handling. |
+| **A4** the close also reads `/demo/pnl` | The read does not decide a close, but `runGate` makes it for every phase; an exception while recording the valuation (for example a database error) would abort the close's execute (nothing sent, no budget spent, can be repeated). It is an avoidable dependency of the safe close. | **C2 (recommended):** read the account only for opens (`runGate`: no safety read when `intent.action === 'close'`). The gate's checks are unchanged: every safety check applies to opens only. | **D4**: whether C2 is required before the release. |
+| **A5** quote freshness by minute candle | A stale quote refuses the open (nothing sent, no budget spent); repeated refusals until `expiresAt` leave the test not started, not failed. No effect on the close (no quote check for a close). | None proposed. | **D5**: runbook rule – fetch the quote right before create and execute; a new intent after expiry is allowed (no budget spent). |
+| **A6** registry not re-synced per gate run | None for this test: the mapping was applied before any runtime start of the cycle. | None. | – (runbook: start the runtime after the mapping; already the case) |
+
+**Required change before the release: C1 – the test verdict of B6, machine-checked.**
+- Add a `testVerdict` to the cycle route (`GET /api/broker/etoro/demo/cycle`): `passed` only when the open intent is `FILLED` with exactly one broker-confirmed position, its `brokerSettlementType` is `real`, the close intent is `FILLED`, and the latest snapshot after the close gives the item `close_confirmed` with verdict `consistent`; `failed` with the failed criterion (`SETTLEMENT_TYPE_NOT_REAL`, `SETTLEMENT_TYPE_MISSING`, `POSITION_BINDING_NOT_UNIQUE`, `OPEN_REJECTED`, `CLOSE_AMBIGUOUS`, `EXTERNAL_ACTIVITY`, …); `incomplete` otherwise.
+- It reads stored state only (intent log, confirmations, snapshot); no broker request, no change of a gate check.
+- Tests: every criterion failing alone; a non-`real` open whose close still runs and is confirmed gives `failed` (`SETTLEMENT_TYPE_NOT_REAL`), not `passed`.
+- Without C1 the success criterion has to be checked by hand from the open intent's `brokerSettlementType`; the release proposal requires C1.
+
+**Not changed.** No protection is weakened by any of C1–C3; no limit is raised; the budget stays one open and one close.

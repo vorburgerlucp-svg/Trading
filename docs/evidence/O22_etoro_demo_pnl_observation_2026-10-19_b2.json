@@ -1,0 +1,124 @@
+{
+  "schema": "etoro-demo-portfolio-observation:v1",
+  "source": "pnl",
+  "endpoint": "GET /api/v1/trading/info/demo/pnl",
+  "topLevelKeys": [
+    "clientPortfolio"
+  ],
+  "topLevelUnnamedKeys": 0,
+  "clientPortfolio": {
+    "kind": "object",
+    "keys": [
+      "accountCurrencyId",
+      "bonusCredit",
+      "credit",
+      "entryOrders",
+      "exitOrders",
+      "mirrors",
+      "orders",
+      "ordersForClose",
+      "ordersForCloseMultiple",
+      "ordersForOpen",
+      "positions",
+      "stockOrders",
+      "unrealizedPnL"
+    ],
+    "unnamedKeys": 0,
+    "undocumentedKeys": [],
+    "documentedMissing": [],
+    "credit": {
+      "kind": "non_integer_number",
+      "sign": "positive"
+    },
+    "bonusCredit": {
+      "kind": "integer",
+      "sign": "zero"
+    }
+  },
+  "containers": {
+    "entryOrders": {
+      "kind": "array",
+      "count": 0,
+      "documented": "no_element_schema"
+    },
+    "exitOrders": {
+      "kind": "array",
+      "count": 0,
+      "documented": "no_element_schema"
+    },
+    "mirrors": {
+      "kind": "array",
+      "count": 0,
+      "documented": "element_schema"
+    },
+    "orders": {
+      "kind": "array",
+      "count": 0,
+      "documented": "element_schema"
+    },
+    "ordersForClose": {
+      "kind": "array",
+      "count": 0,
+      "documented": "element_schema"
+    },
+    "ordersForCloseMultiple": {
+      "kind": "array",
+      "count": 0,
+      "documented": "element_schema"
+    },
+    "ordersForOpen": {
+      "kind": "array",
+      "count": 0,
+      "documented": "element_schema"
+    },
+    "positions": {
+      "kind": "array",
+      "count": 0,
+      "documented": "element_schema"
+    },
+    "stockOrders": {
+      "kind": "array",
+      "count": 0,
+      "documented": "no_element_schema"
+    }
+  },
+  "valuationEvidence": {
+    "positions": 0,
+    "unrealizedPnlObject": {
+      "object": 0,
+      "null": 0,
+      "missing": 0,
+      "other": 0
+    },
+    "pnL": {
+      "type": {
+        "number": 0,
+        "null": 0,
+        "missing": 0,
+        "other": 0
+      },
+      "finite": 0,
+      "sign": {
+        "positive": 0,
+        "negative": 0,
+        "zero": 0,
+        "not_applicable": 0
+      }
+    },
+    "accountCurrencyId": {
+      "present": true,
+      "kind": "integer",
+      "code": 1
+    },
+    "checks": {
+      "allPositionPnlFiniteNumbers": null,
+      "accountCurrencyIsUsd": true
+    }
+  },
+  "parser": {
+    "outcome": "accepted",
+    "positions": 0,
+    "orders": 0,
+    "ordersForOpen": 0
+  }
+}
