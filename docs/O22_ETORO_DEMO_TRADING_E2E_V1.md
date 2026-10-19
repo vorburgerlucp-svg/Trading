@@ -9,7 +9,7 @@ Status: **implemented and tested offline; not released.** Base: `519233d` (merge
   - the hand-opened ETH position makes the decision `CAPACITY_BLOCK`.
 - `BUILD_LOCKS.etoroDemoExecution = true` refuses every demo write in this build.
 - The demo account safety source (B2, variant A, section 5) is built and wired. It answers `null` (`PORTFOLIO_SAFETY_NOT_CONNECTED`) only when its one `/demo/pnl` read fails or is refused; the evidence gate itself is open. With the hand-opened position, its decision refuses every cycle open with `CAPACITY_BLOCK`.
-- 2026-10-19 (section 15): the local registry held no instrument. Twelve Data states no currency for ETH/USD in `/symbol_search` or `/quote`; O22 now takes it from Twelve Data's `/cryptocurrencies` reference (`currency_quote` "US Dollar" → `USD` by a reviewed name table). ETH/USD is registered once (`ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`), its production quote showed `USD` at 51.7 s, and the eToro mapping dry run for 100001 plans the mapping. **The mapping is not applied.**
+- 2026-10-19 (section 15): the local registry held no instrument. Twelve Data states no currency for ETH/USD in `/symbol_search` or `/quote`; O22 now takes it from Twelve Data's `/cryptocurrencies` reference (`currency_quote` "US Dollar" → `USD` by a reviewed name table). ETH/USD is registered once (`ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`), its production quote showed `USD` at 51.7 s, and the governed eToro mapping `etoro / 100001 → ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc` was **applied** by `luc-vorburger` after an approved dry run (one `mapping_added` event).
 - The first demo buy therefore cannot happen with this build. Section 9 lists what is still open; section 8 gives the exact sequence for afterwards.
 
 Naming note: an unrelated, uncommitted work package "O22 OpenAI shadow provider" exists in another local worktree (with a migration `014_model_run_usage.sql`). This package uses its own file and branch names, adds no migration, and touches none of those files. The numbering should be reconciled before both are merged.
@@ -141,11 +141,11 @@ Two ways out, neither taken here:
 | Product type of the NEXUS open | captured from the order status (`asset.settlementType`: cfd, real, realFutures, marginTrade) and flagged unless `real` |
 | `amount` / `units` | `amount` = USD allocated incl. margin; `units` = number of units. They equal an asset quantity only for `real` (to be confirmed by the order status). |
 | `openRate` currency | "in the instrument's currency"; not stated in the payload |
-| NEXUS mapping for 100001 | **none**; the local registry holds no instrument (read-only check 2026-10-19, section 15) |
+| NEXUS mapping for 100001 | **`ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`** (ETH/USD, crypto, USD), governed mapping applied 2026-10-19 by `luc-vorburger` (section 15) |
 
 **The metadata read (executed once, section 14).** `npm run etoro:observe-demo -- --source=instrument-metadata --confirm-live-read`: one GET `/api/v2/market-data/instruments?instrumentsIds=100001`. The report keeps four fields: id, type, symbol and display name.
 
-**Prepared, not applied:**
+**Applied 2026-10-19 (section 15):**
 - **The governed mapping.** `npm run etoro:map-instrument -- --instrument-id=<ETH/USD> --metadata-report=<saved report> --valid-from=<UTC> --operator=<id>`.
   - It runs as a dry run by default; `--apply --confirm-human-mapping` writes the one registry event.
   - The evidence is the report file, cited by its sha256.
@@ -171,7 +171,7 @@ Each step is a separate operator action. Every STOP ends this cycle.
    - Metadata read. **Done** (2026-10-18, section 14): `accepted`, id 100001, type `Crypto`.
    - Register ETH/USD (`POST /api/instruments/register`). **Done** (2026-10-19, section 15): `ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`.
    - Check the production ETH/USD quote: `USD`, valid timestamp, at most 60 s old. **Done** (2026-10-19): `USD` from the reference, 51.7 s.
-   - Dry-run `etoro:map-instrument` (**done**, 2026-10-19: plan accepted, nothing written), then apply it with confirmation (**open**, a human decision).
+   - Dry-run `etoro:map-instrument` (**done**, 2026-10-19: plan accepted, nothing written), then apply it with confirmation (**done**, 2026-10-19, approved by the operator: `validFrom` 2026-10-19T11:47:36.000Z).
 3. **Write permission.** The operator confirms a demo write scope from the `/me` result.
 4. **Clear the account.** The operator closes the hand-opened ETH position in the eToro UI. NEXUS does not touch it.
 5. **Release.** A separate reviewed change opens `BUILD_LOCKS.etoroDemoExecution` for this build. Set `ETORO_ENABLED=1`, `ETORO_TRADING_MODE=demo`, `ETORO_DEMO_EXECUTION_ENABLED=1` and operator auth. `TRADING_MODE=paper` and `ALLOW_LIVE_TRADING=false` stay.
@@ -206,8 +206,8 @@ No ledger booking at any step.
 | B1 | `BUILD_LOCKS.etoroDemoExecution = true` | **open** (by design) | a separate, approved code change, last |
 | B2 | Demo portfolio safety | **evidence closed; source active.** G1 and G2 are proved (section 12), and the evidence record cites both reports. The decision is still `CAPACITY_BLOCK` because of the hand-opened position. | The account must fit the unchanged limits: the operator closes the hand-opened position in the UI. No limit is raised. |
 | B3 | Identity of 100001 | **confirmed** (section 14): Crypto, ETH, Ethereum | — (the quote currency of the pair and the product type remain under B6/B8) |
-| B4 | Governed mapping path | **ready to apply**: ETH/USD registered; the read-only dry run with the real id plans `etoro / 100001 → ins_adcd4ec5-…` by `luc-vorburger` and writes nothing (2026-10-19). Not applied. | the operator's `--apply --confirm-human-mapping` (section 15) |
-| B5 | Demo write permission | **not proved**: no `/me` scopes are recorded in the repository or its evidence | the `scopes` from the operator's `/me` result (no new call needed if it is at hand) |
+| B4 | Governed mapping path | **closed** (2026-10-19): `etoro / 100001 → ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`, applied by `human/luc-vorburger` after a read-only dry run with the same parameters; read-only check: 100001 resolves to exactly this instrument, one new event | — |
+| B5 | Demo write permission | **not proved** (checked 2026-10-19): no `/me` result or scope list in the repository, `docs/evidence` or `C:\NEXUS\setup`; no new call was made | the operator supplies the `scopes` of an earlier `/me` result, or approves one `GET /api/v1/me` whose sanitized report records only the scope names |
 | B6 | `settlementType` | **narrowed**: not sent, but verified after the fill and flagged unless `real` | decide whether a non-`real` result is acceptable for the test |
 | B7 | AMBIGUOUS close | accepted (unchanged): stays AMBIGUOUS, no further close, manual UI check | — |
 | B8 | Production ETH/USD quote | **closed for the currency** (2026-10-19): production quote, `currency: USD` from the `/cryptocurrencies` reference, 51.7 s old. Freshness must hold again at create and execute (`observedAt` is the last minute candle). | — (refresh the quote right before create and before execute) |
@@ -337,7 +337,7 @@ Results: in the PR description. Local run 2026-10-19 with the crypto reference c
 
 ### Existing registry entries
 
-On 2026-10-18 the registry could not be checked (no database reachable). **Superseded by section 15:** on 2026-10-19 the local NEXUS database was read read-only; it held **no instrument**. ETH/USD was then registered once (`ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`, section 15); the eToro mapping for 100001 is planned by a dry run, not applied. The repository contains **no** ETH instrument either (only TEST ETH/USD fixtures in tests). The mapping tool refuses a second eToro mapping, and the registry refuses a second mapping of the same Twelve Data symbol in an overlapping period, so a duplicate cannot be written either way.
+On 2026-10-18 the registry could not be checked (no database reachable). **Superseded by section 15:** on 2026-10-19 the local NEXUS database was read read-only; it held **no instrument**. ETH/USD was then registered once (`ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`, section 15); the governed eToro mapping 100001 → this instrument was applied after a dry run. The repository contains **no** ETH instrument either (only TEST ETH/USD fixtures in tests). The mapping tool refuses a second eToro mapping, and the registry refuses a second mapping of the same Twelve Data symbol in an overlapping period, so a duplicate cannot be written either way.
 
 ### Missing before the mapping can be applied
 
@@ -439,18 +439,40 @@ The worktree `.env` (ignored by Git, readable only by the operator) holds the ex
 
 **Freshness note.** `observedAt` is the start of the last minute candle, so a quote is between 0 and about 60 s old when fetched, and older afterwards. The gate's 60 s limit is not relaxed: the quote must be refreshed right before create and right before execute, and a refusal for staleness is expected behaviour, not a fault.
 
-### Planned mapping (dry run done, not applied)
+### Planned mapping (applied 2026-10-19, below)
 
 - **Evidence:** `docs/evidence/O22_etoro_instrument_metadata_100001_2026-10-18.json` (sha256 `3e898fcd…340528c`): 100001, Crypto, ETH, Ethereum.
 - **Plan:** `etoro / 100001 / 100001 → ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`, `validFrom` set by the human, actor `human/luc-vorburger`, no exchange.
 - **Conditions:** It needs an existing, active, crypto, USD instrument (met). It refuses a duplicate and never creates an instrument.
 
-### Remaining before the mapping is applied
+### Governed eToro mapping applied (2026-10-19)
 
-1. **Read the operator's registry. Done.**
-2. **Register ETH/USD. Done** (`ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`).
-3. **Quote check. Done** (`USD` from the reference, 51.7 s).
-4. **Mapping.** The dry run is done. The apply is a separate human decision: the same command with a fresh `--valid-from` (not in the future), first as a dry run, then with `--apply --confirm-human-mapping`, using a `DATABASE_URL` with the application role.
+Approved by the operator only for eToro 100001 → `ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`, operator `luc-vorburger`, evidence `docs/evidence/O22_etoro_instrument_metadata_100001_2026-10-18.json`.
+
+| Step | Result |
+|---|---|
+| Registry before (read-only) | 1 instrument `ins_adcd4ec5-…`: active, `crypto`, `USD`; mappings: Twelve Data `ETH/USD @ Binance` only; no eToro mapping; eToro 100001 resolves to nothing; log `instruments` at sequence 1. |
+| Evidence | sha256 `3e898fcd9578b862180e7a824c2cde904e44fde64b9dc27454d35b782340528c`, unchanged against the commit. |
+| `validFrom` | fixed once: `2026-10-19T11:47:36.000Z` |
+| Dry run (read-only role, `default_transaction_read_only=on`) | exit 0, `mode: dry_run`, `{ instrumentId: ins_adcd4ec5-…, provider: etoro, providerSymbol: 100001, providerInstrumentId: 100001, validFrom: 2026-10-19T11:47:36.000Z }`, `by: human/luc-vorburger`, the evidence sha256 |
+| Apply (application role from the worktree `.env`, the same parameters + `--apply --confirm-human-mapping`) | exit 0, `mode: applied`, the identical mapping |
+| Registry after (read-only) | `registry:inspect`: eToro 100001 `resolvesTo: ins_adcd4ec5-84ff-402c-8971-2c333e2b18fc`; checks `openEtoroMapping: 100001`, `openTwelveDataMapping: ETH/USD @ Binance`; 2 mappings in total (no exchange on the eToro one). |
+| Events | log `instruments` at sequence 2: exactly one new record, `mapping_added`, by `human/luc-vorburger`, reason `O22 governed eToro mapping by a named human; evidence 3e898fcd… (type Crypto, symbol ETH)`. Still 1 instrument, 0 ledger transactions; the kill switch log at sequence 0. |
+
+### eToro demo configuration and write scope (checked 2026-10-19, no eToro call)
+
+- **eToro keys and switches: not configured on this machine.** The worktree `.env` has no `ETORO_*` line, and neither the process nor the user or machine environment holds `ETORO_API_KEY`, `ETORO_USER_KEY`, `ETORO_ENABLED`, `ETORO_TRADING_MODE` or `ETORO_DEMO_EXECUTION_ENABLED`. The earlier reads ran in the operator's own session.
+- **Operator auth: configured** (`NEXUS_OPERATOR_ID`, `NEXUS_OPERATOR_TOKEN`).
+- **`/me` scopes: no evidence.** `docs/evidence` holds the portfolio, `/demo/pnl` and metadata reports only; no `/me` result or scope list exists in the repository or `C:\NEXUS\setup`. B5 stays open.
+
+### Remaining before the controlled demo test
+
+1. **B5, write scope.** The operator supplies the scope names from an earlier `/me` result, or approves one `GET /api/v1/me` whose sanitized report keeps only the scope names (no `demoCid`, no key).
+2. **eToro demo configuration.** `ETORO_API_KEY` and `ETORO_USER_KEY` (the demo user key) entered by the operator into the worktree `.env`; `ETORO_ENABLED=1`, `ETORO_TRADING_MODE=demo`. `ETORO_DEMO_EXECUTION_ENABLED=1` only for the release step.
+3. **B2, account.** The operator closes the hand-opened ETH position in the eToro UI. NEXUS never closes it.
+4. **B6.** Decide whether a non-`real` `settlementType` after the fill is acceptable for the test.
+5. **B1, release.** A separate reviewed change opens `BUILD_LOCKS.etoroDemoExecution`; `TRADING_MODE=paper` and `ALLOW_LIVE_TRADING=false` stay.
+6. **The cycle (section 8, from step 6).** Sync and cycle status; quote refreshed right before create and before execute; one open, one close; no ledger booking.
 
 ## 16. Safety boundaries (unchanged)
 
