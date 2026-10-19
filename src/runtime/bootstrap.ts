@@ -155,9 +155,9 @@ async function openEtoro(pool: PgPool, config: RuntimeConfig, options: StartOpti
 
 /**
  * The eToro demo execution wiring (O21), only with ETORO_DEMO_EXECUTION_ENABLED=1: the demo execution transport and four
- * append-only logs, plus (O22) the valuation log of the demo account safety source. That source answers null until the evidence
- * record says a non-empty /demo/pnl was observed live, so every open is still refused; and the build lock
- * BUILD_LOCKS.etoroDemoExecution refuses every write in this build.
+ * append-only logs, plus (O22) the valuation log of the demo account safety source. The evidence record says a non-empty
+ * /demo/pnl was observed live, so the source decides from a fresh /demo/pnl read (it answers null on any failed or unverifiable
+ * read, and every open is then refused); and the build lock BUILD_LOCKS.etoroDemoExecution refuses every write in this build.
  */
 async function openEtoroDemoExecution(pool: PgPool, config: RuntimeConfig, options: StartOptions): Promise<NonNullable<ComposeInput['etoroDemoExecution']>> {
   const clock = options.clock ?? (() => new Date());

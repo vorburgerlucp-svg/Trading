@@ -384,7 +384,7 @@ export class RuntimeServiceImpl implements RuntimeServices {
 
   /**
    * O22: the controlled demo cycle, read only. Built from the intent log and the latest stored O20 snapshot: no broker request, no
-   * write. The safety readiness is a report, never a decision: the execution gate still has no demo safety source.
+   * write. The safety readiness is a report, never a decision: the gate's decisions come from the demo account safety source.
    */
   async etoroDemoCycle(): Promise<unknown> {
     const etoro = this.deps.etoro ?? null;
