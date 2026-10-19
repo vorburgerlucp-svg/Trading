@@ -135,13 +135,13 @@ describe('O21A observation tool: gated, one GET, no secrets, nothing on disk', (
     expect(failed).toEqual({ exitCode: 1, error: 'BROKER_NOT_CONNECTED' });
   });
 
-  it('the tool source writes no file and has one call site, over the fixed source operations (O21A.1; O22 added instrument-metadata)', () => {
+  it('the tool source writes no file and has one call site, over the fixed source operations (O21A.1; O22 added instrument-metadata and me)', () => {
     const source = readFileSync('src/broker/etoro/etoro-observe-cli.ts', 'utf8') + readFileSync('src/broker/etoro/etoro-observation.ts', 'utf8');
     expect(source).not.toMatch(/writeFile|appendFile|createWriteStream|mkdir/);
     expect(source).not.toMatch(/\bfetch\s*\(/);
     expect([...source.matchAll(/\.call\(/g)]).toHaveLength(1);
     expect(source).toContain('.call(SOURCE_OPERATIONS[source])');
-    expect(SOURCE_OPERATIONS).toEqual({ portfolio: 'portfolio.demo', pnl: 'pnl.demo', 'instrument-metadata': 'instrument.metadata.100001' });
+    expect(SOURCE_OPERATIONS).toEqual({ portfolio: 'portfolio.demo', pnl: 'pnl.demo', 'instrument-metadata': 'instrument.metadata.100001', me: 'identity.me' });
   });
 
   it('nothing in the runtime imports the observation tool', () => {

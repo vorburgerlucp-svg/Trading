@@ -12,8 +12,9 @@ const EXECUTION_WORDS = ['place', 'placeOrder', 'submitOrder', 'modify', 'modify
 const EXECUTION_PATH = /place|modify|cancel|replace|close|order|transfer|withdraw|deposit|trade|exercise|reply|real/i;
 
 describe('O20 eToro boundary: the allowlist', () => {
-  it('contains exactly the demo portfolio, the demo pnl (O21A.1) and the one fixed instrument metadata read (O22)', () => {
-    expect(Object.keys(ETORO_ALLOWED_OPERATIONS).sort()).toEqual(['instrument.metadata.100001', 'pnl.demo', 'portfolio.demo']);
+  it('contains exactly the demo portfolio, the demo pnl (O21A.1), the one fixed instrument metadata read and the identity read (O22)', () => {
+    expect(Object.keys(ETORO_ALLOWED_OPERATIONS).sort()).toEqual(['identity.me', 'instrument.metadata.100001', 'pnl.demo', 'portfolio.demo']);
+    expect(etoroOperationUrl('identity.me')).toBe('https://public-api.etoro.com/api/v1/me');
     expect(ETORO_ALLOWED_OPERATIONS['portfolio.demo'].path).toBe('/trading/info/demo/portfolio');
     expect(ETORO_ALLOWED_OPERATIONS['pnl.demo'].path).toBe('/trading/info/demo/pnl');
     expect(etoroOperationUrl('instrument.metadata.100001')).toBe('https://public-api.etoro.com/api/v2/market-data/instruments?instrumentsIds=100001');
@@ -27,12 +28,13 @@ describe('O20 eToro boundary: the allowlist', () => {
     for (const spec of Object.values(ETORO_ALLOWED_OPERATIONS)) expect(spec.path).not.toMatch(EXECUTION_PATH);
   });
 
-  it('the base URL is the eToro public API over HTTPS; every account read is a demo path; the only other read is public market data', () => {
+  it('the base URL is the eToro public API over HTTPS; every account read is a demo path; the others are public market data and the identity read', () => {
     expect(ETORO_BASE_URL).toBe('https://public-api.etoro.com/api/v1');
     expect(ETORO_BASE_URL.startsWith('https://')).toBe(true);
     for (const [name, spec] of Object.entries(ETORO_ALLOWED_OPERATIONS)) {
       expect(etoroOperationUrl(name as EtoroOperation).startsWith('https://public-api.etoro.com/api/')).toBe(true);
       if (name === 'instrument.metadata.100001') expect(spec.path).toBe('/market-data/instruments?instrumentsIds=100001');
+      else if (name === 'identity.me') expect(spec.path).toBe('/me');
       else expect(spec.path.startsWith('/trading/info/demo/')).toBe(true);
     }
   });

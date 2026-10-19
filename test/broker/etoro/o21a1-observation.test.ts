@@ -29,11 +29,12 @@ function recordingFetch(answer: { status: number; body?: unknown }) {
 }
 
 describe('O21A.1 transport: fixed GET operations only (two demo account reads, and since O22 one fixed market-data read)', () => {
-  it('pnl.demo is GET /trading/info/demo/pnl, portfolio.demo is unchanged, and O22 added exactly one fixed instrument metadata read', () => {
+  it('pnl.demo is GET /trading/info/demo/pnl, portfolio.demo is unchanged, and O22 added exactly one fixed instrument metadata read and the identity read', () => {
     expect(ETORO_ALLOWED_OPERATIONS).toEqual({
       'portfolio.demo': { method: 'GET', path: '/trading/info/demo/portfolio' },
       'pnl.demo': { method: 'GET', path: '/trading/info/demo/pnl' },
       'instrument.metadata.100001': { method: 'GET', base: 'https://public-api.etoro.com/api/v2', path: '/market-data/instruments?instrumentsIds=100001' },
+      'identity.me': { method: 'GET', path: '/me' },
     });
     expect(Object.isFrozen(ETORO_ALLOWED_OPERATIONS)).toBe(true);
     for (const spec of Object.values(ETORO_ALLOWED_OPERATIONS)) expect(spec.path).not.toMatch(/real|order|execution|close|cancel/i);
