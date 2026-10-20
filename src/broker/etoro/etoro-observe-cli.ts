@@ -6,14 +6,23 @@
 // built. Keys are read from the environment and never printed; a failure prints a fixed code only.
 //
 //   npm run etoro:observe-demo -- --source=portfolio|pnl --confirm-live-read [--pseudonymize-ids] [--show-instrument-ids]
+//   npm run etoro:observe-demo -- --source=instrument-metadata --confirm-live-read          (O22)
+//   npm run etoro:observe-demo -- --source=me --confirm-live-read                           (O22 B5)
+//
+// --source=instrument-metadata -> instrument.metadata.100001 (GET /api/v2/market-data/instruments?instrumentsIds=100001): one fixed
+// public market-data read whose report keeps only the instrument id, type, symbol and display name (etoro-instrument-metadata.ts).
+// --source=me -> identity.me (GET /api/v1/me): one identity read whose report keeps only the granted scope names and whether a demo
+// write scope is among them (etoro-me-scopes.ts). No account id, name or other profile field reaches the report.
 //
 // It refuses to run without exactly one valid --source, without --confirm-live-read, without ETORO_TRADING_MODE=demo, or with
-// malformed keys.
+// malformed keys. Exit code 0 means a report was produced, not that the parser accepted the response: read the report's verdict.
 
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { BrokerError } from '../broker-errors.js';
 import { isValidEtoroKey } from './etoro-credentials.js';
+import { instrumentMetadataReport, type InstrumentMetadataReport } from './etoro-instrument-metadata.js';
+import { meScopesReport, type MeScopesReport } from './etoro-me-scopes.js';
 import { observeDemoResponse, type ObservationReport, type ObservationSource } from './etoro-observation.js';
 import type { EtoroOperation } from './etoro-readonly.js';
 import { HttpsEtoroTransport, type EtoroTransport } from './etoro-transport.js';
@@ -22,15 +31,22 @@ export const CONFIRM_FLAG = '--confirm-live-read';
 const KNOWN_FLAGS = new Set([CONFIRM_FLAG, '--pseudonymize-ids', '--show-instrument-ids']);
 const SOURCE_PREFIX = '--source=';
 
-/** The one fixed operation of each source. */
-export const SOURCE_OPERATIONS: Readonly<Record<ObservationSource, EtoroOperation>> = Object.freeze({ portfolio: 'portfolio.demo', pnl: 'pnl.demo' });
+export type CliSource = ObservationSource | 'instrument-metadata' | 'me';
 
-function sourceOf(value: string): ObservationSource | null {
-  return value === 'portfolio' || value === 'pnl' ? value : null;
+/** The one fixed operation of each source. */
+export const SOURCE_OPERATIONS: Readonly<Record<CliSource, EtoroOperation>> = Object.freeze({
+  portfolio: 'portfolio.demo',
+  pnl: 'pnl.demo',
+  'instrument-metadata': 'instrument.metadata.100001',
+  me: 'identity.me',
+});
+
+function sourceOf(value: string): CliSource | null {
+  return value === 'portfolio' || value === 'pnl' || value === 'instrument-metadata' || value === 'me' ? value : null;
 }
 
 export type ObservationOutcome =
-  | { readonly exitCode: 0; readonly report: ObservationReport }
+  | { readonly exitCode: 0; readonly report: ObservationReport | InstrumentMetadataReport | MeScopesReport }
   | { readonly exitCode: 1 | 2; readonly error: string };
 
 export interface ObservationRun {
@@ -45,9 +61,9 @@ export async function runObservation(run: ObservationRun): Promise<ObservationOu
   const sources = run.argv.filter((a) => a.startsWith(SOURCE_PREFIX));
   const unknown = run.argv.filter((a) => !KNOWN_FLAGS.has(a) && !a.startsWith(SOURCE_PREFIX));
   if (unknown.length > 0) return { exitCode: 2, error: 'unknown argument' };
-  if (sources.length !== 1) return { exitCode: 2, error: 'refused: pass exactly one --source=portfolio or --source=pnl' };
+  if (sources.length !== 1) return { exitCode: 2, error: 'refused: pass exactly one --source=portfolio, --source=pnl, --source=instrument-metadata or --source=me' };
   const source = sourceOf(sources[0]!.slice(SOURCE_PREFIX.length));
-  if (source === null) return { exitCode: 2, error: 'refused: --source must be portfolio or pnl' };
+  if (source === null) return { exitCode: 2, error: 'refused: --source must be portfolio, pnl, instrument-metadata or me' };
   if (!run.argv.includes(CONFIRM_FLAG)) return { exitCode: 2, error: 'refused: pass ' + CONFIRM_FLAG + ' to send one read request to the eToro demo portfolio' };
   if (run.env.ETORO_TRADING_MODE !== 'demo') return { exitCode: 2, error: 'refused: ETORO_TRADING_MODE must be demo' };
   const apiKey = run.env.ETORO_API_KEY?.trim();
@@ -60,6 +76,8 @@ export async function runObservation(run: ObservationRun): Promise<ObservationOu
     // Exactly one request, of the selected source only. An empty or refused response never leads to a second request.
     const response = await transport.call(SOURCE_OPERATIONS[source]);
     if (response.status !== 200) return { exitCode: 1, error: 'broker returned HTTP ' + response.status };
+    if (source === 'instrument-metadata') return { exitCode: 0, report: instrumentMetadataReport(response.body) };
+    if (source === 'me') return { exitCode: 0, report: meScopesReport(response.body) };
     const report = observeDemoResponse(source, response.body, {
       pseudonymizeIds: run.argv.includes('--pseudonymize-ids'),
       showInstrumentIds: run.argv.includes('--show-instrument-ids'),

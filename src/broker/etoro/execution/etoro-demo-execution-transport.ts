@@ -23,6 +23,26 @@ export interface DemoWireRequest {
   readonly requestId: string;
   /** The typed request body of open and close; absent for every other operation. */
   readonly body?: Readonly<Record<string, unknown>>;
+  /**
+   * O22 F10: the body as the exact JSON text to send, made and checked before the reservation (serializeRequestBody). When present
+   * it is what goes on the wire; it must be the serialization of `body`.
+   */
+  readonly serializedBody?: string;
+}
+
+/**
+ * O22 F10: the JSON text of a request body. A body that cannot be serialized is a local refusal (INTENT_INVALID) – never a network
+ * failure – so it is found before anything is sent and before the reservation.
+ */
+export function serializeRequestBody(body: Readonly<Record<string, unknown>>): string {
+  let text: string | undefined;
+  try {
+    text = JSON.stringify(body);
+  } catch {
+    throw new DemoExecutionError('INTENT_INVALID', 'request body cannot be serialized');
+  }
+  if (typeof text !== 'string') throw new DemoExecutionError('INTENT_INVALID', 'request body cannot be serialized');
+  return text;
 }
 
 export type DemoWireResult =
@@ -86,6 +106,24 @@ function urlMatchesOperation(operation: DemoExecutionOperation, url: string): bo
   return pattern.test(path) && path.includes('/demo/');
 }
 
+/**
+ * The checks every request must pass before it may be sent: an allowed operation, a URL built for it, a UUID request id, and a body
+ * exactly for open and close. send() runs them first; since O22 (C3) the adapter also runs them while preparing a write, before the
+ * service reserves the submission, so a request that could never be sent is refused without spending the cycle budget.
+ */
+export function assertSendable(request: DemoWireRequest): void {
+  const spec = ETORO_DEMO_EXECUTION_OPERATIONS[request.operation];
+  if (!spec || !urlMatchesOperation(request.operation, request.url)) throw new DemoExecutionError('INTENT_INVALID', 'operation or URL is not allowed');
+  if (!isUuid(request.requestId)) throw new DemoExecutionError('INTENT_INVALID', 'requestId must be a UUID');
+  const hasBody = request.operation === 'demo.order.open' || request.operation === 'demo.position.close';
+  if (hasBody !== (request.body !== undefined)) throw new DemoExecutionError('INTENT_INVALID', 'request body does not match the operation');
+  if (!hasBody && request.serializedBody !== undefined) throw new DemoExecutionError('INTENT_INVALID', 'request body does not match the operation');
+  // The text to send must be exactly the serialization of the checked body.
+  if (hasBody && request.serializedBody !== undefined && request.serializedBody !== serializeRequestBody(request.body!)) {
+    throw new DemoExecutionError('INTENT_INVALID', 'serialized body does not match the body');
+  }
+}
+
 export class HttpsDemoExecutionTransport implements DemoExecutionTransport {
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
@@ -101,11 +139,11 @@ export class HttpsDemoExecutionTransport implements DemoExecutionTransport {
   }
 
   async send(request: DemoWireRequest): Promise<DemoWireResult> {
+    assertSendable(request);
     const spec = ETORO_DEMO_EXECUTION_OPERATIONS[request.operation];
-    if (!spec || !urlMatchesOperation(request.operation, request.url)) throw new DemoExecutionError('INTENT_INVALID', 'operation or URL is not allowed');
-    if (!isUuid(request.requestId)) throw new DemoExecutionError('INTENT_INVALID', 'requestId must be a UUID');
     const hasBody = request.operation === 'demo.order.open' || request.operation === 'demo.position.close';
-    if (hasBody !== (request.body !== undefined)) throw new DemoExecutionError('INTENT_INVALID', 'request body does not match the operation');
+    // O22 F10: serialized before the fetch, outside its try: a body that cannot be serialized is a local refusal, never "network".
+    const bodyText = hasBody ? (request.serializedBody ?? serializeRequestBody(request.body!)) : undefined;
     const headers: Record<string, string> = {
       accept: 'application/json',
       'x-api-key': this.options.credentials.apiKey,
@@ -118,7 +156,7 @@ export class HttpsDemoExecutionTransport implements DemoExecutionTransport {
       response = await this.fetchFn(request.url, {
         method: spec.method,
         headers,
-        ...(hasBody ? { body: JSON.stringify(request.body) } : {}),
+        ...(bodyText !== undefined ? { body: bodyText } : {}),
         redirect: 'error',
         signal: AbortSignal.timeout(this.timeoutMs),
       });

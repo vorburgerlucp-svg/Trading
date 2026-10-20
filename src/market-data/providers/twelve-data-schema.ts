@@ -106,6 +106,8 @@ export interface TdQuote {
   name?: string;
   micCode?: string;
   currency?: string;
+  /** O22: currency_quote, which Twelve Data documents for crypto pairs. Kept as text; only an ISO code is ever used (twelve-data.ts). */
+  currencyQuote?: string;
   timestamp: number;
   lastQuoteAt?: number;
   open: string;
@@ -127,11 +129,13 @@ export function parseQuote(body: unknown): TdQuote {
   const name = optStr(q.name, 'name', 300);
   const micCode = optStr(q.mic_code, 'mic_code', 16);
   const currency = optStr(q.currency, 'currency', 16);
+  const currencyQuote = optStr(q.currency_quote, 'currency_quote', 32);
   return {
     symbol: str(q.symbol, 'symbol', 64),
     ...(name !== undefined ? { name: sanitizeText(name) } : {}),
     ...(micCode !== undefined ? { micCode } : {}),
     ...(currency !== undefined ? { currency } : {}),
+    ...(currencyQuote !== undefined ? { currencyQuote } : {}),
     timestamp,
     ...(lastQuoteAt !== undefined ? { lastQuoteAt } : {}),
     open: decimalText(q.open, 'open'),
@@ -169,6 +173,28 @@ export function parseSymbolSearch(body: unknown): TdSymbol[] {
       instrumentType: str(s.instrument_type, 'data[' + i + '].instrument_type', 64),
       country: str(s.country, 'data[' + i + '].country', 64),
       currency: str(s.currency, 'data[' + i + '].currency', 16),
+    };
+  });
+}
+
+/** O22: one row of GET /cryptocurrencies. The currencies are names (documented example "Bitcoin" / "US Dollar"), kept as sanitized text. */
+export interface TdCryptoPair {
+  symbol: string;
+  currencyBase: string;
+  currencyQuote: string;
+  availableExchanges: string[];
+}
+
+export function parseCryptocurrencies(body: unknown): TdCryptoPair[] {
+  const root = record(body, 'response');
+  if (root.status !== undefined && root.status !== 'ok') fail('status must be "ok"');
+  return array(root.data, 'data', 5000).map((raw, i) => {
+    const p = record(raw, 'data[' + i + ']');
+    return {
+      symbol: str(p.symbol, 'data[' + i + '].symbol', 64),
+      currencyBase: sanitizeText(str(p.currency_base, 'data[' + i + '].currency_base', 100)),
+      currencyQuote: sanitizeText(str(p.currency_quote, 'data[' + i + '].currency_quote', 100)),
+      availableExchanges: array(p.available_exchanges, 'data[' + i + '].available_exchanges', 500).map((e, j) => str(e, 'data[' + i + '].available_exchanges[' + j + ']', 64)),
     };
   });
 }

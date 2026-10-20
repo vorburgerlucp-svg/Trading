@@ -134,6 +134,16 @@ export interface StoredBar extends MarketBar {
   knowledgeVintageHash: string | null;
 }
 
+/**
+ * O22: where a currency came from. `stated`: the provider response itself. `reference`: the provider's reference data for the
+ * instrument (`source` names endpoint and field, `stated` is the raw value, `rule` how it became an ISO code, `retrievedAt` when the
+ * reference was read). `unresolved`: no currency, and why. Informational: it is not part of the quote's content hash and is not stored.
+ */
+export type CurrencyOrigin =
+  | { readonly kind: 'stated'; readonly field: string }
+  | { readonly kind: 'reference'; readonly source: string; readonly stated: string; readonly rule: string; readonly retrievedAt: string }
+  | { readonly kind: 'unresolved'; readonly reason: string };
+
 export interface MarketQuote {
   instrumentId: string;
   source: string;
@@ -146,6 +156,8 @@ export interface MarketQuote {
   previousClose?: Decimal;
   volume?: Decimal;
   currency?: string;
+  /** O22: the origin of `currency` (or why there is none), as the provider determined it. Not hashed, not stored. */
+  currencyOrigin?: CurrencyOrigin;
   /** Provider's view whether the market was open; informational, the calendar decides. */
   marketOpen?: boolean;
   observedAt: string;

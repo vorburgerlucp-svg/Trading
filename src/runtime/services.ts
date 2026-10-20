@@ -10,6 +10,7 @@ import {
   INTERVAL_MS,
   type BarInterval,
   type BarSession,
+  type CurrencyOrigin,
   type Instrument,
   type PriceAdjustment,
   type StoredBar,
@@ -21,6 +22,11 @@ import type { PortfolioKillSwitchStore } from '../safety/portfolio-kill-switch-s
 import { BrokerError } from '../broker/broker-errors.js';
 import type { EtoroBrokerService } from '../broker/etoro/etoro-broker-service.js';
 import type { EtoroDemoExecutionService } from '../broker/etoro/execution/etoro-demo-execution-service.js';
+import { reconcileDemoCycle } from '../broker/etoro/execution/demo-cycle-reconciliation.js';
+import { evaluateDemoCycleTest } from '../broker/etoro/execution/demo-cycle-test-verdict.js';
+import { assessDemoSafetyReadiness } from '../broker/etoro/execution/demo-safety-readiness.js';
+import type { EtoroDemoAccountSafetySource } from '../broker/etoro/execution/demo-account-safety.js';
+import { DEMO_E2E_CYCLE_POLICY } from '../broker/etoro/execution/execution-gate.js';
 import type { BarsRequest, DemoExecutionRoutes, InstrumentRegisterRequest, InstrumentSearchItem, QuantRequest, RuntimeHealth, RuntimeServices } from './app.js';
 import { RuntimeApiError } from './errors.js';
 import type { OperatorIdentity } from './operator-auth.js';
@@ -49,6 +55,8 @@ export interface RuntimeDeps {
   etoro?: EtoroBrokerService | null;
   /** The eToro demo execution service (O21). Absent unless ETORO_DEMO_EXECUTION_ENABLED=1; the routes then answer EXECUTION_DISABLED. */
   etoroDemoExecution?: EtoroDemoExecutionService | null;
+  /** O22: the demo account safety source, for its status only (the execution service reads its decisions). */
+  etoroDemoAccountSafety?: EtoroDemoAccountSafetySource | null;
 }
 
 function sanitizeName(value: unknown): string | null {
@@ -89,7 +97,15 @@ function toSearchItem(candidate: InstrumentCandidate, provider: string, registry
     mic: pattern(candidate.mic, /^[A-Z0-9]{4}$/),
     currency: pattern(candidate.currency, /^[A-Z0-9]{3,10}$/),
     timezone: validTimezone(candidate.timezone),
+    ...(candidate.currencyOrigin !== undefined ? { currencyOrigin: candidate.currencyOrigin } : {}),
   };
+}
+
+/** O22: the registry event names where a currency that the search row did not state came from. */
+function registrationReason(origin: CurrencyOrigin | undefined): string {
+  const base = 'explicit local runtime instrument registration with provider mapping';
+  if (origin?.kind !== 'reference') return base;
+  return base + '; currency from ' + origin.source + ' "' + origin.stated + '" by rule ' + origin.rule + ', reference read at ' + origin.retrievedAt;
 }
 
 function adjustmentFor(mode: MarketDataMode): PriceAdjustment {
@@ -122,13 +138,15 @@ function barJson(bar: StoredBar): unknown {
   };
 }
 
-function quoteJson(quote: StoredQuote, freshness: 'fresh' | 'stale', mode: MarketDataMode): unknown {
+function quoteJson(quote: StoredQuote, freshness: 'fresh' | 'stale', mode: MarketDataMode, currencyOrigin: CurrencyOrigin | null): unknown {
   return {
     instrumentId: quote.instrumentId,
     source: quote.source,
     last: quote.last.toString(),
     bid: quote.bid === undefined ? null : quote.bid.toString(),
     ask: quote.ask === undefined ? null : quote.ask.toString(),
+    currency: quote.currency ?? null,
+    currencyOrigin,
     observedAt: quote.observedAt,
     availableAt: quote.availableAt,
     retrievedAt: quote.retrievedAt,
@@ -240,7 +258,7 @@ export class RuntimeServiceImpl implements RuntimeServices {
       providerSymbol: item.providerSymbol,
       validFrom: request.validFrom,
       ...(item.exchange !== null ? { exchange: item.exchange } : {}),
-    }, { at: now, by: { kind: 'system', id: 'nexus-runtime' }, reason: 'explicit local runtime instrument registration with provider mapping' });
+    }, { at: now, by: { kind: 'system', id: 'nexus-runtime' }, reason: registrationReason(candidate.currencyOrigin) });
     return { ...item, instrumentId: instrument.instrumentId };
   }
 
@@ -290,11 +308,13 @@ export class RuntimeServiceImpl implements RuntimeServices {
   async quote(instrumentId: string): Promise<unknown> {
     const provider = this.requireProvider();
     this.requireInstrument(instrumentId);
-    const { quote } = await this.deps.marketData.refreshQuote(instrumentId, provider.providerId);
+    const { quote, fetched } = await this.deps.marketData.refreshQuote(instrumentId, provider.providerId);
     if (!quote) throw new MarketDataError('provider_unavailable', provider.providerId, 'no quote could be stored');
     const ageMs = Date.parse(this.now()) - Date.parse(quote.observedAt);
     const freshness = ageMs >= 0 && ageMs <= QUOTE_MAX_AGE_MS ? 'fresh' : 'stale';
-    return quoteJson(quote, freshness, this.deps.marketDataMode);
+    // The origin is known only for the quote just fetched; for an older stored revision it is reported as unknown (null).
+    const sameQuote = fetched.source === quote.source && fetched.observedAt === quote.observedAt && (fetched.currency ?? null) === (quote.currency ?? null);
+    return quoteJson(quote, freshness, this.deps.marketDataMode, sameQuote ? fetched.currencyOrigin ?? null : null);
   }
 
   async runQuant(request: QuantRequest): Promise<unknown> {
@@ -374,6 +394,40 @@ export class RuntimeServiceImpl implements RuntimeServices {
   async etoroReconciliation(requireFresh: boolean): Promise<unknown> {
     const etoro = this.deps.etoro ?? null;
     return { reconciliation: etoro === null ? null : await etoro.latestReconciliation(requireFresh) };
+  }
+
+  /**
+   * O22: the controlled demo cycle, read only. Built from the intent log and the latest stored O20 snapshot: no broker request, no
+   * write. The safety readiness is a report, never a decision: the gate's decisions come from the demo account safety source.
+   */
+  async etoroDemoCycle(): Promise<unknown> {
+    const etoro = this.deps.etoro ?? null;
+    const execution = this.deps.etoroDemoExecution ?? null;
+    const snapshot = etoro === null ? null : await etoro.latestSnapshot();
+    const broker = etoro === null ? { connection: 'not_connected', lastSuccessfulSync: null } : (() => {
+      const s = etoro.status().etoro;
+      return { connection: s.connection, lastSuccessfulSync: s.lastSuccessfulSync };
+    })();
+    await this.deps.killSwitch.sync();
+    const accountSafety = this.deps.etoroDemoAccountSafety ?? null;
+    const safetyReadiness = assessDemoSafetyReadiness({
+      now: this.now(),
+      broker,
+      snapshot,
+      killSwitch: this.deps.killSwitch.current(),
+      maxSyncAgeMs: DEMO_E2E_CYCLE_POLICY.maxBrokerSyncAgeMs,
+      source: accountSafety === null ? null : accountSafety.status(),
+    });
+    if (execution === null) {
+      return { cycle: { execution: 'disabled', buildLocked: BUILD_LOCKS.etoroDemoExecution, budget: null, reconciliation: null, test: null, safetyReadiness } };
+    }
+    // O22 C1/F4: the stored sync history is read first, the intents after it, so every intent that could own an entry of a snapshot
+    // is at least as recent as that snapshot. The test verdict is historical (stored state only, never the time of reading); the
+    // reconciliation describes the current account.
+    const history = etoro === null ? { observations: [], missingSnapshotRecords: 0 } : await etoro.snapshotHistory();
+    const [budget, intents] = await Promise.all([execution.cycleBudget(), execution.list()]);
+    const test = evaluateDemoCycleTest({ intents, snapshots: history.observations, missingSnapshotRecords: history.missingSnapshotRecords });
+    return { cycle: { execution: 'enabled', buildLocked: BUILD_LOCKS.etoroDemoExecution, budget, reconciliation: reconcileDemoCycle(intents, snapshot), test, safetyReadiness } };
   }
 }
 

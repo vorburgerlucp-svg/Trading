@@ -42,9 +42,9 @@ async function rows(database: string, text: string): Promise<Record<string, unkn
 const databases: TestDatabase[] = [];
 const OPERATOR_TOKEN = 'O21-PG-OPERATOR-TOKEN-0123456789abcdef-xyz';
 
-/** The route takes the intent without createdBy: the creator is the authenticated operator. */
+/** The route takes the intent without createdBy: the creator is the authenticated operator. Since O22 the runtime cycle policy caps an open at 100 USD. */
 function routeIntent(): Record<string, unknown> {
-  const { createdBy: _ignored, ...intent } = openInput();
+  const { createdBy: _ignored, ...intent } = openInput({ amount: '100' });
   void _ignored;
   return intent;
 }
@@ -95,7 +95,11 @@ describe.skipIf(!pgAvailable)('O21 runtime on PostgreSQL' + (pgAvailable ? '' : 
       const created = await post('/api/broker/etoro/demo/intents', routeIntent());
       expect(created.status).toBe(201);
       expect(created.json.intent.state).toBe('REJECTED');
-      expect(created.json.intent.gateReasons).toContain('PORTFOLIO_SAFETY_NOT_CONNECTED');
+      // O22: the demo account safety source is wired and its evidence is recorded, so it reads /demo/pnl once. The fixture answers
+      // with a portfolio body without accountCurrencyId: the valuation is a DATA_HOLD (never read as USD), which blocks the open.
+      expect(created.json.intent.gateReasons).toContain('PORTFOLIO_SAFETY_BLOCKS_RISK_INCREASE');
+      expect(created.json.intent.gateReasons).not.toContain('PORTFOLIO_SAFETY_NOT_CONNECTED');
+      expect(readOnly.calls).toEqual(['portfolio.demo', 'pnl.demo']);
       expect(created.json.intent.intent.createdBy).toEqual({ kind: 'human', id: 'operator-pg' });
       intentId = created.json.intent.intentId;
 
@@ -108,6 +112,8 @@ describe.skipIf(!pgAvailable)('O21 runtime on PostgreSQL' + (pgAvailable ? '' : 
 
     const logs = await rows(db.name, "SELECT log_name, (SELECT count(*)::int FROM append_only_records r WHERE r.log_name = l.log_name) AS n FROM append_only_logs l WHERE log_name LIKE 'etoro-demo-%' ORDER BY 1");
     expect(logs).toEqual([
+      // O22: the demo account safety source is wired; without released evidence it reads nothing and records no valuation.
+      { log_name: 'etoro-demo-account-valuations', n: 0 },
       { log_name: 'etoro-demo-broker-confirmations', n: 0 },
       { log_name: 'etoro-demo-execution-attempts', n: 0 },
       { log_name: 'etoro-demo-execution-intents', n: 2 },

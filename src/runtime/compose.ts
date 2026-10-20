@@ -28,6 +28,8 @@ import {
   type IntentEvent,
   type ReconciliationRecord,
 } from '../broker/etoro/execution/etoro-demo-execution-service.js';
+import { DEMO_E2E_CYCLE_POLICY } from '../broker/etoro/execution/execution-gate.js';
+import { EtoroDemoAccountSafetySource, type DemoAccountValuationRecord } from '../broker/etoro/execution/demo-account-safety.js';
 import { NO_DEMO_SAFETY_SOURCE, storedQuoteSource } from './demo-execution-sources.js';
 
 export interface ComposeInput {
@@ -58,7 +60,9 @@ export interface ComposeInput {
     attempts: AppendOnlyLog<AttemptRecord>;
     confirmations: AppendOnlyLog<ConfirmationRecord>;
     reconciliations: AppendOnlyLog<ReconciliationRecord>;
-    /** TESTS ONLY. The entry point never passes them: the runtime has no eToro demo safety source, and quotes come from the store. */
+    /** O22: the append-only valuations of the demo account (risk day of the demo account safety source). */
+    accountValuations?: AppendOnlyLog<DemoAccountValuationRecord>;
+    /** TESTS ONLY. The entry point never passes them: safety comes from the demo account source, quotes from the store. */
     safetyForTests?: DemoSafetySource;
     quotesForTests?: DemoQuoteSource;
   };
@@ -93,7 +97,18 @@ export async function composeRuntime(input: ComposeInput): Promise<RuntimeServic
       })
     : null;
   const executionInput = input.etoroDemoExecution;
-  const demoExecution = executionInput
+  // O22: the demo account safety source (B2 variant A). It needs the read-only eToro transport and the valuation log. It answers
+  // null while the evidence record says a non-empty /demo/pnl was not observed live, and on every failed or unverifiable read.
+  let demoExecution: EtoroDemoExecutionService | null = null;
+  const accountSafety = executionInput && input.etoro && executionInput.accountValuations
+    ? new EtoroDemoAccountSafetySource({
+        transport: input.etoro.transport,
+        killSwitch,
+        valuations: executionInput.accountValuations,
+        nexusPositionIds: async () => new Set((demoExecution === null ? [] : await demoExecution.list()).flatMap((v) => v.brokerPositionIds)),
+      })
+    : null;
+  demoExecution = executionInput
     ? new EtoroDemoExecutionService({
         adapter: new EToroDemoExecutionAdapter({ transport: executionInput.transport, clock }),
         intents: executionInput.intents,
@@ -102,7 +117,7 @@ export async function composeRuntime(input: ComposeInput): Promise<RuntimeServic
         reconciliations: executionInput.reconciliations,
         registry,
         killSwitch,
-        safety: executionInput.safetyForTests ?? NO_DEMO_SAFETY_SOURCE,
+        safety: executionInput.safetyForTests ?? accountSafety ?? NO_DEMO_SAFETY_SOURCE,
         quotes: executionInput.quotesForTests ?? storedQuoteSource(input.marketData, input.marketDataMode),
         brokerStatus: () => {
           if (etoro === null) return { connection: 'not_connected', lastSuccessfulSync: null };
@@ -110,11 +125,15 @@ export async function composeRuntime(input: ComposeInput): Promise<RuntimeServic
           return { connection: status.connection, lastSuccessfulSync: status.lastSuccessfulSync };
         },
         executionEnabled: true,
+        // O22: the runtime runs the one controlled demo cycle only: one open and one close submission over the whole intent log,
+        // at most 100 USD at leverage 1. Stricter than the O21 default in every field; a code constant, never configuration.
+        policy: DEMO_E2E_CYCLE_POLICY,
         clock,
       })
     : null;
   return createRuntimeServices({
     etoroDemoExecution: demoExecution,
+    etoroDemoAccountSafety: accountSafety,
     registry,
     marketData,
     quant,

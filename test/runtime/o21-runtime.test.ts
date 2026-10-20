@@ -118,9 +118,12 @@ async function call(r: Runtime, method: string, path: string, options: CallOptio
 
 const INTENTS = '/api/broker/etoro/demo/intents';
 
-/** The route takes the intent without createdBy: the creator is the authenticated operator. */
+/**
+ * The route takes the intent without createdBy: the creator is the authenticated operator. Since O22 the runtime uses the cycle
+ * policy (at most 100 USD per open), so the route intent invests 100 USD.
+ */
 function routeIntent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  const { createdBy: _ignored, ...intent } = openInput(overrides);
+  const { createdBy: _ignored, ...intent } = openInput({ amount: '100', ...overrides });
   void _ignored;
   return intent;
 }

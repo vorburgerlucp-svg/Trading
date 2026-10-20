@@ -1,7 +1,9 @@
 // The trusted inputs of the O21 demo execution gate in the runtime. Both are honest about what the runtime has:
 //
-//   - Portfolio safety: no source exists yet for the eToro demo account, so the runtime source always answers null. The gate then
-//     refuses every open with PORTFOLIO_SAFETY_NOT_CONNECTED. The runtime never produces a safety decision of its own.
+//   - Portfolio safety: with eToro and demo execution enabled, the runtime wires the eToro demo account safety source (O22,
+//     EtoroDemoAccountSafetySource in compose.ts). NO_DEMO_SAFETY_SOURCE below is only the fallback when that source cannot be
+//     built: it always answers null, and the gate then refuses every open with PORTFOLIO_SAFETY_NOT_CONNECTED. The runtime never
+//     produces a safety decision of its own.
 //   - Quotes: the latest stored quote of the instrument. It counts as production only when its stored source is a production
 //     source and the runtime itself runs with production market data. Demo and fixture data are never usable for an order.
 

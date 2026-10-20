@@ -22,9 +22,8 @@ import { AppendOnlyLogError, type AppendOnlyLog } from '../../../persistence/app
 import { hashOf } from '../../../persistence/canonical-json.js';
 import type { InstrumentRegistry } from '../../../market-data/instrument-registry.js';
 import type { PortfolioKillSwitchStore } from '../../../safety/portfolio-kill-switch-store.js';
-import type { PortfolioSafetyDecision } from '../../../safety/portfolio-safety-envelope.js';
 import { DemoExecutionError, type DemoExecutionErrorCode } from './etoro-demo-execution-errors.js';
-import type { EToroDemoExecutionAdapter, ReadOutcome, WriteOutcome } from './etoro-demo-execution-adapter.js';
+import type { EToroDemoExecutionAdapter, PreparedWrite, ReadOutcome, WriteOutcome } from './etoro-demo-execution-adapter.js';
 import { CANCELLABLE_STATUS_IDS, ETORO_ORDER_STATUS, type BrokerOrderOutcome, type BrokerOrderStatus } from './etoro-demo-execution-validation.js';
 import {
   DEFAULT_DEMO_EXECUTION_POLICY,
@@ -34,6 +33,7 @@ import {
   type DemoExecutionPolicy,
   type GateBook,
   type GateQuote,
+  type GateSafetyDecision,
   type GateVerdict,
 } from './execution-gate.js';
 import {
@@ -104,6 +104,8 @@ export interface ConfirmationRecord {
   readonly outcome: BrokerOrderOutcome | null;
   readonly errorCode: number | null;
   readonly observedAt: string;
+  /** O22: the product type an order status read states (asset.settlementType), when it states one. */
+  readonly settlementType?: BrokerOrderStatus['settlementType'];
 }
 
 export interface ReconciliationRecord {
@@ -121,7 +123,7 @@ export interface ReconciliationRecord {
 
 export interface DemoSafetySource {
   /** The current portfolio safety decision from a trusted, verified source, or null when none is connected. */
-  current(now: string): Promise<PortfolioSafetyDecision | null>;
+  current(now: string): Promise<GateSafetyDecision | null>;
 }
 
 export interface DemoQuoteSource {
@@ -155,8 +157,26 @@ export interface IntentView {
   brokerPositionIds: number[];
   lastStatusId: number | null;
   lastStatusName: string | null;
+  /** O22: the product type the broker stated in an order status read (cfd, real, ...), or null. */
+  brokerSettlementType: string | null;
+  /**
+   * O22 F6: every broker status read of this intent, in log order, each as the broker stated it (no merging). The test verdict takes
+   * its product type and position binding from the one read that confirmed the fill, not from the merged fields above.
+   */
+  statusReads: readonly IntentStatusRead[];
   gateReasons: readonly string[];
-  history: { state: IntentState; at: string; reason: string }[];
+  /** confirmationId: the stored broker confirmation a broker-confirmed state rests on (present only for those states). */
+  history: { state: IntentState; at: string; reason: string; confirmationId?: string }[];
+}
+
+/** O22 F6: one order status read of an intent, exactly as recorded. */
+export interface IntentStatusRead {
+  readonly confirmationId: string;
+  readonly kind: 'order_status' | 'close_order_status';
+  readonly outcome: BrokerOrderOutcome | null;
+  readonly settlementType: string | null;
+  readonly brokerPositionIds: readonly number[];
+  readonly observedAt: string;
 }
 
 interface Projection {
@@ -170,6 +190,7 @@ interface Projection {
   brokerOrderId: number | null;
   positionIds: number[];
   lastStatusId: number | null;
+  settlementType: string | null;
   gateReasons: readonly string[];
 }
 
@@ -324,14 +345,27 @@ export class EtoroDemoExecutionService {
     }
 
     const { verdict, exposure } = await this.runGate(p.intent, 'execute');
-    const nowMs = this.deps.clock().getTime();
-    if (!verdict.passed || !this.deps.adapter.pacer.tryAcquire(nowMs)) {
-      const reasons = verdict.passed ? ['BROKER_WRITE_PACING'] : [...verdict.reasons];
-      await this.recordGateRefusal(intentId, reasons);
-      throw new DemoExecutionError('GATE_REFUSED', reasons.join(','), reasons);
+    if (!verdict.passed) {
+      await this.recordGateRefusal(intentId, verdict.reasons);
+      throw new DemoExecutionError('GATE_REFUSED', verdict.reasons.join(','), verdict.reasons);
     }
 
+    // O22 C3: the request is built and checked (body, URL, request id, the transport's own checks) BEFORE the reservation. A request
+    // that could never be sent is refused like a gate refusal: nothing is sent, the intent stays APPROVED, and no budget is spent.
     const requestId = this.nextRequestId().toLowerCase();
+    let prepared: PreparedWrite<{ brokerOrderId?: number; closeOrderId?: number; statusId?: number }>;
+    try {
+      prepared = p.intent.action === 'open' ? this.deps.adapter.prepareOpen(p.intent, requestId) : this.deps.adapter.prepareClose(p.intent, requestId);
+    } catch (error) {
+      if (!(error instanceof DemoExecutionError)) throw error;
+      await this.recordGateRefusal(intentId, ['REQUEST_NOT_SENDABLE']);
+      throw new DemoExecutionError('GATE_REFUSED', 'REQUEST_NOT_SENDABLE', ['REQUEST_NOT_SENDABLE']);
+    }
+    if (!this.deps.adapter.pacer.tryAcquire(this.deps.clock().getTime())) {
+      await this.recordGateRefusal(intentId, ['BROKER_WRITE_PACING']);
+      throw new DemoExecutionError('GATE_REFUSED', 'BROKER_WRITE_PACING', ['BROKER_WRITE_PACING']);
+    }
+
     const operation = p.intent.action === 'open' ? 'demo.order.open' : 'demo.position.close';
     const attemptId = 'eatt_' + hashOf({ intentId, operation, requestId }).slice(0, 40);
     // The reservation step and the at-most-once guard. SUBMITTING is entered once, only from APPROVED, and only if the book limits
@@ -357,11 +391,11 @@ export class EtoroDemoExecutionService {
 
     let outcome: WriteOutcome<{ brokerOrderId?: number; closeOrderId?: number; statusId?: number }>;
     try {
-      outcome = p.intent.action === 'open'
-        ? await this.deps.adapter.submitOpen(p.intent, requestId)
-        : await this.deps.adapter.submitClose(p.intent, requestId);
+      // From SUBMITTING on the budget is spent, whatever happens: the prepared request is sent once and never repeated.
+      outcome = await this.deps.adapter.submit(prepared);
     } catch (error) {
-      // A local refusal before the wire: the request was not sent.
+      // A local refusal before the wire: the request was not sent. (The request was checked before the reservation, so this is not
+      // expected; it still spends the budget, because SUBMITTING is recorded.)
       await this.finishAttempt(attemptId, intentId, operation, requestId, { outcome: 'not_sent', httpStatus: null, code: error instanceof DemoExecutionError ? error.code : 'LOCAL_ERROR' });
       await this.transition(intentId, 'REJECTED', 'NOT_SENT_LOCAL_REFUSAL', { attemptId });
       throw error;
@@ -452,6 +486,7 @@ export class EtoroDemoExecutionService {
       statusId: status.statusId,
       outcome: status.outcome,
       errorCode: status.errorCode,
+      ...(status.settlementType !== null ? { settlementType: status.settlementType } : {}),
     });
     const target = OUTCOME_STATE[status.outcome];
     if (target === p.state) return;
@@ -601,7 +636,7 @@ export class EtoroDemoExecutionService {
         if (!e.intent) continue;
         map.set(e.intentId, {
           intent: e.intent, state: 'CREATED', events: [e], exposureUsd: Decimal.from(0), approvedBy: null, submitRequestId: null, submittingAt: null,
-          brokerOrderId: null, positionIds: [], lastStatusId: null, gateReasons: [],
+          brokerOrderId: null, positionIds: [], lastStatusId: null, settlementType: null, gateReasons: [],
         });
         continue;
       }
@@ -625,6 +660,7 @@ export class EtoroDemoExecutionService {
       }
       for (const id of c.brokerPositionIds) if (!p.positionIds.includes(id)) p.positionIds.push(id);
       if (c.statusId !== null) p.lastStatusId = c.statusId;
+      if (c.settlementType !== undefined && c.settlementType !== null) p.settlementType = c.settlementType;
     }
     return map;
   }
@@ -639,9 +675,29 @@ export class EtoroDemoExecutionService {
       brokerPositionIds: [...p.positionIds],
       lastStatusId: p.lastStatusId,
       lastStatusName: statusName(p.lastStatusId),
+      brokerSettlementType: p.settlementType,
+      statusReads: this.statusReadsOf(p.intent.intentId),
       gateReasons: p.gateReasons,
-      history: p.events.map((e) => ({ state: e.state, at: e.at, reason: e.reason })),
+      history: p.events.map((e) => ({ state: e.state, at: e.at, reason: e.reason, ...(e.confirmationId !== undefined ? { confirmationId: e.confirmationId } : {}) })),
     };
+  }
+
+  /** O22 F6: the order status reads of an intent, in log order, unmerged. */
+  private statusReadsOf(intentId: string): IntentStatusRead[] {
+    const reads: IntentStatusRead[] = [];
+    for (const record of this.deps.confirmations.all()) {
+      const c = record.payload;
+      if (c.intentId !== intentId || (c.kind !== 'order_status' && c.kind !== 'close_order_status')) continue;
+      reads.push(Object.freeze({
+        confirmationId: c.confirmationId,
+        kind: c.kind,
+        outcome: c.outcome,
+        settlementType: c.settlementType ?? null,
+        brokerPositionIds: Object.freeze([...c.brokerPositionIds]),
+        observedAt: c.observedAt,
+      }));
+    }
+    return reads;
   }
 
   private async appendEvent(event: IntentEvent): Promise<void> {
@@ -729,13 +785,34 @@ export class EtoroDemoExecutionService {
       activeDuplicate: this.activeDuplicate(intent, intent.intentId),
       closeTargetKnown,
       closeTargetAlreadyClosing,
+      // O22 cycle budget: every intent that ever reached SUBMITTING, whatever happened after it (rejected, ambiguous, crashed).
+      openSubmissions: all.filter((p) => p.intent.action === 'open' && p.submittingAt !== null).length,
+      closeSubmissions: all.filter((p) => p.intent.action === 'close' && p.submittingAt !== null).length,
+    };
+  }
+
+  /** O22: the cycle budget of the policy and how much of it the intent log has spent. Read only; no broker request. */
+  async cycleBudget(): Promise<{ policyVersion: string; maxOpenSubmissions: number | null; maxCloseSubmissions: number | null; openSubmissions: number; closeSubmissions: number }> {
+    await this.syncAll();
+    const all = [...this.projections().values()];
+    return {
+      policyVersion: this.policy.version,
+      maxOpenSubmissions: this.policy.maxOpenSubmissions,
+      maxCloseSubmissions: this.policy.maxCloseSubmissions,
+      openSubmissions: all.filter((p) => p.intent.action === 'open' && p.submittingAt !== null).length,
+      closeSubmissions: all.filter((p) => p.intent.action === 'close' && p.submittingAt !== null).length,
     };
   }
 
   private async runGate(intent: ExecutionIntent, phase: 'create' | 'execute'): Promise<{ verdict: GateVerdict; exposure: Decimal }> {
     const now = this.now();
     await this.deps.killSwitch.sync();
-    const [safety, quote] = await Promise.all([this.deps.safety.current(now), this.deps.quotes.latest(intent.instrumentId, now)]);
+    // O22 C2: the account safety decision is read for an open only. No gate check of a close reads it (every safety check applies to
+    // opens), so a close does not depend on the account read, its broker request or its valuation log.
+    const [safety, quote] = await Promise.all([
+      intent.action === 'open' ? this.deps.safety.current(now) : Promise.resolve(null),
+      this.deps.quotes.latest(intent.instrumentId, now),
+    ]);
     const instrument = this.deps.registry.get(intent.instrumentId) ?? null;
     const mapping = instrument === null ? null : this.deps.registry.mappingAt(intent.instrumentId, ETORO_MAPPING_PROVIDER, now);
     const verdict = evaluateDemoExecutionGate({

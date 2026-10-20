@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { closePositionBody, openOrderBody, type ExecutionIntent } from './execution-intent.js';
 import { demoOperationUrl, type DemoLookupQuery } from './etoro-demo-execution-endpoints.js';
 import { DemoExecutionError } from './etoro-demo-execution-errors.js';
-import type { DemoExecutionTransport, DemoWireResult } from './etoro-demo-execution-transport.js';
+import { assertSendable, serializeRequestBody, type DemoExecutionTransport, type DemoWireRequest, type DemoWireResult } from './etoro-demo-execution-transport.js';
 import {
   parseCancelAccepted,
   parseCloseOrderInfo,
@@ -35,6 +35,12 @@ export type WriteOutcome<T> =
   | { readonly kind: 'accepted'; readonly httpStatus: number; readonly result: T }
   | { readonly kind: 'rejected'; readonly httpStatus: number; readonly code: 'BROKER_AUTH_REQUIRED' | 'BROKER_RATE_LIMITED' | 'BROKER_REJECTED'; readonly retryAfterSeconds: number | null }
   | { readonly kind: 'ambiguous'; readonly httpStatus: number | null; readonly reason: AmbiguityReason };
+
+/** O22 C3: a write that was built and validated before the reservation; submit() sends it once. */
+export interface PreparedWrite<T> {
+  readonly request: DemoWireRequest;
+  readonly parse: (raw: unknown) => T;
+}
 
 export type ReadOutcome = { readonly kind: 'found'; readonly status: BrokerOrderStatus } | { readonly kind: 'not_found' };
 
@@ -89,21 +95,41 @@ export class EToroDemoExecutionAdapter {
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
+  /**
+   * O22 C3/F10: builds and validates the open request without sending anything (body, its exact JSON text, URL, request id, the
+   * transport's own checks). A request that could never be sent throws here, before the service reserves the submission; the
+   * transport then sends exactly this text.
+   */
+  prepareOpen(intent: ExecutionIntent, requestId: string): PreparedWrite<OpenOrderAccepted> {
+    const body = openOrderBody(intent);
+    const request: DemoWireRequest = { operation: 'demo.order.open', url: demoOperationUrl('demo.order.open'), requestId, body, serializedBody: serializeRequestBody(body) };
+    assertSendable(request);
+    return Object.freeze({ request, parse: (raw: unknown) => parseOpenOrderAccepted(raw, requestId) });
+  }
+
+  /** O22 C3: builds and validates the close request of a known position without sending anything. */
+  prepareClose(intent: ExecutionIntent, requestId: string): PreparedWrite<CloseSubmitted> {
+    const positionId = intent.positionId;
+    if (positionId === null) throw new DemoExecutionError('INTENT_INVALID', 'a close needs a positionId');
+    const body = closePositionBody(intent);
+    const request: DemoWireRequest = { operation: 'demo.position.close', url: demoOperationUrl('demo.position.close', { positionId }), requestId, body, serializedBody: serializeRequestBody(body) };
+    assertSendable(request);
+    return Object.freeze({ request, parse: (raw: unknown) => parseCloseSubmitted(raw, { positionId, instrumentId: intent.etoroInstrumentId }) });
+  }
+
+  /** Sends a prepared write once. */
+  submit<T>(prepared: PreparedWrite<T>): Promise<WriteOutcome<T>> {
+    return this.write(prepared.request, prepared.parse);
+  }
+
   /** Opens a position: "Create an order" (mkt or mit). Sent once. */
   submitOpen(intent: ExecutionIntent, requestId: string): Promise<WriteOutcome<OpenOrderAccepted>> {
-    const body = openOrderBody(intent);
-    return this.write({ operation: 'demo.order.open', url: demoOperationUrl('demo.order.open'), requestId, body }, (raw) => parseOpenOrderAccepted(raw, requestId));
+    return this.submit(this.prepareOpen(intent, requestId));
   }
 
   /** Closes a known position at market, fully or by units: "Close demo position by units". Sent once. */
   submitClose(intent: ExecutionIntent, requestId: string): Promise<WriteOutcome<CloseSubmitted>> {
-    const positionId = intent.positionId;
-    if (positionId === null) throw new DemoExecutionError('INTENT_INVALID', 'a close needs a positionId');
-    const body = closePositionBody(intent);
-    return this.write(
-      { operation: 'demo.position.close', url: demoOperationUrl('demo.position.close', { positionId }), requestId, body },
-      (raw) => parseCloseSubmitted(raw, { positionId, instrumentId: intent.etoroInstrumentId }),
-    );
+    return this.submit(this.prepareClose(intent, requestId));
   }
 
   /** Cancels a pending order before it is executed. Sent once; the outcome is confirmed by a lookup. */

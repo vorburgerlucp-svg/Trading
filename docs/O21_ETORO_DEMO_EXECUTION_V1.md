@@ -2,6 +2,11 @@
 
 Status: core and runtime routes implemented and tested; **locked in build**. Controlled demo E2E: **not ready** (sections 1 and 12). `BUILD_LOCKS.etoroDemoExecution = true`: every demo broker write is refused in this build. No autonomous execution, no `AUTONOMOUS_DEMO`, no real trading. No live eToro request was sent while building O21: the verification is fixtures and unit tests.
 
+Since O22 (`O22_ETORO_DEMO_TRADING_E2E_V1.md`):
+- The runtime uses the stricter cycle policy `DEMO_E2E_CYCLE_POLICY`: at most 100 USD, one position, and one open and one close submission over the whole intent log.
+- Section 1 (the non-empty portfolio) is resolved for positions by O21A–O21C.
+- `PORTFOLIO_SAFETY_NOT_CONNECTED` and the build lock are unchanged.
+
 Branch: `feature/o21-etoro-demo-execution-v1`, based on `origin/main` (63e726e, the O20 merge).
 
 ## 1. Known blockers

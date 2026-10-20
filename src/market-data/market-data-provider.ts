@@ -8,6 +8,7 @@ import type {
   AssetClass,
   BarInterval,
   CorporateAction,
+  CurrencyOrigin,
   Instrument,
   MarketBar,
   MarketDataSource,
@@ -57,6 +58,8 @@ export interface InstrumentCandidate {
   assetClass: AssetClass | null;
   providerType?: string;
   currency?: string;
+  /** O22: set when the currency did not come from the search row itself (crypto pairs: the provider's reference data). */
+  currencyOrigin?: CurrencyOrigin;
   exchange?: string;
   mic?: string;
   timezone?: string;

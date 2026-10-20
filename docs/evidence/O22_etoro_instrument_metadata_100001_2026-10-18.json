@@ -1,0 +1,11 @@
+{
+  "schema": "etoro-instrument-metadata-observation:v1",
+  "endpoint": "GET /api/v2/market-data/instruments?instrumentsIds=100001",
+  "verdict": "accepted",
+  "metadata": {
+    "instrumentId": 100001,
+    "type": "Crypto",
+    "symbol": "ETH",
+    "displayName": "Ethereum"
+  }
+}
