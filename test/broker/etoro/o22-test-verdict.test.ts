@@ -53,10 +53,12 @@ function closeView(over: Partial<Parameters<typeof view>[0]> = {}): IntentView {
   return view({ id: 'eint_close', action: 'close', state: 'FILLED', history: CLOSE_HISTORY, positionId: POS, closesIntentId: 'eint_open', brokerOrderId: CLOSE_ORDER, ...over });
 }
 
-let sequence = 0;
-/** A stored observation: storedAt two seconds after observedAt unless stated (F2: its own times decide, never the time of reading). */
+/**
+ * A stored observation: storedAt two seconds after observedAt unless stated (F2: its own times decide, never the time of reading).
+ * Syncs run one after the other, so the sync log sequence follows the observation time.
+ */
 function snap(observedAt: string, positions: Array<{ positionId: number; etoroInstrumentId?: number; direction?: 'buy' | 'sell' }>, options: { storedAt?: string; orderIds?: number[] } = {}): DemoCycleSnapshot {
-  sequence += 1;
+  const sequence = Date.parse(observedAt);
   return {
     snapshotId: 'esnap_' + observedAt,
     observedAt,
@@ -144,7 +146,7 @@ describe('O22 C1 test verdict: passed only with every criterion proved', () => {
 
   it('the open position must have been observed by a sync after the open was submitted and before the close was filled (missing: incomplete, F3)', () => {
     expect(evaluateDemoCycleTest({ intents: [openView()], snapshots: [BASELINE] })).toMatchObject({ result: 'incomplete', pending: ['NO_CLOSE_SUBMITTED', 'OPEN_POSITION_NOT_OBSERVED'] });
-    // A snapshot only after the close was submitted does not count; once the close is submitted this is a failure.
+    // A snapshot observed after the close was submitted but before it was filled still counts (F3: the window ends at the close's fill).
     const late = snap('2026-10-20T10:20:03.000Z', [{ positionId: POS }]);
     // Observed after the close was submitted but before it was filled: it counts.
     expect(evaluateDemoCycleTest({ intents: [openView(), closeView()], snapshots: [BASELINE, late, FINAL] }).result).toBe('passed');

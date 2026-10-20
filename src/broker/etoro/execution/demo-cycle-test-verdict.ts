@@ -11,9 +11,10 @@
 //   - that confirming read states settlementType "real", and no read of the open states another product type;
 //   - a snapshot observed after the open was submitted and before the close was filled shows that position (instrument and side);
 //   - exactly one close of that position was submitted, and it is FILLED;
-//   - a closing snapshot: the first stored observation taken after the close was filled, at most ETORO_SNAPSHOT_MAX_AGE_MS after
-//     it, stored at most that long after it was taken, and no longer showing the position;
-//   - no other position and no other order in any snapshot of the test period (from the open's creation to the closing snapshot).
+//   - a closing snapshot: the first observation, in storage order, taken after the close was filled, at most
+//     ETORO_SNAPSHOT_MAX_AGE_MS after it, stored at most that long after it was taken, and no longer showing the position;
+//   - no other position and no other order in any snapshot of the test period (observed from the open's creation on, and stored
+//     up to and including the closing snapshot).
 // failed  as soon as a criterion is definitely broken. A failure is decided only on facts that a later event cannot change: final
 //         intent states, the confirming read, and snapshots judged by their own times. An entry of a snapshot is judged external
 //         only when no intent that could have owned it at that time can still turn out to own it.
@@ -129,16 +130,17 @@ export function evaluateDemoCycleTest(input: { intents: readonly IntentView[]; s
   const openSubmittingAt = entered(open, 'SUBMITTING')!.at;
   const openReads = readsOf(open);
 
-  // A partial fill is final only when the broker says so (outcome partially_filled_final), never because time has passed.
-  const lastOpenRead = openReads.length === 0 ? null : openReads[openReads.length - 1]!;
-  const partialFinal = open.state === 'PARTIALLY_FILLED' && lastOpenRead?.outcome === 'partially_filled_final';
+  // A partial fill is final only when the broker says so (outcome partially_filled_final), never because time has passed. Once any
+  // read of the open stated it, the failure stays (N2): a later read saying otherwise contradicts it and cannot undo it.
+  const statedFinalPartial = openReads.some((r) => r.outcome === 'partially_filled_final');
+  if (statedFinalPartial) failures.add('OPEN_PARTIALLY_FILLED_FINAL');
   if (open.state === 'REJECTED') failures.add('OPEN_REJECTED');
   else if (open.state === 'CANCELLED' || open.state === 'EXPIRED') failures.add('OPEN_NOT_FILLED');
   else if (open.state === 'AMBIGUOUS') pending.add('OPEN_AMBIGUOUS');
-  else if (partialFinal) failures.add('OPEN_PARTIALLY_FILLED_FINAL');
-  else if (open.state === 'PARTIALLY_FILLED') pending.add('OPEN_PARTIALLY_FILLED');
+  else if (open.state === 'PARTIALLY_FILLED' && !statedFinalPartial) pending.add('OPEN_PARTIALLY_FILLED');
   else if (OPEN_PENDING_STATES.has(open.state)) pending.add('OPEN_PENDING');
-  let openBindingFinal = FINAL_STATES.has(open.state) || partialFinal;
+  // The binding can still grow while the open is PARTIALLY_FILLED (a refresh is allowed there), so it is final only in a final state.
+  let openBindingFinal = FINAL_STATES.has(open.state);
 
   // The positions the broker confirmed by fill reads (the same reads closePositionOf trusts).
   const fillReads = openReads.filter((r) => r.kind === 'order_status' && r.outcome !== null && FILL_OUTCOMES.has(r.outcome));
@@ -190,7 +192,9 @@ export function evaluateDemoCycleTest(input: { intents: readonly IntentView[]; s
     const after = snapshots.filter((s) => ms(s.observedAt) >= ms(closeFilledAt));
     const inTime = after.filter((s) => ms(s.observedAt) - ms(closeFilledAt) <= DEMO_CYCLE_CLOSING_SNAPSHOT_MAX_AGE_MS && ms(s.storedAt) - ms(s.observedAt) <= DEMO_CYCLE_CLOSING_SNAPSHOT_MAX_AGE_MS);
     const showsBound = (s: DemoCycleSnapshot) => (s.content.positions ?? []).some((p) => boundPositions.has(p.positionId));
-    closing = inTime.find((s) => !showsBound(s)) ?? null;
+    // N1: the first qualifying observation in STORAGE order closes the test. A snapshot stored later, whatever it observed, can
+    // neither replace it nor join the closed period.
+    closing = [...inTime].sort((a, b) => a.sequence - b.sequence).find((s) => !showsBound(s)) ?? null;
     if (closing === null) {
       if (inTime.length > 0) pending.add('FINAL_POSITION_STILL_OPEN');
       else if (after.length > 0) pending.add('FINAL_SNAPSHOT_NOT_IN_TIME');
@@ -200,8 +204,8 @@ export function evaluateDemoCycleTest(input: { intents: readonly IntentView[]; s
 
   // ------------------------------------------------------------------------------------- activity within the test period (F1)
   const periodFrom = entered(open, 'CREATED')?.at ?? open.intent.createdAt;
-  const closingIndex = closing === null ? -1 : snapshots.indexOf(closing);
-  const period = snapshots.filter((s, i) => ms(s.observedAt) >= ms(periodFrom) && (closingIndex < 0 || i <= closingIndex));
+  // The closed period is a point in the append-only sync log: every observation stored up to and including the closing one.
+  const period = snapshots.filter((s) => ms(s.observedAt) >= ms(periodFrom) && (closing === null || s.sequence <= closing.sequence));
   // An intent can own an entry of a snapshot only if it was submitted before that snapshot was stored. It is still unknown whether
   // it owns an order while it may have one whose id NEXUS has not recorded (not final, no order id yet).
   const orderUnknown = (v: IntentView): boolean => v.brokerOrderId === null && !FINAL_STATES.has(v.state);

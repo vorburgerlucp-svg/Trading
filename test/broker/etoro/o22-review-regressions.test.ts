@@ -11,7 +11,7 @@ import { evaluateDemoCycleTest } from '../../../src/broker/etoro/execution/demo-
 import { openOrderBody } from '../../../src/broker/etoro/execution/execution-intent.js';
 import type { IntentView } from '../../../src/broker/etoro/execution/etoro-demo-execution-service.js';
 import { DEMO_E2E_CYCLE_POLICY } from '../../../src/broker/etoro/execution/execution-gate.js';
-import { HttpsDemoExecutionTransport } from '../../../src/broker/etoro/execution/etoro-demo-execution-transport.js';
+import { HttpsDemoExecutionTransport, serializeRequestBody } from '../../../src/broker/etoro/execution/etoro-demo-execution-transport.js';
 import { EtoroBrokerService } from '../../../src/broker/etoro/etoro-broker-service.js';
 import { AppendOnlyLog, InMemoryAppendOnlyStore } from '../../../src/persistence/append-only-log.js';
 import { CREATOR, ETORO_AAPL_ID, HUMAN, MSFT, ETORO_MSFT_ID, ScriptedBroker, inMemoryStores, o21Fixture, openInput, orderAccepted } from './o21-fixture.js';
@@ -70,7 +70,8 @@ function obs(observedAt: string, positions: Array<{ positionId: number; directio
     observedAt,
     retrievedAt: observedAt,
     storedAt: o.storedAt ?? new Date(Date.parse(observedAt) + 2000).toISOString(),
-    sequence: o.sequence ?? seq,
+    // Unless stated, syncs ran one after the other: the sync log sequence follows the observation time.
+    sequence: o.sequence ?? Date.parse(observedAt) * 1000 + seq,
     freshness: o.freshness ?? 'fresh',
     content: {
       positions: positions.map((p) => ({ positionId: p.positionId, etoroInstrumentId: ETH, direction: p.direction ?? 'buy', units: '0.04', instrumentId: null })),
@@ -103,13 +104,41 @@ describe('F1: a proved external order stays a failure while the close is in prog
 });
 
 describe('F2: a passed result is historical: later time and activity after the closed test period do not change it', () => {
-  it('stays passed when the final snapshot later reads as stale, and when activity appears after the closing snapshot', () => {
+  it('stays passed whatever the time of reading, and when activity appears after the closing snapshot', () => {
     const base = [obs(T.seen, [{ positionId: POS }]), obs(T.final, [])];
-    expect(evaluate([openView(), closeView()], base).result).toBe('passed');
-    const later = [obs(T.seen, [{ positionId: POS }]), obs(T.final, [], { freshness: 'stale' })];
-    expect(evaluate([openView(), closeView()], later).result).toBe('passed');
+    const first = evaluate([openView(), closeView()], base);
+    expect(first.result).toBe('passed');
+    // The verdict takes no clock: evaluated again much later (fake system time), the same stored state gives the same result.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-12-31T00:00:00.000Z'));
+      expect(evaluate([openView(), closeView()], base)).toEqual(first);
+    } finally {
+      vi.useRealTimers();
+    }
     const afterwards = [...base, obs('2026-10-23T09:00:00.000Z', [{ positionId: 3000000777 }], { orderIds: [FOREIGN_ORDER] })];
     expect(evaluate([openView(), closeView()], afterwards).result).toBe('passed');
+  });
+
+  it('N1: the closing snapshot is the first one STORED that qualifies; a later-stored, earlier-observed snapshot does not move the period', () => {
+    // Sb: observed later, stored first, shows a foreign order. Sa: observed earlier, stored later, clean.
+    const seen = obs(T.seen, [{ positionId: POS }], { sequence: 10 });
+    const sb = obs('2026-10-20T10:21:30.000Z', [], { orderIds: [FOREIGN_ORDER], sequence: 11, storedAt: '2026-10-20T10:21:32.000Z' });
+    const sa = obs('2026-10-20T10:21:00.000Z', [], { sequence: 12, storedAt: '2026-10-20T10:21:40.000Z' });
+    const before = evaluate([openView(), closeView()], [seen, sb]);
+    expect(before.result).toBe('failed');
+    expect(before.failures).toEqual(['EXTERNAL_ACTIVITY']);
+    const after = evaluate([openView(), closeView()], [seen, sb, sa]);
+    expect(after).toEqual(before);
+  });
+
+  it('N1: a snapshot stored after the closing snapshot never joins the closed period, even if it was observed earlier', () => {
+    const seen = obs(T.seen, [{ positionId: POS }], { sequence: 20 });
+    const closing = obs('2026-10-20T10:21:30.000Z', [], { sequence: 21 });
+    const passed = evaluate([openView(), closeView()], [seen, closing]);
+    expect(passed.result).toBe('passed');
+    const lateStoredEarlier = obs('2026-10-20T10:21:10.000Z', [{ positionId: 3000000777 }], { sequence: 22, storedAt: '2026-10-20T10:22:00.000Z' });
+    expect(evaluate([openView(), closeView()], [seen, closing, lateStoredEarlier])).toEqual(passed);
   });
 
   it('the closing snapshot must be fresh when it was taken: one stored long after its observation, or taken long after the close, does not close the test', () => {
@@ -183,6 +212,26 @@ describe('F6: the fill confirmation is the authoritative evidence', () => {
     const v = evaluate([openView({ statusReads: [] }), closeView()], [obs(T.seen, [{ positionId: POS }]), obs(T.final, [])]);
     expect(v.result).toBe('incomplete');
     expect(v.pending).toContain('FILL_CONFIRMATION_NOT_VISIBLE');
+  });
+});
+
+describe('N2: a partial fill stated final stays failed', () => {
+  const partialHistory = OPEN_HISTORY.slice(0, 5).concat([['PARTIALLY_FILLED', T.filled, 'econf_part']] as Hist);
+  const finalRead: Read = { confirmationId: 'econf_part', outcome: 'partially_filled_final', settlementType: 'real', brokerPositionIds: [POS], observedAt: T.filled };
+
+  it('a later read that says partially_filled again does not remove the failure', () => {
+    const later: Read = { confirmationId: 'econf_part2', outcome: 'partially_filled', settlementType: 'real', brokerPositionIds: [POS], observedAt: '2026-10-20T10:00:30.000Z' };
+    const v = evaluate([openView({ state: 'PARTIALLY_FILLED', history: partialHistory, statusReads: [finalRead, later] })], [obs(T.seen, [{ positionId: POS }])]);
+    expect(v.result).toBe('failed');
+    expect(v.failures).toContain('OPEN_PARTIALLY_FILLED_FINAL');
+  });
+
+  it('a later fill after a final partial fill does not make the test pass', () => {
+    const fill: Read = { ...FILL_READ, confirmationId: 'econf_fill_after', observedAt: '2026-10-20T10:00:40.000Z' };
+    const history = partialHistory.concat([['FILLED', '2026-10-20T10:00:40.000Z', 'econf_fill_after']] as Hist);
+    const v = evaluate([openView({ history, statusReads: [finalRead, fill] }), closeView()], [obs(T.seen, [{ positionId: POS }]), obs(T.final, [])]);
+    expect(v.result).toBe('failed');
+    expect(v.failures).toContain('OPEN_PARTIALLY_FILLED_FINAL');
   });
 });
 
@@ -266,6 +315,24 @@ describe('F10: the body is serialized and checked before the reservation; exactl
   });
 });
 
+describe('N5: a body that cannot be serialized, refused in prepare, at the service level', () => {
+  it('nothing is sent, the intent stays APPROVED, no budget and no pacer slot are spent', async () => {
+    const f = await o21Fixture({ policy: DEMO_E2E_CYCLE_POLICY });
+    const created = await f.service.create(openInput({ amount: '100' }), CREATOR);
+    await f.service.approve(created.intentId, HUMAN);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapter = (f.service as any).deps.adapter;
+    // The real serializer is called on a body it cannot serialize (a BigInt), exactly where prepareOpen serializes.
+    vi.spyOn(adapter, 'prepareOpen').mockImplementation(() => serializeRequestBody({ amount: 10n } as never));
+    const spy = vi.spyOn(adapter.pacer, 'tryAcquire');
+    await expect(f.service.execute(created.intentId, HUMAN)).rejects.toMatchObject({ code: 'GATE_REFUSED', reasons: ['REQUEST_NOT_SENDABLE'] });
+    expect(f.broker.requests).toEqual([]);
+    expect(spy).not.toHaveBeenCalled();
+    expect((await f.service.get(created.intentId)).state).toBe('APPROVED');
+    expect((await f.service.cycleBudget()).openSubmissions).toBe(0);
+  });
+});
+
 describe('F8: pacer and a real race for the reservation', () => {
   it('a REQUEST_NOT_SENDABLE refusal takes no pacer slot', async () => {
     const f = await o21Fixture({ policy: DEMO_E2E_CYCLE_POLICY, requestId: () => 'not-a-uuid' });
@@ -278,6 +345,38 @@ describe('F8: pacer and a real race for the reservation', () => {
     await expect(f.service.execute(created.intentId, HUMAN)).rejects.toMatchObject({ reasons: ['REQUEST_NOT_SENDABLE'] });
     expect(spy).not.toHaveBeenCalled();
     expect(pacer.available(f.clock.now.getTime())).toBe(before);
+  });
+
+  it('N4: process b passes its gate before a reserves; the refusal comes from the reservation under the lock, not from b\'s gate', async () => {
+    const stores = inMemoryStores();
+    const broker = new ScriptedBroker();
+    const policy = { ...DEMO_E2E_CYCLE_POLICY, maxOpenPositions: 2, maxGrossExposureUsd: '200' };
+    const a = await o21Fixture({ policy, stores, sharedBroker: broker });
+    const b = await o21Fixture({ policy, stores, sharedBroker: broker });
+    const first = await a.service.create(openInput({ amount: '100' }), CREATOR);
+    const second = await b.service.create(openInput({ amount: '100', instrumentId: MSFT.instrumentId, etoroInstrumentId: ETORO_MSFT_ID, strategyRunId: 'run-race-n4' }), CREATOR);
+    await a.service.approve(first.intentId, HUMAN);
+    await b.service.approve(second.intentId, HUMAN);
+    // Hold b exactly at its reservation: b has passed its gate (the budget was still free) and prepared its request.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let bReachedReservation = false;
+    const original = b.intents.append.bind(b.intents);
+    b.intents.append = (async (id: string, payload: never, options?: never) => {
+      if (id.endsWith(':SUBMITTING')) {
+        bReachedReservation = true;
+        await held;
+      }
+      return original(id, payload, options);
+    }) as typeof b.intents.append;
+    const bRun = b.service.execute(second.intentId, HUMAN);
+    while (!bReachedReservation) await new Promise((r) => setTimeout(r, 1));
+    broker.next(orderAccepted());
+    expect((await a.service.execute(first.intentId, HUMAN)).state).toBe('SUBMITTED');
+    release();
+    await expect(bRun).rejects.toMatchObject({ code: 'GATE_REFUSED', reasons: ['CYCLE_OPEN_BUDGET_EXHAUSTED'] });
+    expect(broker.writes).toHaveLength(1);
+    expect((await b.service.cycleBudget()).openSubmissions).toBe(1);
   });
 
   it('two processes, two different approved opens, both past the gate at once: exactly one reaches SUBMITTING and is sent', async () => {
