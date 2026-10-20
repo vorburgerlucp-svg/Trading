@@ -10,7 +10,7 @@ Context: `docs/O22_ETORO_DEMO_TRADING_E2E_V1.md`, section 17 (review, runbook, s
 |---|---|---|
 | P1 | PR #25 (O22) reviewed by a human and merged into `main` | open (Draft) |
 | P2 | **C1** (machine-checked test verdict), **C2** (no account read for a close), **C3** (request checked before the reservation) implemented and tested; reviewed and merged with PR #25 | implemented and tested on the O22 branch 2026-10-19 (3100/3100 locally); human review open |
-| P3 | Operating rules (17.3) and the acceptance of the remaining residual risks A1, A3, A5, A6 recorded | operating rules set 2026-10-19; acceptance open |
+| P3 | Operating rules (17.3) and the acceptance of the remaining residual risks A1, A3, A5, A6 recorded | operating rules set 2026-10-19; **A1, A3, A5, A6 accepted on 20.10.2026 for the one controlled demo test only** (17.6); success criterion unchanged |
 | P4 | B2: account without position or order | closed 2026-10-19; checked again in runbook step 2 |
 | P5 | B5: demo key `demoWrite=true`, `realWrite=false` | closed 2026-10-19; a key change needs a new `/me` check |
 | P6 | B6: success criterion | decided 2026-10-19 |

@@ -613,7 +613,9 @@ Nothing in this section has been run. It prepares the review and the one control
 
 No ledger booking at any step. NEXUS never touches a position it did not open (the hand-opened one was closed by the operator on 2026-10-19, B2).
 
-### 17.4 Review result (2026-10-19, code reviewed at `74aaf90`)
+### 17.4 Technical review result (2026-10-19, code at `74aaf90`)
+
+**Nature of this review.** This is a technical review by the implementing agent (Claude Code), not a human code review. The later checks of C1–C3 (17.7) were made by a separate review agent (also an AI agent, read only). **No human code review of PR #25 has taken place yet**; it is an open step before merge.
 
 **Scope note.** This review covers the code at `74aaf90` and the comment fixes S1–S3. The changes C1–C3 (17.6) were made after it, on request; they are covered by targeted tests and a full local run (3100/3100), but they have **not** been through an independent review yet and are part of the human review of this PR.
 
@@ -640,7 +642,7 @@ No ledger booking at any step. NEXUS never touches a position it did not open (t
 
 The diff of S1–S3 contains comment lines only (checked line by line); `npm run typecheck` is clean.
 
-**Documented residual risks** (assessed against the success criterion in 17.6; C1–C3 implemented 2026-10-19; acceptance of what remains is open before the execution release):
+**Documented residual risks** (assessed against the success criterion in 17.6; C1–C3 implemented 2026-10-19; A1, A3, A5, A6 accepted by the operator on 20.10.2026 for the one controlled demo test only, see 17.6):
 - **A1** The account decision is read before, not inside, the reservation; a local database lock cannot make manual broker activity atomic with the NEXUS write. Detected afterwards by C1 (`EXTERNAL_ACTIVITY`); operating rule: no parallel manual trades.
 - **A2** Reduced by C3: a request that could never be sent is refused before `SUBMITTING` and spends nothing. A local refusal after `SUBMITTING` is not expected any more; it would still spend the budget.
 - **A3** A fill with more than one position makes the NEXUS close impossible: a close needs exactly one broker-confirmed position (`closePositionOf`, `confirmed.length !== 1`). Manual procedure, see 17.5.
@@ -648,9 +650,9 @@ The diff of S1–S3 contains comment lines only (checked line by line); `npm run
 - **A5** Quote freshness depends on the minute candle (R4); a stale refusal sends nothing and spends no budget.
 - **A6** The runtime registry is not re-synced per gate run: a mapping applied while the runtime runs is seen after a restart (fail closed until then).
 
-**Prerequisites of the demo cycle (not merge blockers):** B2 closed and B6 decided (2026-10-19); C1–C3 implemented and the operating rules set (17.3, 17.6); open: the human review of PR #25, the acceptance of the remaining A1/A3/A5/A6, then B1 (separate release change) and the runbook 17.3.
+**Prerequisites of the demo cycle (not merge blockers):** B2 closed and B6 decided (2026-10-19); C1–C3 implemented and the operating rules set (17.3, 17.6); A1/A3/A5/A6 accepted for the one controlled demo test (20.10.2026); open: the human review of PR #25, then B1 (separate release change, prepared as a draft) and the runbook 17.3.
 
-**Verdict.** The review of the safety-critical behaviour found no merge blocker; S1–S3 are fixed. The PR stays Draft until M1 and the human reviewer's approval; the acceptance of the remaining residual risks is a separate decision before the execution release. This is not a release: the build lock stays closed.
+**Verdict (technical agent review, not a human code review).** The review of the safety-critical behaviour found no merge blocker; S1–S3 are fixed. The PR stays Draft until M1 and the human reviewer's approval. This is not a release: the build lock stays closed.
 
 ### 17.5 Procedure when a fill creates more than one position (A3)
 
@@ -689,9 +691,11 @@ The diff of S1–S3 contains comment lines only (checked line by line); `npm run
 
 **Not changed.** No protection is weakened by any of C1–C3; no limit is raised; the budget stays one open and one close.
 
-### 17.7 Independent review of C1–C3 and its corrections (2026-10-19)
+**Decision of the operator (20.10.2026): residual risks accepted for the one controlled demo test only.** The operator accepts A1, A3, A5 and A6 as explained in 17.6, **exclusively for the single controlled demo test** of this cycle (one open, one close). The acceptance does not extend to any other test, cycle, account or release. The success criterion of B6 (17.2, 17.6) is **unchanged**: the test passes only when C1's verdict is `passed`. The operating rules of 17.3 stay binding.
 
-A separate review agent read the commit `53d1c3a` (C1–C3) without changing anything. It found no issue in the C2 gate path and in the C3 request path, and ten findings. The operator classed F1 and F2 as release blockers. Each finding was first pinned by a regression test that failed on `53d1c3a` (13 of the then 18 tests failed; the other 5 guarded behaviour that was already right), then corrected:
+### 17.7 Agent review of C1–C3 and its corrections (2026-10-19/20)
+
+A separate review agent (an AI agent, read only, independent of the implementing session's reasoning; not a human review) read the commit `53d1c3a` (C1–C3) without changing anything. It found no issue in the C2 gate path and in the C3 request path, and ten findings. The operator classed F1 and F2 as release blockers. Each finding was first pinned by a regression test that failed on `53d1c3a` (13 of the then 18 tests failed; the other 5 guarded behaviour that was already right), then corrected:
 
 | # | Finding | Correction |
 |---|---|---|
