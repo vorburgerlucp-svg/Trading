@@ -1,14 +1,7 @@
 // O22 runtime: the production composition (in-memory stores) runs the demo cycle policy; GET /api/broker/etoro/demo/cycle reports
-// the budget, the cycle reconciliation and the safety readiness without any broker request; and, with the lock mocked closed (O22 B1 release), a locked build is still
+// the budget, the cycle reconciliation and the safety readiness without any broker request; and, with no mock, the build is still
 // locked: no demo write is possible, the budget is not touched by a refused execute, and every lock stays closed.
-import { afterEach, describe, expect, it, vi } from 'vitest';
-// O22 B1 release: this build opens BUILD_LOCKS.etoroDemoExecution for the one controlled demo cycle. This file keeps proving the
-// behaviour of a LOCKED build (execute and cancel refused with EXECUTION_LOCKED_IN_BUILD, nothing sent), so the lock is mocked
-// closed here. The real values of this build are asserted without a mock in test/runtime/o22-release.test.ts.
-vi.mock('../../src/nexus/safety.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../src/nexus/safety.js')>();
-  return { ...actual, BUILD_LOCKS: Object.freeze({ ...actual.BUILD_LOCKS, etoroDemoExecution: true }) };
-});
+import { afterEach, describe, expect, it } from 'vitest';
 import { CapitalLedger } from '../../src/capital/capital-ledger.js';
 import { InstrumentRegistry, type InstrumentEvent } from '../../src/market-data/instrument-registry.js';
 import { InMemoryMarketDataStore } from '../../src/market-data/market-data-store.js';
@@ -172,7 +165,7 @@ describe('O22 runtime: GET /api/broker/etoro/demo/cycle', () => {
   });
 });
 
-describe('O22 runtime: a locked build (lock mocked closed since the O22 B1 release)', () => {
+describe('O22 runtime: still locked in this build (no mock)', () => {
   it('a 100 USD cycle open is risk-approved under the cycle policy, approved by the operator, and execute is refused with 0 writes; the budget is untouched', async () => {
     const r = await runtime(true);
     const { createdBy: _ignored, ...intent } = openInput({ amount: '100' });

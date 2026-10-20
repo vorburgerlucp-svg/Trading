@@ -64,7 +64,7 @@ describe('O21 config: ETORO_DEMO_EXECUTION_ENABLED', () => {
     expect(config.allowLiveTrading).toBe(false);
     expect(summarizeRuntimeConfig(config)).toMatchObject({ tradingMode: 'paper', liveTrading: 'locked' });
     expect(JSON.stringify(BUILD_LOCKS)).toBe(before);
-    expect(BUILD_LOCKS).toMatchObject({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: false });
+    expect(BUILD_LOCKS).toMatchObject({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true });
     expect(refusal({ ...ETORO, ETORO_DEMO_EXECUTION_ENABLED: '1', TRADING_MODE: 'live' }).code).toBe('LIVE_TRADING_REFUSED');
     expect(refusal({ ...ETORO, ETORO_DEMO_EXECUTION_ENABLED: '1', ALLOW_LIVE_TRADING: 'true' }).code).toBe('LIVE_TRADING_REFUSED');
   });

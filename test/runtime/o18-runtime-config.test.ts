@@ -89,7 +89,7 @@ describe('O18 runtime configuration (fail closed)', () => {
     const before = JSON.stringify(BUILD_LOCKS);
     const config = loadRuntimeConfig({ ...base, BUILD_LOCKS: 'off', liveTrading: 'false' });
     expect(JSON.stringify(BUILD_LOCKS)).toBe(before);
-    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: false });
+    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true });
     expect(Object.keys(config)).not.toContain('buildLocks');
     expect(config.allowLiveTrading).toBe(false);
   });

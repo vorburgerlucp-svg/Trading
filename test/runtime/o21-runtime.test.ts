@@ -3,14 +3,7 @@
 // server, and every write is still refused by BUILD_LOCKS.etoroDemoExecution: no broker request is made. No real route exists.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-// O22 B1 release: this build opens BUILD_LOCKS.etoroDemoExecution for the one controlled demo cycle. This file keeps proving the
-// behaviour of a LOCKED build (execute and cancel refused with EXECUTION_LOCKED_IN_BUILD, nothing sent), so the lock is mocked
-// closed here. The real values of this build are asserted without a mock in test/runtime/o22-release.test.ts.
-vi.mock('../../src/nexus/safety.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../src/nexus/safety.js')>();
-  return { ...actual, BUILD_LOCKS: Object.freeze({ ...actual.BUILD_LOCKS, etoroDemoExecution: true }) };
-});
+import { afterEach, describe, expect, it } from 'vitest';
 import { CapitalLedger } from '../../src/capital/capital-ledger.js';
 import { InstrumentRegistry, type InstrumentEvent } from '../../src/market-data/instrument-registry.js';
 import { InMemoryMarketDataStore } from '../../src/market-data/market-data-store.js';
@@ -426,9 +419,6 @@ describe('O21 runtime: no bypass of the service', () => {
     const compose = source.find((s) => s.path === 'src/runtime/compose.ts')!.text;
     expect(compose).not.toMatch(/buildLocked/);
     expect(compose).toMatch(/NO_DEMO_SAFETY_SOURCE/);
-    for (const { path, text } of source) expect(text, path).not.toMatch(/buildLocked\?:|etoroDemoExecution\s*=\s*false/);
-    // O22 B1: the demo lock is opened only at the one sanctioned place (the BUILD_LOCKS constant) and in the health type that mirrors it.
-    const opened = source.filter(({ text }) => /etoroDemoExecution:\s*false/.test(text)).map((s) => s.path).sort();
-    expect(opened).toEqual(['src/nexus/safety.ts', 'src/runtime/app.ts']);
+    for (const { path, text } of source) expect(text, path).not.toMatch(/buildLocked\?:|etoroDemoExecution\s*=\s*false|etoroDemoExecution:\s*false/);
   });
 });
