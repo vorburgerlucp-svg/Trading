@@ -203,6 +203,6 @@ describe('O21A.1 observation report: portfolio regression', () => {
   });
 
   it('BUILD_LOCKS are unchanged', () => {
-    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: false });
+    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true });
   });
 });

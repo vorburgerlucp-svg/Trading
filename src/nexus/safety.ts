@@ -10,12 +10,7 @@ import type { DecisionOutcome, ExecutionGateResult } from './nexus-types.js';
 
 // etoroDemoExecution (O21) is a separate lock for eToro DEMO execution only. It does not touch brokerOrders, which stays the lock of
 // every live or real broker order. true = locked: the demo execution layer refuses every broker write in this build.
-//
-// O22 B1 RELEASE (draft, docs/O22_DEMO_RELEASE_PROPOSAL.md): opened for exactly ONE controlled eToro DEMO cycle under the runtime
-// policy etoro-demo-e2e-cycle-policy:v2 (one market buy of at most 100 USD at leverage 1, one close, then the cycle budget refuses
-// every further write). liveTrading, brokerOrders and physicalPurchase stay locked. The runtime still needs ETORO_DEMO_EXECUTION_ENABLED=1,
-// ETORO_TRADING_MODE=demo and operator authentication. This build must be re-locked right after the cycle (feature/o22-demo-cycle-relock).
-export const BUILD_LOCKS = Object.freeze({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: false } as const);
+export const BUILD_LOCKS = Object.freeze({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true } as const);
 
 export interface SafetyConfig {
   readonly tradingMode: TradingMode;
