@@ -1,7 +1,15 @@
-// O21 compile-time build lock, without any mock: the service reads BUILD_LOCKS.etoroDemoExecution directly. It has no constructor
+// O21 compile-time build lock. The service reads BUILD_LOCKS.etoroDemoExecution directly (since the O22 B1 release the lock is mocked
+// closed in this file, see below, so it keeps proving the behaviour of a locked build). It has no constructor
 // option, configuration or setter for it, so no production code can construct an unlocked service. Every write is refused.
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+// O22 B1 release: this build opens BUILD_LOCKS.etoroDemoExecution for the one controlled demo cycle. This file keeps proving the
+// behaviour of a LOCKED build (execute and cancel refused with EXECUTION_LOCKED_IN_BUILD, nothing sent), so the lock is mocked
+// closed here. The real values of this build are asserted without a mock in test/runtime/o22-release.test.ts.
+vi.mock('../../../src/nexus/safety.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/nexus/safety.js')>();
+  return { ...actual, BUILD_LOCKS: Object.freeze({ ...actual.BUILD_LOCKS, etoroDemoExecution: true }) };
+});
 import { BUILD_LOCKS } from '../../../src/nexus/safety.js';
 import { DemoExecutionError } from '../../../src/broker/etoro/execution/etoro-demo-execution-errors.js';
 import { HUMAN, approvedOpen, o21Fixture } from './o21-fixture.js';
@@ -16,8 +24,8 @@ async function codeOf(promise: Promise<unknown>): Promise<string> {
   throw new Error('expected a DemoExecutionError');
 }
 
-describe('O21 build lock (no mock)', () => {
-  it('the lock is closed in this build', () => {
+describe('O21 build lock (a locked build; lock mocked closed since the O22 B1 release)', () => {
+  it('a locked build: the lock constant is closed and frozen', () => {
     expect(BUILD_LOCKS.etoroDemoExecution).toBe(true);
     expect(Object.isFrozen(BUILD_LOCKS)).toBe(true);
     expect(() => {

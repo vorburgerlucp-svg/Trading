@@ -16,14 +16,17 @@ Context: `docs/O22_ETORO_DEMO_TRADING_E2E_V1.md`, section 17 (review, runbook, s
 | P6 | B6: success criterion | decided 2026-10-19 |
 | P7 | ETH/USD instrument, eToro mapping 100001, USD quote path | done 2026-10-19 |
 
-## 1a. Prepared drafts (20.10.2026; not merged, not active)
+## 1a. The release change (20.10.2026; not merged, not active)
 
-| Branch | Commit | Content | Checks |
-|---|---|---|---|
-| `feature/o22-demo-cycle-release` | `e839b3f` (on O22 `8a5949f`) | the release as described in section 2 | typecheck clean; local full suite **3129/3131: two failures**, both 5 s timeouts, in `test/patterns/v1-regression.test.ts` and `test/patterns/v1c-regression.test.ts` (files this change does not touch). **Separately:** run alone, both files passed in two repetitions (0.9 s and 2.9 s). All lock, runtime, broker and pg tests green in the full run. CI (push check) green |
-| `feature/o22-demo-cycle-relock` | `9a881a7` (on `e839b3f`) | **draft only** of the re-lock content: its tree is identical to the locked O22 tree `8a5949f`. Not to be merged as it is; the real re-lock is a targeted revert on the merged state (section 5a) | CI (push check) green; the identical tree passed the local full suite (3126/3126 on the same code) |
+PR #25 (O22) was merged into `main` as `6d3e433`. The release change was then set up again on that `main`:
 
-The reviews so far are technical agent reviews; **no human code review** of PR #25 or of these drafts has taken place. The operator accepted A1, A3, A5 and A6 on 20.10.2026 for the one controlled demo test only; the success criterion is unchanged.
+| Branch | Content | Status |
+|---|---|---|
+| `feature/o22-b1-demo-release` (on `main` `6d3e433`) | the release diff of `e839b3f`, cherry-picked unchanged, plus the tests that close the test gaps of 1b and this documentation | **the change to review**; draft PR against `main`; not merged, not active. Checks: typecheck clean. Full local suite (`vitest --project unit --project pg`), run twice: **1st run 3133/3134** – the new test `test/pg/o22-release-runtime.pg.test.ts` › "enabled …" exceeded the global 60 s limit while the whole pg project ran in parallel (alone it takes about 10 s: 10.5 s measured); it then got its own limit of 180 s with unchanged assertions; **2nd run 3134/3134** (that test 9.1 s). |
+| `feature/o22-demo-cycle-release` (`e839b3f`, on the pre-merge O22 head `8a5949f`) | the first draft of the release | superseded by the branch above; kept for traceability, not to be merged |
+| `feature/o22-demo-cycle-relock` (`9a881a7`) | a draft of the re-lock content that restores a whole old tree | **obsolete; must not be merged**. The re-lock is a targeted revert of the merged release commit on the then current `main` (section 5a) |
+
+The operator accepted A1, A3, A5 and A6 on 20.10.2026 for the one controlled demo test only; the success criterion is unchanged. The reviews so far are technical agent reviews; no human code review has taken place.
 
 ## 1b. Agent review of the release draft (20.10.2026, checked commit `e839b3f`)
 
@@ -38,6 +41,8 @@ A technical review by the separate review agent (an AI agent, read only; **not a
 | A write outside the one cycle | holds in code, with note b below |
 
 **Test gaps (not defects):** (a) the unmocked release test proves "not enabled" through the service flag; the production path "not enabled" (the service is never built, every route `EXECUTION_DISABLED`) is proved by the mocked runtime tests and verified in the code, not by an unmocked runtime test; (b) with the lock open no test drives the real composition plus the HTTP routes – only the fixture service.
+
+**Test gaps closed on `feature/o22-b1-demo-release`:** `test/pg/o22-release-runtime.pg.test.ts` runs the release build **without any mock of the lock** through the real entry path (configuration from the environment, PostgreSQL, `startRuntime`, the HTTP routes, operator authentication), with only the outside world simulated (a production-labelled fixture quote, the read-only eToro answers, a scripted broker; no network): (1) by default, without `ETORO_DEMO_EXECUTION_ENABLED`, no execution log is opened, the create and execute routes answer `EXECUTION_DISABLED`, the cycle route reports `execution: "disabled"`, and no broker request is made, although an execution transport was passed; (2) with `ETORO_DEMO_EXECUTION_ENABLED=1` the open goes through the real routes exactly once to the demo order endpoint, a second open is refused by the cycle budget (`CYCLE_OPEN_BUDGET_EXHAUSTED`), the routes still require the operator token, no ledger row is written and no key or token is stored.
 
 **Note (operating rule):** the cycle budget is counted **per database** (the intent log), not per build. Started with `ETORO_DEMO_EXECUTION_ENABLED=1` against another or an empty database, this build would allow one more open and close. Therefore: this build runs the cycle **only against the operator's NEXUS database** used for the preparation, it is **never started with the flag against any other database**, and the re-lock follows right after the cycle (section 5a).
 
@@ -87,7 +92,7 @@ The same steps, in this order, whether the test passed, failed or was stopped at
 ## 5a. Re-lock (mandatory, a separate reviewed change)
 
 - The re-lock is a **targeted revert of the release change on the state that is actually merged at that time**: `git revert <the merged release commit>` on a branch from the then current `main`, so every change made in between stays. It must **not** lay an old complete tree over later changes.
-- Its content: `BUILD_LOCKS.etoroDemoExecution` back to `true`, the health type back to `true`, the pinned lock tests and the tests of a locked build back to their locked form (without the lock mock), and `test/runtime/o22-release.test.ts` removed – exactly the inverse of the release diff, nothing else.
+- Its content: `BUILD_LOCKS.etoroDemoExecution` back to `true`, the health type back to `true`, the pinned lock tests and the tests of a locked build back to their locked form (without the lock mock), and `test/runtime/o22-release.test.ts` and `test/pg/o22-release-runtime.pg.test.ts` removed – exactly the inverse of the release diff, nothing else. If the release reaches `main` as a merge commit, the revert names that merge commit with its first parent as the mainline (`git revert -m 1 <merge commit>`); for a squash merge, the squashed commit.
 - Checks: typecheck and the full suite green; `GET /api/health` after deployment shows all four locks `true`.
 - The existing branch `feature/o22-demo-cycle-relock` (`9a881a7`) is only a **draft** of that content: it is built on the release draft and restores the then locked tree as a whole. It is **not** to be merged as it is; it is replaced by the targeted revert once the release has been merged.
 
