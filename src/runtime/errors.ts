@@ -147,8 +147,10 @@ export function toRuntimeApiError(error: unknown): RuntimeApiError {
   if (error instanceof RuntimeApiError) return error;
   if (error instanceof BrokerError) return new RuntimeApiError(error.code);
   if (error instanceof DemoExecutionError) {
-    // Broker failures keep the existing broker codes; the rest map one to one. Only fixed gate reason codes are passed on.
-    return new RuntimeApiError(error.code, error.code === 'GATE_REFUSED' ? error.reasons.filter((r) => GATE_REASON.test(r)) : []);
+    // Broker failures keep the existing broker codes; the rest map one to one. Only fixed reason codes are passed on: the gate's,
+    // and (O22) the code of a refused broker answer, which names the failed field or check and never a value of the answer.
+    const passes = error.code === 'GATE_REFUSED' || error.code === 'BROKER_RESPONSE_INVALID';
+    return new RuntimeApiError(error.code, passes ? error.reasons.filter((r) => GATE_REASON.test(r)) : []);
   }
   if (error instanceof MarketDataError) {
     if (MARKET_DATA_NOT_CONNECTED.has(error.code)) return new RuntimeApiError('DATA_NOT_CONNECTED');
