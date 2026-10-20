@@ -100,7 +100,7 @@ describe('O21A runtime: a non-empty demo portfolio through the production compos
     expect(text).not.toContain(API_KEY_MARKER);
     expect(text).not.toContain(USER_KEY_MARKER);
 
-    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true });
+    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: false });
     expect(loadSafetyConfig({ TRADING_MODE: 'paper', ALLOW_LIVE_TRADING: 'false' })).toEqual({ tradingMode: 'paper', allowLiveTrading: false });
   });
 

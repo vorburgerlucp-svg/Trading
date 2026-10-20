@@ -58,7 +58,7 @@ describe('static boundaries (§2, §18)', () => {
 
 describe('safety locks regression (§55)', () => {
   it('the build locks are unchanged and frozen', () => {
-    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true });
+    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: false });
     expect(Object.isFrozen(BUILD_LOCKS)).toBe(true);
   });
 

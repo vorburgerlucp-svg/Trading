@@ -142,8 +142,8 @@ describe('O21 boundary: request bodies exactly as in the reference', () => {
 });
 
 describe('O21 boundary: the safety locks', () => {
-  it('the demo execution lock is closed, and the existing locks are unchanged', () => {
-    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true });
+  it('the demo execution lock is open for the one controlled demo cycle (O22 B1), and the existing locks are unchanged', () => {
+    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: false });
     expect(Object.isFrozen(BUILD_LOCKS)).toBe(true);
   });
 

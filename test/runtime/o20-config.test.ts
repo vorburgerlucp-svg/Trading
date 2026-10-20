@@ -75,12 +75,12 @@ describe('O20 eToro configuration: demo only, real refused', () => {
 });
 
 describe('O20 eToro configuration: the safety invariants are unchanged', () => {
-  it('trading mode stays paper, live trading stays off, and every build lock stays closed', () => {
+  it('trading mode stays paper, live trading stays off, and every build lock stays closed except the one demo cycle lock (O22 B1)', () => {
     const config = loadRuntimeConfig({ ...BASE, ETORO_ENABLED: '1', ETORO_API_KEY: API_KEY, ETORO_USER_KEY: USER_KEY });
     expect(config.tradingMode).toBe('paper');
     expect(config.allowLiveTrading).toBe(false);
     expect(summarizeRuntimeConfig(config)).toMatchObject({ tradingMode: 'paper', liveTrading: 'locked' });
-    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: true });
+    expect(BUILD_LOCKS).toEqual({ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: false });
   });
 
   it('no eToro variable can unlock live trading or an order', () => {
