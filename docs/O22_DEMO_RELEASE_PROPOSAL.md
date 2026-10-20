@@ -20,10 +20,26 @@ Context: `docs/O22_ETORO_DEMO_TRADING_E2E_V1.md`, section 17 (review, runbook, s
 
 | Branch | Commit | Content | Checks |
 |---|---|---|---|
-| `feature/o22-demo-cycle-release` | `e839b3f` (on O22 `8a5949f`) | the release as described in section 2 | local full suite 3129/3131: the 2 failures are 5 s timeouts in `test/patterns/v1-regression.test.ts` and `v1c-regression.test.ts` (files this change does not touch; both passed twice when run alone); all lock, runtime, broker and pg tests green; typecheck clean; CI (push check) green |
-| `feature/o22-demo-cycle-relock` | `9a881a7` (on `e839b3f`) | the re-lock: its tree is identical to the locked O22 tree `8a5949f` | CI (push check) green; the identical tree passed the local full suite (3126/3126 on the same code) |
+| `feature/o22-demo-cycle-release` | `e839b3f` (on O22 `8a5949f`) | the release as described in section 2 | typecheck clean; local full suite **3129/3131: two failures**, both 5 s timeouts, in `test/patterns/v1-regression.test.ts` and `test/patterns/v1c-regression.test.ts` (files this change does not touch). **Separately:** run alone, both files passed in two repetitions (0.9 s and 2.9 s). All lock, runtime, broker and pg tests green in the full run. CI (push check) green |
+| `feature/o22-demo-cycle-relock` | `9a881a7` (on `e839b3f`) | **draft only** of the re-lock content: its tree is identical to the locked O22 tree `8a5949f`. Not to be merged as it is; the real re-lock is a targeted revert on the merged state (section 5a) | CI (push check) green; the identical tree passed the local full suite (3126/3126 on the same code) |
 
 The reviews so far are technical agent reviews; **no human code review** of PR #25 or of these drafts has taken place. The operator accepted A1, A3, A5 and A6 on 20.10.2026 for the one controlled demo test only; the success criterion is unchanged.
+
+## 1b. Agent review of the release draft (20.10.2026, checked commit `e839b3f`)
+
+A technical review by the separate review agent (an AI agent, read only; **not a human code review**), limited to the release diff `8a5949f..e839b3f` and the adapted tests. Result: **all checked points hold, no defect found.**
+
+| Point | Result |
+|---|---|
+| Only the demo build lock is opened | holds: `safety.ts` sets only `etoroDemoExecution: false`; `app.ts` changes only the health type; the live, broker and physical gates read the unchanged three locks |
+| No broker write without `ETORO_DEMO_EXECUTION_ENABLED=1` | holds, verified in the code: the flag defaults off (`config.ts`); the execution wiring and the only `HttpsDemoExecutionTransport` are built only with it (`bootstrap.ts`, `compose.ts`); without it every intent route answers `EXECUTION_DISABLED` (`app.ts`) |
+| Budget, demo/real separation and every other protection | hold: no other code changed; gate, reservation re-check under the lock, operator authentication, kill switch, account safety for opens, config refusals of live trading and a real eToro mode, demo-only endpoints, policy hard-coded in `compose.ts` |
+| Adapted tests | hold: value tests still assert the other three locks `true`; mocking the lock closed in the tests of a locked build is legitimate; no test transport can reach the network; `test/runtime/o22-release.test.ts` is genuinely unmocked |
+| A write outside the one cycle | holds in code, with note b below |
+
+**Test gaps (not defects):** (a) the unmocked release test proves "not enabled" through the service flag; the production path "not enabled" (the service is never built, every route `EXECUTION_DISABLED`) is proved by the mocked runtime tests and verified in the code, not by an unmocked runtime test; (b) with the lock open no test drives the real composition plus the HTTP routes – only the fixture service.
+
+**Note (operating rule):** the cycle budget is counted **per database** (the intent log), not per build. Started with `ETORO_DEMO_EXECUTION_ENABLED=1` against another or an empty database, this build would allow one more open and close. Therefore: this build runs the cycle **only against the operator's NEXUS database** used for the preparation, it is **never started with the flag against any other database**, and the re-lock follows right after the cycle (section 5a).
 
 ## 2. The change itself (a separate branch and PR, e.g. `feature/o22-demo-cycle-release`)
 
@@ -55,11 +71,25 @@ The worktree `.env`: `ETORO_ENABLED=1`, `ETORO_TRADING_MODE=demo`, `ETORO_DEMO_E
 - `GET /api/health`: `buildLocks` = `{ liveTrading: true, brokerOrders: true, physicalPurchase: true, etoroDemoExecution: false }`, `liveTrading: locked`.
 - Then the runbook (section 17.3), from step 1.
 
-## 5. Re-lock after the cycle (mandatory)
+## 5. Closing the cycle: on success AND on any STOP (mandatory)
 
-- Immediately after step 9 (or after any STOP): `ETORO_DEMO_EXECUTION_ENABLED=0`.
-- A follow-up change sets `etoroDemoExecution: true` again and restores the pinned tests. The spent budget would refuse further writes anyway; the lock makes it explicit.
-- The result (test verdict `passed` / `failed` with the failed criterion) and sanitized evidence are recorded in the O22 documentation.
+The same steps, in this order, whether the test passed, failed or was stopped at any step:
+
+1. **Disable execution.** Set `ETORO_DEMO_EXECUTION_ENABLED=0` in the worktree `.env`. **Changing the `.env` alone proves nothing about a process that is already running**: the runtime reads its configuration only at start.
+2. **Stop the affected runtime.** Stop every NEXUS runtime process of this worktree (`node dist/runtime/main.js`; check by the listening port and the process list that none is left). Then either leave it stopped, or start it again with the locked configuration (`ETORO_DEMO_EXECUTION_ENABLED=0`).
+3. **Prove the locked state** on the process that is actually running (or prove that none runs):
+   - `GET /api/broker/etoro/demo/cycle` answers `execution: "disabled"` (no budget, no reconciliation) – execution is off in the running process;
+   - every `POST` intent route (`execute`, `cancel`) is refused (`EXECUTION_DISABLED`) and sends nothing;
+   - after the re-lock is merged and deployed: `GET /api/health` shows `buildLocks.etoroDemoExecution: true` and the other three locks `true`.
+4. **Report what is not settled.** One approved read-only sync, then the cycle route: every position or order that is not proved closed – an AMBIGUOUS intent, `closed_position_still_open`, `open_position_missing` after a close outside NEXUS, external positions, more than one position (17.5) – is reported explicitly **for manual clarification in the eToro demo account**. NEXUS never closes or retries on its own.
+5. **Record the result:** the test verdict (`passed` / `failed` with the criterion / `incomplete` with the reason) and sanitized evidence in the O22 documentation.
+
+## 5a. Re-lock (mandatory, a separate reviewed change)
+
+- The re-lock is a **targeted revert of the release change on the state that is actually merged at that time**: `git revert <the merged release commit>` on a branch from the then current `main`, so every change made in between stays. It must **not** lay an old complete tree over later changes.
+- Its content: `BUILD_LOCKS.etoroDemoExecution` back to `true`, the health type back to `true`, the pinned lock tests and the tests of a locked build back to their locked form (without the lock mock), and `test/runtime/o22-release.test.ts` removed – exactly the inverse of the release diff, nothing else.
+- Checks: typecheck and the full suite green; `GET /api/health` after deployment shows all four locks `true`.
+- The existing branch `feature/o22-demo-cycle-relock` (`9a881a7`) is only a **draft** of that content: it is built on the release draft and restores the then locked tree as a whole. It is **not** to be merged as it is; it is replaced by the targeted revert once the release has been merged.
 
 ## 6. What this proposal does not do
 
