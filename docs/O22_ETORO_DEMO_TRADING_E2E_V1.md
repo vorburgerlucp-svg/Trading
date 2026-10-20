@@ -738,3 +738,7 @@ One read-only lookup found the cause: `asset.settlementType` came back as `"REAL
 - it requires the order status of an open to state the action, the direction and exactly one position for a fill.
 
 Details, tests and the unchanged state of the ETH position are in `O22_ORDER_LOOKUP_PARSER_FIX.md`. This is not a trading release: all build locks stay closed.
+
+### 17.9 Crash-safe status check and parallel processes (2026-10-20)
+
+A status check writes several records into separate append-only logs. A crash between them is now completed deterministically from the stored, checked evidence: `recover()` / `refresh()` roll forward without a broker request, or with one read-only GET when the evidence does not decide yet. Persistent preconditions inside the log locks keep a stale check of another process from storing a contradicting read or state. Details, tests and the remaining risks are in `O22_CRASH_SAFE_RECONCILIATION.md`. This is not a trading release.

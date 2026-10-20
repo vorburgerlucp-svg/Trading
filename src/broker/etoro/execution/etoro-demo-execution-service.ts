@@ -106,6 +106,13 @@ export interface ConfirmationRecord {
   readonly observedAt: string;
   /** O22: the product type an order status read states (asset.settlementType), when it states one. */
   readonly settlementType?: BrokerOrderStatus['settlementType'];
+  /**
+   * O22 recovery: the intent state this status read was fully checked against, and the state it leads to from there (null: none).
+   * Every status read stores both. Only such a read can carry a transition, and only from exactly that state; after a crash
+   * between the confirmation and its transition, the transition is rolled forward from this record without a broker request.
+   */
+  readonly appliesFrom?: IntentState;
+  readonly target?: IntentState | null;
 }
 
 export interface ReconciliationRecord {
@@ -119,6 +126,11 @@ export interface ReconciliationRecord {
   readonly brokerOrderId: number | null;
   readonly statusId: number | null;
   readonly at: string;
+  /**
+   * O22 recovery: true on a "found" record whose whole answer was checked before it was written (order, instrument, action,
+   * direction, positions, transitions). Only such a record lets a restarted process roll AMBIGUOUS forward to RECONCILED.
+   */
+  readonly checked?: true;
 }
 
 export interface DemoSafetySource {
@@ -195,6 +207,11 @@ interface Projection {
 }
 
 const TERMINAL: ReadonlySet<IntentState> = new Set(['FILLED', 'REJECTED', 'CANCELLED', 'EXPIRED']);
+/** States in which refresh reads the broker status (and in which a stored status read can be rolled forward). */
+const REFRESHABLE: ReadonlySet<IntentState> = new Set(['SUBMITTED', 'ACCEPTED', 'PARTIALLY_FILLED', 'RECONCILED']);
+const STATUS_KINDS: ReadonlySet<ConfirmationRecord['kind']> = new Set(['order_status', 'close_order_status']);
+const FILL_OUTCOMES: ReadonlySet<BrokerOrderOutcome> = new Set(['filled', 'partially_filled', 'partially_filled_final']);
+const FINAL_OUTCOMES: ReadonlySet<BrokerOrderOutcome> = new Set(['filled', 'partially_filled_final', 'rejected', 'cancelled']);
 const OUTCOME_STATE: Readonly<Record<BrokerOrderOutcome, IntentState>> = Object.freeze({
   pending: 'ACCEPTED',
   filled: 'FILLED',
@@ -444,10 +461,13 @@ export class EtoroDemoExecutionService {
       await this.transition(intentId, 'AMBIGUOUS', 'SUBMISSION_ANSWER_NOT_RECORDED');
       p = this.require(intentId);
     }
+    // O22: a status check that a crash or another process interrupted is completed from the stored evidence first (no broker
+    // request). When that reaches a final state, there is nothing left to read.
+    const before = p.state;
+    p = await this.rollForward(p);
+    if (p.state !== before && TERMINAL.has(p.state)) return this.view(p);
     if (p.state === 'AMBIGUOUS') return this.reconcileAmbiguous(p);
-    if (p.state !== 'SUBMITTED' && p.state !== 'ACCEPTED' && p.state !== 'PARTIALLY_FILLED' && p.state !== 'RECONCILED') {
-      throw new DemoExecutionError('INTENT_STATE_INVALID', p.state);
-    }
+    if (!REFRESHABLE.has(p.state)) throw new DemoExecutionError('INTENT_STATE_INVALID', p.state);
     if (p.brokerOrderId === null) throw new DemoExecutionError('INTENT_STATE_INVALID', 'no broker order id');
     const read = p.intent.action === 'open'
       ? await this.deps.adapter.lookupOrder({ orderId: p.brokerOrderId })
@@ -478,11 +498,88 @@ export class EtoroDemoExecutionService {
     // RECONCILED (order id, instrument, action, direction, positions, transition). A refused answer leaves no "found"
     // reconciliation, no confirmation and no state change: the intent stays AMBIGUOUS.
     assertTransition(p.state, 'RECONCILED');
-    this.planStatus(p, status, 'order_status', 'RECONCILED');
-    const reconciliationId = await this.reconcile(p.intent.intentId, { referenceId, result: 'found', brokerOrderId: status.brokerOrderId, statusId: status.statusId, at });
-    await this.transition(p.intent.intentId, 'RECONCILED', 'BROKER_ORDER_FOUND_BY_REFERENCE', { reconciliationId });
-    await this.applyStatus(this.require(p.intent.intentId), status, 'order_status');
-    return this.get(p.intent.intentId);
+    this.planStatus({ ...p, brokerOrderId: status.brokerOrderId }, status, 'order_status', 'RECONCILED');
+    // The "found" record is written under the reconciliation log's lock: one order per intent, whichever process writes first.
+    const intentId = p.intent.intentId;
+    const reconciliationId = await this.reconcile(intentId, { referenceId, result: 'found', brokerOrderId: status.brokerOrderId, statusId: status.statusId, at, checked: true }, () => {
+      const found = this.foundReconciliations(intentId);
+      if (found.some((r) => r.brokerOrderId !== status.brokerOrderId)) throw responseInvalid('RECONCILIATION_CONFLICT', 'another order was found for this intent');
+      if (found.some((r) => r.checked === true)) throw new DemoExecutionError('RECONCILIATION_PENDING', 'the order was already found: refresh again to complete it');
+    });
+    await this.transition(intentId, 'RECONCILED', 'BROKER_ORDER_FOUND_BY_REFERENCE', { reconciliationId });
+    await this.applyStatus(this.require(intentId), status, 'order_status');
+    return this.get(intentId);
+  }
+
+  /**
+   * O22: completes, from the stored evidence alone, a status check that a crash or another process interrupted. No broker request.
+   *   - AMBIGUOUS with a checked "found" reconciliation: the step to RECONCILED (the order id then comes from that record).
+   *   - A status read stored against the current state whose transition was not recorded: that transition.
+   * Every step is an ordinary transition (fixed record id per state, precondition on the current state under the log's lock), so
+   * a repeated or concurrent recovery records each step once. Contradicting "found" records stop it (RECONCILIATION_CONFLICT).
+   */
+  private async rollForward(start: Projection): Promise<Projection> {
+    let p = start;
+    const intentId = p.intent.intentId;
+    for (let step = 0; step < 4; step++) {
+      let next: { to: IntentState; reason: string; extra: Partial<IntentEvent> } | null = null;
+      if (p.state === 'AMBIGUOUS') {
+        const found = this.foundReconciliations(intentId);
+        if (new Set(found.map((r) => r.brokerOrderId)).size > 1) throw responseInvalid('RECONCILIATION_CONFLICT', 'contradicting orders were found for this intent');
+        const checked = found.find((r) => r.checked === true);
+        if (checked !== undefined) next = { to: 'RECONCILED', reason: 'BROKER_ORDER_FOUND_BY_REFERENCE', extra: { reconciliationId: checked.reconciliationId } };
+      } else if (REFRESHABLE.has(p.state)) {
+        const state = p.state;
+        const pending = this.deps.confirmations.all().map((r) => r.payload)
+          .filter((c) => c.intentId === intentId && STATUS_KINDS.has(c.kind) && c.appliesFrom === state && c.target !== undefined && c.target !== null)
+          .at(-1);
+        if (pending !== undefined && pending.target) {
+          next = { to: pending.target, reason: 'BROKER_STATUS_' + (statusName(pending.statusId) ?? String(pending.statusId)).toUpperCase(), extra: { confirmationId: pending.confirmationId } };
+        }
+      }
+      if (next === null) return p;
+      try {
+        await this.transition(intentId, next.to, next.reason, next.extra);
+      } catch (error) {
+        // Another process recorded a step first: continue from what is stored now.
+        if (!(error instanceof DemoExecutionError && error.code === 'INTENT_STATE_INVALID')) throw error;
+        await this.syncAll();
+      }
+      p = this.require(intentId);
+    }
+    return p;
+  }
+
+  /** Recovery without any broker request: completes an interrupted status check from the stored evidence (see rollForward). */
+  async recover(intentId: string): Promise<IntentView> {
+    await this.syncAll();
+    return this.view(await this.rollForward(this.require(intentId)));
+  }
+
+  private foundReconciliations(intentId: string): ReconciliationRecord[] {
+    return this.deps.reconciliations.all().map((r) => r.payload).filter((r) => r.intentId === intentId && r.result === 'found');
+  }
+
+  /**
+   * O22: a new status read must agree with every status read stored for the intent (of the same kind): the same order, the same
+   * position once one is confirmed, never back from a fill to an unfilled outcome, and never another outcome once a final one is
+   * stored. Runs as a pre-check and again as the precondition of the confirmation, under the confirmation log's lock after
+   * catching up with every process, so a stale check of another process can never store a contradicting confirmation.
+   */
+  private assertConsistentWithStoredReads(intentId: string, kind: 'order_status' | 'close_order_status', read: { brokerOrderId: number; outcome: BrokerOrderOutcome; positionIds: readonly number[] }): void {
+    for (const record of this.deps.confirmations.all()) {
+      const c = record.payload;
+      if (c.intentId !== intentId) continue;
+      if (c.brokerOrderId !== null && c.brokerOrderId !== read.brokerOrderId && (c.kind === kind || c.kind === (kind === 'order_status' ? 'open_accepted' : 'close_submitted'))) {
+        throw responseInvalid('ORDER_ID_CONTRADICTS_EARLIER_READ', 'the order differs from an earlier record');
+      }
+      if (c.kind !== kind || c.outcome === null) continue;
+      if (kind === 'order_status' && read.positionIds.some((id) => c.brokerPositionIds.some((earlier) => earlier !== id))) {
+        throw responseInvalid('POSITION_CONTRADICTS_EARLIER_READ', 'the position differs from an earlier read');
+      }
+      if (FILL_OUTCOMES.has(c.outcome) && !FILL_OUTCOMES.has(read.outcome)) throw responseInvalid('STATUS_CONTRADICTS_EARLIER_READ', 'an earlier read stated a fill');
+      if (FINAL_OUTCOMES.has(c.outcome) && read.outcome !== c.outcome) throw responseInvalid('STATUS_CONTRADICTS_EARLIER_READ', 'an earlier read stated another final outcome');
+    }
   }
 
   /**
@@ -495,6 +592,7 @@ export class EtoroDemoExecutionService {
     if (p.brokerOrderId !== null && status.brokerOrderId !== p.brokerOrderId) throw responseInvalid('ORDER_ID_MISMATCH', 'order id does not match the intent');
     if (status.instrumentId !== p.intent.etoroInstrumentId) throw responseInvalid('INSTRUMENT_MISMATCH', 'instrument does not match the intent');
     if (kind === 'order_status') this.assertOpenStatusBelongs(p, status);
+    this.assertConsistentWithStoredReads(p.intent.intentId, kind, status);
     const target = OUTCOME_STATE[status.outcome];
     if (target === from) return null;
     // A partial fill that becomes final stays PARTIALLY_FILLED; only an allowed transition is taken.
@@ -506,7 +604,8 @@ export class EtoroDemoExecutionService {
   private async applyStatus(p: Projection, status: BrokerOrderStatus, kind: 'order_status' | 'close_order_status'): Promise<void> {
     // Every check (and the transition) runs before anything is recorded: a refused answer leaves no confirmation and changes no state.
     const target = this.planStatus(p, status, kind, p.state);
-    const confirmationId = await this.confirm(p.intent.intentId, {
+    const intentId = p.intent.intentId;
+    const confirmationId = await this.confirm(intentId, {
       kind,
       requestId: null,
       brokerOrderId: status.brokerOrderId,
@@ -515,7 +614,9 @@ export class EtoroDemoExecutionService {
       outcome: status.outcome,
       errorCode: status.errorCode,
       ...(status.settlementType !== null ? { settlementType: status.settlementType } : {}),
-    });
+      appliesFrom: p.state,
+      target,
+    }, () => this.assertConsistentWithStoredReads(intentId, kind, status));
     if (target === null) return;
     await this.transition(p.intent.intentId, target, 'BROKER_STATUS_' + (statusName(status.statusId) ?? String(status.statusId)).toUpperCase(), { confirmationId });
   }
@@ -690,6 +791,11 @@ export class EtoroDemoExecutionService {
       if (e.exposureUsd !== undefined) p.exposureUsd = Decimal.from(e.exposureUsd);
       if (e.approvedBy) p.approvedBy = e.approvedBy;
       if (e.gate) p.gateReasons = e.gate.reasons;
+      if (e.state === 'RECONCILED' && e.reconciliationId !== undefined) {
+        // O22: the order found by reference is the intent's order, also before (or without) a stored status read of it.
+        const found = this.deps.reconciliations.get(e.reconciliationId)?.payload;
+        if (found !== undefined && found.result === 'found' && found.brokerOrderId !== null) p.brokerOrderId = found.brokerOrderId;
+      }
       if (e.state === 'SUBMITTING') {
         p.submitRequestId = e.requestId ?? null;
         p.submittingAt = e.at;
@@ -758,6 +864,17 @@ export class EtoroDemoExecutionService {
     if (BROKER_CONFIRMED_STATES.has(to) && !this.confirmationExists(extra.confirmationId)) {
       throw new DemoExecutionError('INTENT_STATE_INVALID', 'a broker-confirmed state needs a stored broker confirmation');
     }
+    // O22: a status read carries exactly the transition it was checked for: from its own state, to its own target, of its intent.
+    const confirmation = extra.confirmationId === undefined ? undefined : this.deps.confirmations.get(extra.confirmationId)?.payload;
+    if (confirmation !== undefined && STATUS_KINDS.has(confirmation.kind) && (confirmation.intentId !== intentId || confirmation.appliesFrom !== from || confirmation.target !== to)) {
+      throw new DemoExecutionError('INTENT_STATE_INVALID', 'the status read was not checked for ' + from + ' -> ' + to);
+    }
+    if (to === 'RECONCILED') {
+      const found = extra.reconciliationId === undefined ? undefined : this.deps.reconciliations.get(extra.reconciliationId)?.payload;
+      if (found === undefined || found.intentId !== intentId || found.result !== 'found' || found.checked !== true) {
+        throw new DemoExecutionError('INTENT_STATE_INVALID', 'RECONCILED needs a checked "found" reconciliation of the intent');
+      }
+    }
     const result = await guarded(() => this.deps.intents.append(intentId + ':' + to, event, {
       precondition: () => {
         const latest = this.projections().get(intentId);
@@ -771,17 +888,17 @@ export class EtoroDemoExecutionService {
     return confirmationId !== undefined && this.deps.confirmations.get(confirmationId) !== undefined;
   }
 
-  private async confirm(intentId: string, c: Omit<ConfirmationRecord, 'schema' | 'confirmationId' | 'intentId' | 'observedAt' | 'statusName'>): Promise<string> {
+  private async confirm(intentId: string, c: Omit<ConfirmationRecord, 'schema' | 'confirmationId' | 'intentId' | 'observedAt' | 'statusName'>, precondition?: () => void): Promise<string> {
     const observedAt = this.now();
     const content = { ...c, intentId, statusName: statusName(c.statusId), observedAt };
     const confirmationId = 'econf_' + hashOf(content).slice(0, 40);
-    await this.deps.confirmations.append(confirmationId, { schema: 'etoro-demo-broker-confirmation:v1', confirmationId, ...content });
+    await this.deps.confirmations.append(confirmationId, { schema: 'etoro-demo-broker-confirmation:v1', confirmationId, ...content }, precondition ? { precondition } : {});
     return confirmationId;
   }
 
-  private async reconcile(intentId: string, r: Omit<ReconciliationRecord, 'schema' | 'reconciliationId' | 'intentId'>): Promise<string> {
+  private async reconcile(intentId: string, r: Omit<ReconciliationRecord, 'schema' | 'reconciliationId' | 'intentId'>, precondition?: () => void): Promise<string> {
     const reconciliationId = 'erec_' + hashOf({ intentId, ...r }).slice(0, 40);
-    await this.deps.reconciliations.append(reconciliationId, { schema: 'etoro-demo-execution-reconciliation:v1', reconciliationId, intentId, ...r });
+    await this.deps.reconciliations.append(reconciliationId, { schema: 'etoro-demo-execution-reconciliation:v1', reconciliationId, intentId, ...r }, precondition ? { precondition } : {});
     return reconciliationId;
   }
 
