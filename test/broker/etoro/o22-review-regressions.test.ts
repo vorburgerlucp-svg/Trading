@@ -215,6 +215,18 @@ describe('F6: the fill confirmation is the authoritative evidence', () => {
   });
 });
 
+describe('D1: the observation proof uses the same closed period as the activity check', () => {
+  it('a slow sync stored after the closing snapshot can neither prove the position nor bring in unchecked activity', () => {
+    // No sync between the fills showed the position; the clean closing snapshot closes the test as incomplete.
+    const closing = obs('2026-10-20T10:21:00.000Z', [], { sequence: 30 });
+    const closed = evaluate([openView(), closeView()], [closing]);
+    expect(closed).toMatchObject({ result: 'incomplete', pending: ['OPEN_POSITION_NOT_OBSERVED'] });
+    // S1 started before the close was filled (observed in the window) but was stored after the closing snapshot, with a foreign order.
+    const slow = obs('2026-10-20T10:20:03.000Z', [{ positionId: POS }], { orderIds: [FOREIGN_ORDER], sequence: 31, storedAt: '2026-10-20T10:21:10.000Z' });
+    expect(evaluate([openView(), closeView()], [closing, slow])).toEqual(closed);
+  });
+});
+
 describe('N2: a partial fill stated final stays failed', () => {
   const partialHistory = OPEN_HISTORY.slice(0, 5).concat([['PARTIALLY_FILLED', T.filled, 'econf_part']] as Hist);
   const finalRead: Read = { confirmationId: 'econf_part', outcome: 'partially_filled_final', settlementType: 'real', brokerPositionIds: [POS], observedAt: T.filled };

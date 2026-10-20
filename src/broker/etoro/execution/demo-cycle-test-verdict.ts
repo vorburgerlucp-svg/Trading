@@ -232,7 +232,10 @@ export function evaluateDemoCycleTest(input: { intents: readonly IntentView[]; s
 
   // ------------------------------------------------------------------------------- the open position observed (F3: never failed)
   if (positionId !== null) {
-    const seen = snapshots.some((s) =>
+    // D1: only observations within the same closed period count (stored up to the closing snapshot), so a snapshot stored later can
+    // neither complete this proof nor escape the activity check.
+    const inClosedPeriod = (s: DemoCycleSnapshot) => closing === null || s.sequence <= closing.sequence;
+    const seen = snapshots.some((s) => inClosedPeriod(s) &&
       ms(s.observedAt) >= ms(openSubmittingAt) && (closeFilledAt === null || ms(s.observedAt) < ms(closeFilledAt)) &&
       (s.content.positions ?? []).some((p) => p.positionId === positionId && p.etoroInstrumentId === open.intent.etoroInstrumentId && p.direction === open.intent.side));
     if (!seen) pending.add('OPEN_POSITION_NOT_OBSERVED');
