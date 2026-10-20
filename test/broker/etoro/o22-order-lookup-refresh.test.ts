@@ -204,3 +204,76 @@ describe('O22 reconciliation: an open that was never confirmed stays unresolved'
     expect(result.reasons).toEqual(expect.arrayContaining(['OUTCOME_PENDING', 'EXTERNAL_POSITIONS_PRESENT']));
   });
 });
+
+describe('O22 AMBIGUOUS reconciliation: the whole answer is checked before the first record', () => {
+  /** The cycle's open, written once; the answer is lost (timeout), so the intent is AMBIGUOUS. */
+  async function ambiguousOpen(f: Fixture): Promise<string> {
+    const created = await f.service.create(openInput({ amount: '100' }), CREATOR);
+    expect(created.state, created.gateReasons.join(',')).toBe('RISK_APPROVED');
+    await f.service.approve(created.intentId, HUMAN);
+    f.broker.next({ throws: 'timeout' });
+    expect((await f.service.execute(created.intentId, HUMAN)).state).toBe('AMBIGUOUS');
+    return created.intentId;
+  }
+
+  /** A refused reconciliation: no "found" record, no confirmation, no state change, a GET only, the budget unchanged. */
+  async function expectAmbiguousRefused(f: Fixture, intentId: string, reason: string): Promise<void> {
+    const historyBefore = (await f.service.get(intentId)).history.map((h) => h.state);
+    const requestsBefore = f.broker.requests.length;
+    const e = await refusal(f.service.refresh(intentId));
+    expect(e.code).toBe('BROKER_RESPONSE_INVALID');
+    expect(e.reasons).toEqual([reason]);
+    const view = await f.service.get(intentId);
+    expect(view.state).toBe('AMBIGUOUS');
+    expect(view.history.map((h) => h.state)).toEqual(historyBefore);
+    expect(view.brokerPositionIds).toEqual([]);
+    expect(f.reconciliations.all().filter((r) => r.payload.intentId === intentId)).toHaveLength(0);
+    expect(f.confirmations.all().filter((r) => r.payload.intentId === intentId)).toHaveLength(0);
+    expect(f.broker.requests.slice(requestsBefore).map((r) => r.method)).toEqual(['GET']);
+    expect(f.broker.writes).toHaveLength(1);
+    expect(await f.service.cycleBudget()).toMatchObject({ openSubmissions: 1, maxOpenSubmissions: 1, closeSubmissions: 0 });
+    expect((await refusal(f.service.create(closeInput(intentId), CREATOR))).code).toBe('INTENT_INVALID');
+  }
+
+  const cases: [string, Scripted, string][] = [
+    ['Filled without a position', lookup({ positionIds: [] }), 'FILL_WITHOUT_POSITION'],
+    ['Filled without positionExecutions', lookup({}, (b) => delete b.positionExecutions), 'FILL_WITHOUT_POSITION'],
+    ['a partial fill without a position', lookup({ statusId: 5, positionIds: [] }), 'FILL_WITHOUT_POSITION'],
+    ['Filled with two positions', lookup({ positionIds: [LIVE_LIKE_POSITION_ID, LIVE_LIKE_POSITION_ID + 1] }), 'POSITION_NOT_UNIQUE'],
+    ['Filled with a contradicting positionsToClose entry', lookup({}, (b) => (b.positionsToClose = [LIVE_LIKE_POSITION_ID + 9])), 'POSITION_NOT_UNIQUE'],
+    ['a pending order that names a position', lookup({ statusId: 2 }), 'POSITION_WITHOUT_FILL'],
+    ['a rejected order that names a position', lookup({ statusId: 4 }), 'POSITION_WITHOUT_FILL'],
+    ['an invalid position id', lookup({ positionIds: [-1] }), 'INVALID_POSITIONEXECUTIONS_POSITIONID'],
+    ['another instrument', lookup({ instrumentId: ETORO_MSFT_ID }), 'ORDER_DOES_NOT_MATCH_INTENT'],
+    ['another direction', lookup({}, (b) => (b.transaction = 'sellShort')), 'ORDER_DOES_NOT_MATCH_INTENT'],
+  ];
+  for (const [name, scripted, reason] of cases) {
+    it(name + ': ' + reason + ', the intent stays AMBIGUOUS and nothing is recorded', async () => {
+      const f = await cycle();
+      const id = await ambiguousOpen(f);
+      f.broker.next(scripted);
+      await expectAmbiguousRefused(f, id, reason);
+    });
+  }
+
+  it('after a refused answer a valid one still reconciles exactly once; no second order, the budget stays spent', async () => {
+    const f = await cycle();
+    const id = await ambiguousOpen(f);
+    f.broker.next(lookup({ positionIds: [] }));
+    await expectAmbiguousRefused(f, id, 'FILL_WITHOUT_POSITION');
+    // A restart in between: a second process on the same stores.
+    const restarted = await o21Fixture({ policy: DEMO_E2E_CYCLE_POLICY, stores: f.stores, sharedBroker: f.broker });
+    restarted.broker.next(lookup());
+    const view = await restarted.service.refresh(id);
+    expect(view.state).toBe('FILLED');
+    expect(view.history.map((h) => h.state)).toEqual(['CREATED', 'RISK_APPROVED', 'APPROVED', 'SUBMITTING', 'AMBIGUOUS', 'RECONCILED', 'FILLED']);
+    expect(view.brokerPositionIds).toEqual([LIVE_LIKE_POSITION_ID]);
+    expect(restarted.reconciliations.all().map((r) => r.payload.result)).toEqual(['found']);
+    expect(orderStatusReads(restarted, id)).toBe(1);
+    expect(restarted.broker.writes).toHaveLength(1);
+    expect(await restarted.service.cycleBudget()).toMatchObject({ openSubmissions: 1, maxOpenSubmissions: 1, closeSubmissions: 0 });
+    const second = await restarted.service.create(openInput({ amount: '100', instrumentId: MSFT.instrumentId, etoroInstrumentId: ETORO_MSFT_ID, strategyRunId: 'run-o22-second' }), CREATOR);
+    expect(second.state).toBe('REJECTED');
+    expect(second.gateReasons).toContain('CYCLE_OPEN_BUDGET_EXHAUSTED');
+  });
+});

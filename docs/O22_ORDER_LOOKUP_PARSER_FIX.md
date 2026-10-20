@@ -59,6 +59,11 @@ They are evaluated for the first time on the next approved read.
 
    Every check runs **before** anything is recorded. A refused answer stores no confirmation and changes no state. Without a confirmed position, no close can be prepared (`closePositionOf` needs exactly one).
 
+4. **No partial record (review finding on PR #28).** Before this correction, the AMBIGUOUS reconciliation stored the `found` reconciliation and the step to `RECONCILED` *before* `applyStatus` ran the checks above. A `Filled` without a unique position was then refused, but only after state had already been persisted. `applyStatus` also stored the confirmation before it checked the transition.
+   - Every check now runs in one write-free step (`planStatus`): order id, instrument, action, direction, positions and the allowed transition. For the AMBIGUOUS path, it also covers `AMBIGUOUS → RECONCILED` and the transition from `RECONCILED`.
+   - This step runs before the first record. A refused answer leaves no `found` reconciliation, no confirmation and no state change, and the intent stays `AMBIGUOUS`.
+   - Through the public paths, a refused transition is currently not reachable: every state `refresh` accepts allows every target. The reordering is a safeguard.
+
 **What stays unchanged:**
 
 - The append-only histories, idempotency rules, at-most-once guarantees and the cycle budget (a refused read does not free it).
@@ -76,7 +81,7 @@ They are evaluated for the first time on the next approved read.
   - no value in a refusal;
   - the runtime reason mapping;
   - the four build locks closed.
-- **`test/broker/etoro/o22-order-lookup-refresh.test.ts` (25 tests, lock mocked for this module only):**
+- **`test/broker/etoro/o22-order-lookup-refresh.test.ts` (36 tests, lock mocked for this module only):**
   - the live-like answer → `FILLED` with one position and `real`;
   - pending → partial → filled;
   - another order id, instrument, action or direction;
@@ -88,6 +93,14 @@ They are evaluated for the first time on the next approved read.
   - the state is unchanged and nothing was recorded;
   - only a GET was sent;
   - no close is possible.
+
+  An AMBIGUOUS block (11 tests) covers a fill without a position, two positions, a contradictory `positionsToClose`, a pending or rejected order with a position, an invalid position id, and another instrument or direction. For each, it asserts:
+  - the state stays `AMBIGUOUS` with the history unchanged;
+  - there is no reconciliation and no confirmation;
+  - only a GET was sent and exactly one write ever;
+  - the budget is unchanged and no close is possible.
+
+  A valid answer afterwards, even after a restart, reconciles exactly once. On the previous commit `da4fbfa`, 8 of the 11 fail; the other 3 were already refused before any record.
 
   It also covers:
   - a repeated refresh after a restart, where the open was written exactly once and `FILLED` is final;

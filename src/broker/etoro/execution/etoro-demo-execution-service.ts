@@ -474,17 +474,38 @@ export class EtoroDemoExecutionService {
     const status = read.status;
     // Only positive evidence that unambiguously belongs to this intent resolves it.
     if (!evidenceMatches(p.intent, status)) throw responseInvalid('ORDER_DOES_NOT_MATCH_INTENT', 'the order found does not match the intent');
+    // O22: the whole answer is validated before the first record: the step to RECONCILED, and the status it then applies from
+    // RECONCILED (order id, instrument, action, direction, positions, transition). A refused answer leaves no "found"
+    // reconciliation, no confirmation and no state change: the intent stays AMBIGUOUS.
+    assertTransition(p.state, 'RECONCILED');
+    this.planStatus(p, status, 'order_status', 'RECONCILED');
     const reconciliationId = await this.reconcile(p.intent.intentId, { referenceId, result: 'found', brokerOrderId: status.brokerOrderId, statusId: status.statusId, at });
     await this.transition(p.intent.intentId, 'RECONCILED', 'BROKER_ORDER_FOUND_BY_REFERENCE', { reconciliationId });
     await this.applyStatus(this.require(p.intent.intentId), status, 'order_status');
     return this.get(p.intent.intentId);
   }
 
-  private async applyStatus(p: Projection, status: BrokerOrderStatus, kind: 'order_status' | 'close_order_status'): Promise<void> {
-    // Every check runs before anything is recorded: a refused answer leaves no confirmation and changes no state.
+  /**
+   * O22: every check of a status read, without any write. It returns the state the read leads to from `from`, or null when it
+   * changes no state. It throws when the answer does not belong to the intent or the transition is not allowed, so a caller that
+   * runs it before its first record never leaves a partial record (a confirmation without its transition, a reconciliation
+   * without its status).
+   */
+  private planStatus(p: Projection, status: BrokerOrderStatus, kind: 'order_status' | 'close_order_status', from: IntentState): IntentState | null {
     if (p.brokerOrderId !== null && status.brokerOrderId !== p.brokerOrderId) throw responseInvalid('ORDER_ID_MISMATCH', 'order id does not match the intent');
     if (status.instrumentId !== p.intent.etoroInstrumentId) throw responseInvalid('INSTRUMENT_MISMATCH', 'instrument does not match the intent');
     if (kind === 'order_status') this.assertOpenStatusBelongs(p, status);
+    const target = OUTCOME_STATE[status.outcome];
+    if (target === from) return null;
+    // A partial fill that becomes final stays PARTIALLY_FILLED; only an allowed transition is taken.
+    if (from === 'PARTIALLY_FILLED' && target !== 'FILLED') return null;
+    assertTransition(from, target);
+    return target;
+  }
+
+  private async applyStatus(p: Projection, status: BrokerOrderStatus, kind: 'order_status' | 'close_order_status'): Promise<void> {
+    // Every check (and the transition) runs before anything is recorded: a refused answer leaves no confirmation and changes no state.
+    const target = this.planStatus(p, status, kind, p.state);
     const confirmationId = await this.confirm(p.intent.intentId, {
       kind,
       requestId: null,
@@ -495,11 +516,7 @@ export class EtoroDemoExecutionService {
       errorCode: status.errorCode,
       ...(status.settlementType !== null ? { settlementType: status.settlementType } : {}),
     });
-    const target = OUTCOME_STATE[status.outcome];
-    if (target === p.state) return;
-    // A partial fill that becomes final stays PARTIALLY_FILLED; only an allowed transition is taken.
-    if (p.state === 'PARTIALLY_FILLED' && target !== 'FILLED') return;
-    assertTransition(p.state, target);
+    if (target === null) return;
     await this.transition(p.intent.intentId, target, 'BROKER_STATUS_' + (statusName(status.statusId) ?? String(status.statusId)).toUpperCase(), { confirmationId });
   }
 
