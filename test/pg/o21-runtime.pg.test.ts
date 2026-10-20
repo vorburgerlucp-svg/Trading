@@ -3,7 +3,14 @@
 // open is refused; and BUILD_LOCKS.etoroDemoExecution refuses every write. No broker request is made. Transports are fixtures.
 import { createServer } from 'node:net';
 import pg from 'pg';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+// O22 B1 release: this build opens BUILD_LOCKS.etoroDemoExecution for the one controlled demo cycle. This file keeps proving the
+// behaviour of a LOCKED build (execute and cancel refused with EXECUTION_LOCKED_IN_BUILD, nothing sent), so the lock is mocked
+// closed here. The real values of this build are asserted without a mock in test/runtime/o22-release.test.ts.
+vi.mock('../../src/nexus/safety.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/nexus/safety.js')>();
+  return { ...actual, BUILD_LOCKS: Object.freeze({ ...actual.BUILD_LOCKS, etoroDemoExecution: true }) };
+});
 import { PostgresLedgerStore } from '../../src/persistence/postgres/postgres-ledger-store.js';
 import { HttpsDemoExecutionTransport } from '../../src/broker/etoro/execution/etoro-demo-execution-transport.js';
 import { startRuntime } from '../../src/runtime/bootstrap.js';
