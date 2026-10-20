@@ -5,34 +5,49 @@
 import { DemoExecutionError } from './etoro-demo-execution-errors.js';
 import { isBrokerId, isUuid } from './etoro-demo-execution-endpoints.js';
 
-function invalid(detail: string): DemoExecutionError {
-  return new DemoExecutionError('BROKER_RESPONSE_INVALID', detail);
+/**
+ * O22: the fixed, privacy-safe reason code of a refused field, derived only from the field path written in this code base (never
+ * from a value of the response): "asset.settlementType" -> INVALID_ASSET_SETTLEMENTTYPE, "positionExecutions[0].positionId" ->
+ * INVALID_POSITIONEXECUTIONS_POSITIONID. The runtime passes it on as the error's reason, so a refusal names the field that failed.
+ */
+export function invalidFieldReason(path: string): string {
+  return ('INVALID_' + path.replace(/\[\d+\]/g, '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').toUpperCase()).slice(0, 64);
+}
+
+/** A refused response: the detail names the field (never a value); the reason is the fixed code of that field. */
+function invalidField(path: string, problem: string): DemoExecutionError {
+  return new DemoExecutionError('BROKER_RESPONSE_INVALID', path + ' ' + problem, [invalidFieldReason(path)]);
+}
+
+/** A refused response for a reason that is not one field (e.g. an answer for another request). */
+function invalidReason(reason: string, detail: string): DemoExecutionError {
+  return new DemoExecutionError('BROKER_RESPONSE_INVALID', detail, [reason]);
 }
 
 function objectAt(value: unknown, path: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalid(path + ' is not an object');
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidField(path, 'is not an object');
   return value as Record<string, unknown>;
 }
 
 function idAt(value: unknown, path: string): number {
-  if (!isBrokerId(value)) throw invalid(path + ' is not a positive integer id');
+  if (!isBrokerId(value)) throw invalidField(path, 'is not a positive integer id');
   return value;
 }
 
 function intAt(value: unknown, path: string): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value)) throw invalid(path + ' is not an integer');
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) throw invalidField(path, 'is not an integer');
   return value;
 }
 
 function optionalUuid(value: unknown, path: string): string | null {
   if (value === undefined || value === null) return null;
-  if (!isUuid(value)) throw invalid(path + ' is not a UUID');
+  if (!isUuid(value)) throw invalidField(path, 'is not a UUID');
   return (value as string).toLowerCase();
 }
 
 function idList(value: unknown, path: string, max = 100): number[] {
   if (value === undefined || value === null) return [];
-  if (!Array.isArray(value) || value.length > max) throw invalid(path + ' is not a bounded array');
+  if (!Array.isArray(value) || value.length > max) throw invalidField(path, 'is not a bounded array');
   return value.map((entry, i) => idAt(entry, path + '[' + i + ']'));
 }
 
@@ -79,7 +94,7 @@ export function brokerOrderOutcome(statusId: number): BrokerOrderOutcome {
     case 8:
       return 'cancelled';
     default:
-      throw invalid('status id ' + String(statusId) + ' is not a documented order status');
+      throw invalidField('status.id', 'is not a documented order status');
   }
 }
 
@@ -98,8 +113,8 @@ export function parseOpenOrderAccepted(body: unknown, requestId: string): OpenOr
   const root = objectAt(body, 'order response');
   const brokerOrderId = idAt(root.orderId, 'orderId');
   const referenceId = optionalUuid(root.referenceId, 'referenceId');
-  if (referenceId === null) throw invalid('referenceId is missing');
-  if (referenceId !== requestId.toLowerCase()) throw invalid('referenceId does not echo the request id');
+  if (referenceId === null) throw invalidField('referenceId', 'is missing');
+  if (referenceId !== requestId.toLowerCase()) throw invalidReason('REFERENCE_ID_MISMATCH', 'referenceId does not echo the request id');
   return { brokerOrderId, referenceId, token: optionalUuid(root.token, 'token') };
 }
 
@@ -124,8 +139,8 @@ export function parseCloseSubmitted(body: unknown, expected: { positionId: numbe
   const order = objectAt(root.orderForClose, 'orderForClose');
   const positionId = idAt(order.positionID, 'orderForClose.positionID');
   const instrumentId = idAt(order.instrumentID, 'orderForClose.instrumentID');
-  if (positionId !== expected.positionId) throw invalid('orderForClose.positionID does not match the request');
-  if (instrumentId !== expected.instrumentId) throw invalid('orderForClose.instrumentID does not match the request');
+  if (positionId !== expected.positionId) throw invalidReason('POSITION_ID_MISMATCH', 'orderForClose.positionID does not match the request');
+  if (instrumentId !== expected.instrumentId) throw invalidReason('INSTRUMENT_MISMATCH', 'orderForClose.instrumentID does not match the request');
   const statusId = intAt(order.statusID, 'orderForClose.statusID');
   brokerOrderOutcome(statusId);
   return { closeOrderId: idAt(order.orderID, 'orderForClose.orderID'), positionId, instrumentId, statusId, token: optionalUuid(root.token, 'token') };
@@ -149,8 +164,26 @@ export interface BrokerOrderStatus {
 
 function optionalEnum<T extends string>(value: unknown, allowed: readonly T[], path: string): T | null {
   if (value === undefined || value === null) return null;
-  if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) throw invalid(path + ' is not a documented value');
+  if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) throw invalidField(path, 'is not a documented value');
   return value as T;
+}
+
+/** The settlement types of the reference ("Possible values: cfd, real, realFutures, marginTrade"), in their documented spelling. */
+export const ETORO_SETTLEMENT_TYPES = Object.freeze(['cfd', 'real', 'realFutures', 'marginTrade'] as const);
+export type EtoroSettlementType = (typeof ETORO_SETTLEMENT_TYPES)[number];
+
+/**
+ * asset.settlementType of orders:lookup. The live answer of 20.10.2026 (the first one observed) stated "REAL" where the reference
+ * documents "real". The value is compared with the four documented values without regard to letter case, and only an exact
+ * case-insensitive match is accepted and returned in its documented spelling. Anything else (another word, extra characters or
+ * spaces, a number) is still refused: no trimming, no prefix match, no guess.
+ */
+function optionalSettlementType(value: unknown, path: string): EtoroSettlementType | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') throw invalidField(path, 'is not a documented value');
+  const match = ETORO_SETTLEMENT_TYPES.find((t) => t.toLowerCase() === value.toLowerCase());
+  if (match === undefined) throw invalidField(path, 'is not a documented value');
+  return match;
 }
 
 /** 200 of GET .../demo/orders:lookup. */
@@ -160,7 +193,7 @@ export function parseOrderLookup(body: unknown): BrokerOrderStatus {
   const statusId = intAt(status.id, 'status.id');
   const asset = objectAt(root.asset, 'asset');
   const executions = root.positionExecutions;
-  if (executions !== undefined && executions !== null && (!Array.isArray(executions) || executions.length > 100)) throw invalid('positionExecutions is not a bounded array');
+  if (executions !== undefined && executions !== null && (!Array.isArray(executions) || executions.length > 100)) throw invalidField('positionExecutions', 'is not a bounded array');
   const positionIds = (Array.isArray(executions) ? executions : []).map((entry, i) => idAt(objectAt(entry, 'positionExecutions[' + i + ']').positionId, 'positionExecutions[' + i + '].positionId'));
   const errorCode = status.errorCode === undefined || status.errorCode === null ? null : intAt(status.errorCode, 'status.errorCode');
   return {
@@ -172,7 +205,7 @@ export function parseOrderLookup(body: unknown): BrokerOrderStatus {
     positionIds: [...new Set([...positionIds, ...idList(root.positionsToClose, 'positionsToClose')])],
     action: optionalEnum(root.action, ['open', 'close'] as const, 'action'),
     transaction: optionalEnum(root.transaction, ['buy', 'sell', 'sellShort', 'buyToCover'] as const, 'transaction'),
-    settlementType: optionalEnum(asset.settlementType, ['cfd', 'real', 'realFutures', 'marginTrade'] as const, 'asset.settlementType'),
+    settlementType: optionalSettlementType(asset.settlementType, 'asset.settlementType'),
   };
 }
 
@@ -181,7 +214,7 @@ export function parseCloseOrderInfo(body: unknown): BrokerOrderStatus {
   const root = objectAt(body, 'close order response');
   const statusId = intAt(root.statusID, 'statusID');
   const positions = root.positions;
-  if (positions !== undefined && positions !== null && (!Array.isArray(positions) || positions.length > 100)) throw invalid('positions is not a bounded array');
+  if (positions !== undefined && positions !== null && (!Array.isArray(positions) || positions.length > 100)) throw invalidField('positions', 'is not a bounded array');
   const positionIds = (Array.isArray(positions) ? positions : []).map((entry, i) => idAt(objectAt(entry, 'positions[' + i + ']').positionID, 'positions[' + i + '].positionID'));
   const errorCode = root.errorCode === undefined || root.errorCode === null ? null : intAt(root.errorCode, 'errorCode');
   return {

@@ -564,7 +564,11 @@ describe('O21 service: close only a known position', () => {
     const id = await approvedOpen(f);
     f.broker.next(orderAccepted(), lookupAnswer(3, { positionIds: [] }));
     await f.service.execute(id, HUMAN);
-    expect((await f.service.refresh(id)).state).toBe('FILLED');
+    // O22: a fill that names no position is refused (FILL_WITHOUT_POSITION); the open keeps its state and nothing is recorded.
+    const refused = await codeOf(f.service.refresh(id));
+    expect(refused.code).toBe('BROKER_RESPONSE_INVALID');
+    expect(refused.reasons).toEqual(['FILL_WITHOUT_POSITION']);
+    expect((await f.service.get(id)).state).toBe('SUBMITTED');
     expect((await codeOf(f.service.create(closeInput(id), CREATOR))).code).toBe('INTENT_INVALID');
   });
 

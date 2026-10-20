@@ -190,7 +190,7 @@ export class EToroDemoExecutionAdapter {
           if (result.retryAfterSeconds !== null) waitMs = result.retryAfterSeconds * 1000;
           if (waitMs > MAX_READ_WAIT_MS) break;
         } else if (result.status < 500) {
-          throw new DemoExecutionError('BROKER_RESPONSE_INVALID', 'unexpected status ' + result.status);
+          throw new DemoExecutionError('BROKER_RESPONSE_INVALID', 'unexpected status ' + result.status, ['UNEXPECTED_HTTP_STATUS']);
         } else {
           lastCode = 'BROKER_NOT_CONNECTED';
         }

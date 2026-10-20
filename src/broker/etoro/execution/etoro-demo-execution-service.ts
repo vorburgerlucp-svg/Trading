@@ -223,6 +223,11 @@ function evidenceMatches(intent: ExecutionIntent, status: BrokerOrderStatus): bo
   return status.action === 'open' && status.transaction === (intent.side === 'buy' ? 'buy' : 'sellShort');
 }
 
+/** A refused broker answer with its fixed, privacy-safe reason code (no value of the answer). */
+function responseInvalid(reason: string, detail: string): DemoExecutionError {
+  return new DemoExecutionError('BROKER_RESPONSE_INVALID', detail, [reason]);
+}
+
 function statusName(statusId: number | null): string | null {
   if (statusId === null) return null;
   return (ETORO_ORDER_STATUS as Record<number, string>)[statusId] ?? null;
@@ -468,7 +473,7 @@ export class EtoroDemoExecutionService {
     }
     const status = read.status;
     // Only positive evidence that unambiguously belongs to this intent resolves it.
-    if (!evidenceMatches(p.intent, status)) throw new DemoExecutionError('BROKER_RESPONSE_INVALID', 'the order found does not match the intent');
+    if (!evidenceMatches(p.intent, status)) throw responseInvalid('ORDER_DOES_NOT_MATCH_INTENT', 'the order found does not match the intent');
     const reconciliationId = await this.reconcile(p.intent.intentId, { referenceId, result: 'found', brokerOrderId: status.brokerOrderId, statusId: status.statusId, at });
     await this.transition(p.intent.intentId, 'RECONCILED', 'BROKER_ORDER_FOUND_BY_REFERENCE', { reconciliationId });
     await this.applyStatus(this.require(p.intent.intentId), status, 'order_status');
@@ -476,8 +481,10 @@ export class EtoroDemoExecutionService {
   }
 
   private async applyStatus(p: Projection, status: BrokerOrderStatus, kind: 'order_status' | 'close_order_status'): Promise<void> {
-    if (p.brokerOrderId !== null && status.brokerOrderId !== p.brokerOrderId) throw new DemoExecutionError('BROKER_RESPONSE_INVALID', 'order id does not match the intent');
-    if (status.instrumentId !== p.intent.etoroInstrumentId) throw new DemoExecutionError('BROKER_RESPONSE_INVALID', 'instrument does not match the intent');
+    // Every check runs before anything is recorded: a refused answer leaves no confirmation and changes no state.
+    if (p.brokerOrderId !== null && status.brokerOrderId !== p.brokerOrderId) throw responseInvalid('ORDER_ID_MISMATCH', 'order id does not match the intent');
+    if (status.instrumentId !== p.intent.etoroInstrumentId) throw responseInvalid('INSTRUMENT_MISMATCH', 'instrument does not match the intent');
+    if (kind === 'order_status') this.assertOpenStatusBelongs(p, status);
     const confirmationId = await this.confirm(p.intent.intentId, {
       kind,
       requestId: null,
@@ -494,6 +501,25 @@ export class EtoroDemoExecutionService {
     if (p.state === 'PARTIALLY_FILLED' && target !== 'FILLED') return;
     assertTransition(p.state, target);
     await this.transition(p.intent.intentId, target, 'BROKER_STATUS_' + (statusName(status.statusId) ?? String(status.statusId)).toUpperCase(), { confirmationId });
+  }
+
+  /**
+   * O22: an order status read of an open must state the open and the intent's direction (buy -> "buy", sell -> "sellShort"); a
+   * missing value is not a match. Its positions must be unambiguous: a fill (also a partial one) names exactly one position; a
+   * pending or rejected order names none; no read names more than one; and every read names the same position as the earlier
+   * reads of this intent. Anything else is refused and the intent keeps its state, so the position stays unresolved for NEXUS
+   * and no close of it can be prepared (closePositionOf needs exactly one confirmed position).
+   */
+  private assertOpenStatusBelongs(p: Projection, status: BrokerOrderStatus): void {
+    if (status.action !== 'open') throw responseInvalid('ACTION_MISMATCH', 'action is missing or not open');
+    if (status.transaction !== (p.intent.side === 'buy' ? 'buy' : 'sellShort')) throw responseInvalid('TRANSACTION_MISMATCH', 'transaction is missing or does not match the side');
+    const ids = status.positionIds;
+    if (ids.length > 1) throw responseInvalid('POSITION_NOT_UNIQUE', 'the order status names more than one position');
+    const fill = status.outcome === 'filled' || status.outcome === 'partially_filled' || status.outcome === 'partially_filled_final';
+    if (fill && ids.length !== 1) throw responseInvalid('FILL_WITHOUT_POSITION', 'a fill names no position');
+    if ((status.outcome === 'pending' || status.outcome === 'rejected') && ids.length !== 0) throw responseInvalid('POSITION_WITHOUT_FILL', 'an unfilled order names a position');
+    const earlier = this.brokerConfirmedPositions(p.intent.intentId);
+    if (ids.length === 1 && earlier.some((id) => id !== ids[0])) throw responseInvalid('POSITION_CONTRADICTS_EARLIER_READ', 'the position differs from an earlier read');
   }
 
   // ------------------------------------------------------------------------------------------------------------- cancel

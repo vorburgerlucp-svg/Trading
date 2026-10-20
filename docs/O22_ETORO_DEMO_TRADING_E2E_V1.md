@@ -33,7 +33,7 @@ Naming note: an unrelated, uncommitted work package "O22 OpenAI shadow provider"
 |---|---|
 | `execution/execution-gate.ts` | `DEMO_E2E_CYCLE_POLICY` with the open and close budget, long-only and market-only. `GateSafetyDecision`: the narrow safety shape the gate reads; the checks themselves are unchanged. |
 | `execution/etoro-demo-execution-service.ts` | Submission counts and `cycleBudget()`. The broker's `settlementType` is kept from order status reads. |
-| `execution/etoro-demo-execution-validation.ts` | `asset.settlementType` of `orders:lookup`: an enum, strictly validated. |
+| `execution/etoro-demo-execution-validation.ts` | `asset.settlementType` of `orders:lookup`: an enum, strictly validated (letter case ignored since the fix of 20.10.2026, see `O22_ORDER_LOOKUP_PARSER_FIX.md`). |
 | `execution/demo-account-evidence.ts` | The compile-time evidence record. Non-empty `/demo/pnl` live-observed: **true**, citing both reports of section 12. |
 | `execution/demo-account-safety.ts` | The demo account safety source: the guide formulas, limits, risk day, kill switch. |
 | `execution/demo-safety-readiness.ts` | Readiness report: evidence, source status, sync, kill switch. |
@@ -728,3 +728,13 @@ While aligning the tests, one more defect of the corrected verdict was found and
 **Third check (commit `1bb76f6`).** N1–N7 confirmed fixed; the operator's success criteria re-confirmed (no path to `passed` with missing or late evidence; no failure can disappear; no time of reading; nothing after the closed period counts). One new defect, pinned by a regression test that failed on `1bb76f6`, then fixed: **D1** the proof "position observed" read every stored snapshot, so a slow sync stored after the closing snapshot could complete it (turning `incomplete` into `passed`) while its other entries were never judged. It now uses the same closed period as the activity check (`sequence ≤` the closing snapshot's).
 
 **Fourth check (D1 only, `1bb76f6..60ac790`, checked commit `60ac790`): D1 fixed.** The observation proof and the activity check use the same closed period (`sequence ≤` the closing snapshot's; the proof's lower bound, the open's submission, lies inside the period), so evidence stored after the closing snapshot cannot change the historical result. Without a closing snapshot the behaviour is unchanged and cannot give an early `passed`. The D1 regression test exercises the scenario and fails without the fix. No defect found in the change.
+
+### 17.8 Refused `orders:lookup` answer of the first cycle: diagnosis and fix (2026-10-20)
+
+One read-only lookup found the cause: `asset.settlementType` came back as `"REAL"`, and the parser compared case-sensitively against the documented `real`. The fix does three things:
+
+- it accepts the four documented settlement types in any letter case;
+- it gives every refused broker answer a fixed, privacy-safe reason code;
+- it requires the order status of an open to state the action, the direction and exactly one position for a fill.
+
+Details, tests and the unchanged state of the ETH position are in `O22_ORDER_LOOKUP_PARSER_FIX.md`. This is not a trading release: all build locks stay closed.
