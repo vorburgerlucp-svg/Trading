@@ -10,13 +10,14 @@ import { EToroDemoExecutionAdapter, DemoWritePacer } from '../../../src/broker/e
 import { HttpsDemoExecutionTransport, type DemoExecutionFetch } from '../../../src/broker/etoro/execution/etoro-demo-execution-transport.js';
 import {
   EtoroDemoExecutionService,
+  type DemoPositionSource,
   type DemoSafetySource,
   type AttemptRecord,
   type ConfirmationRecord,
   type IntentEvent,
   type ReconciliationRecord,
 } from '../../../src/broker/etoro/execution/etoro-demo-execution-service.js';
-import { DEFAULT_DEMO_EXECUTION_POLICY, type DemoExecutionPolicy, type GateQuote } from '../../../src/broker/etoro/execution/execution-gate.js';
+import { DEFAULT_DEMO_EXECUTION_POLICY, type DemoExecutionPolicy, type EvidencePosition, type GateQuote } from '../../../src/broker/etoro/execution/execution-gate.js';
 import { AAPL } from '../../market-data/fixtures.js';
 
 export const O21_NOW = '2026-10-16T14:00:00.000Z';
@@ -143,7 +144,17 @@ export interface FixtureOptions {
   etoroMapping?: string | null;
   /** O22 C3: replaces the service's request id source (e.g. an id that is not a UUID, to refuse a request before the reservation). */
   requestId?: () => string;
+  /**
+   * O22 D4: the positions of the stored broker snapshot a close is checked against (observed "now" on the fixture clock, fresh,
+   * complete). Default: the default test position, open (AAPL, buy). null: no snapshot at all.
+   */
+  brokerPositions?: EvidencePosition[] | null;
+  /** O22 D4: replaces the scripted snapshot by a real position source (e.g. storedPositionSource over the stored O20 logs). */
+  positionSource?: DemoPositionSource;
 }
+
+/** The position filledOpen() binds by default, as the broker snapshot shows it. */
+export const DEFAULT_BROKER_POSITION: EvidencePosition = Object.freeze({ positionId: 2150941015, etoroInstrumentId: 1001, direction: 'buy', openOrderId: null });
 
 export interface Fixture {
   service: EtoroDemoExecutionService;
@@ -158,6 +169,8 @@ export interface Fixture {
   setQuote(quote: GateQuote | null): void;
   setSafety(safety: PortfolioSafetyDecision | null): void;
   setBroker(status: { connection: string; lastSuccessfulSync: string | null }): void;
+  /** O22 D4: the stored broker snapshot a close is checked against (null: none). */
+  setSnapshot(snapshot: { observedAt?: string; freshness?: 'fresh' | 'stale'; positionCount?: number; positions: EvidencePosition[] } | null): void;
   advance(ms: number): void;
   requestIds: string[];
 }
@@ -213,6 +226,8 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
   let quote: GateQuote | null = options.quote === undefined ? freshQuote() : options.quote;
   let safety: PortfolioSafetyDecision | null = options.safety === undefined ? normalSafety() : options.safety;
   let brokerStatus = options.broker ?? { connection: 'connected', lastSuccessfulSync: '2026-10-16T13:58:00.000Z' };
+  type SnapshotSetting = { observedAt?: string; freshness?: 'fresh' | 'stale'; positionCount?: number; positions: EvidencePosition[] } | null;
+  let snapshot: SnapshotSetting = options.brokerPositions === null ? null : { positions: options.brokerPositions ?? [DEFAULT_BROKER_POSITION] };
   const service = new EtoroDemoExecutionService({
     adapter,
     intents,
@@ -224,6 +239,17 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
     safety: options.safetySource ?? { current: async () => safety },
     quotes: { latest: async (instrumentId) => (options.quoteSource ? options.quoteSource(instrumentId) : quote) },
     brokerStatus: () => brokerStatus,
+    positions: options.positionSource ?? {
+      latest: async () => ({
+        snapshot: snapshot === null ? null : {
+          observedAt: snapshot.observedAt ?? now().toISOString(),
+          freshness: snapshot.freshness ?? 'fresh',
+          positionCount: snapshot.positionCount ?? snapshot.positions.length,
+          positions: snapshot.positions,
+        },
+        problem: null,
+      }),
+    },
     executionEnabled: options.executionEnabled ?? true,
     policy: options.policy ?? DEFAULT_DEMO_EXECUTION_POLICY,
     clock: now,
@@ -238,6 +264,7 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
     setQuote: (q) => { quote = q; },
     setSafety: (s) => { safety = s; },
     setBroker: (b) => { brokerStatus = b; },
+    setSnapshot: (s) => { snapshot = s; },
     advance: (ms) => { clock.now = new Date(clock.now.getTime() + ms); },
   };
 }
