@@ -154,7 +154,28 @@ export type EtoroStoredSnapshot =
   | { readonly kind: 'snapshot'; readonly snapshot: EtoroSnapshotView }
   | { readonly kind: 'none' }
   | { readonly kind: 'unreadable' }
-  | { readonly kind: 'ambiguous' };
+  | { readonly kind: 'ambiguous' }
+  /** O22 Plan B review R2: the stored content contradicts itself or its id (snapshotContentProblems). */
+  | { readonly kind: 'inconsistent' };
+
+/**
+ * O22 Plan B review R2: what is wrong with a stored snapshot's content, as fixed codes (empty: consistent). The stated counts must
+ * equal the stored lists, the coverage must agree with them (verified_empty exactly when a list is empty), no position or order may
+ * appear twice, and the snapshot id must be the hash of the content (as sync() derives it). Pure.
+ */
+export function snapshotContentProblems(snapshotId: string, content: EtoroSnapshotContent): string[] {
+  const problems: string[] = [];
+  const positions = content.positions ?? [];
+  const orders = content.orders ?? [];
+  if (!Number.isSafeInteger(content.positionCount) || content.positionCount !== positions.length) problems.push('POSITION_COUNT_MISMATCH');
+  if (!Number.isSafeInteger(content.openOrderCount) || content.openOrderCount !== orders.length) problems.push('ORDER_COUNT_MISMATCH');
+  if ((positions.length === 0) !== (content.coverage?.positions === 'verified_empty')) problems.push('POSITION_COVERAGE_CONTRADICTED');
+  if ((orders.length === 0) !== (content.coverage?.openOrders === 'verified_empty')) problems.push('ORDER_COVERAGE_CONTRADICTED');
+  if (new Set(positions.map((p) => p.positionId)).size !== positions.length) problems.push('DUPLICATE_POSITION');
+  if (new Set(orders.map((o) => o.orderId)).size !== orders.length) problems.push('DUPLICATE_ORDER');
+  if (snapshotId !== 'esnap_' + hashOf(content).slice(0, 40)) problems.push('CONTENT_HASH_MISMATCH');
+  return problems;
+}
 
 /**
  * The one order of observations: by `observedAt`, then by sync log sequence (the later stored record is the later observation).
@@ -392,6 +413,7 @@ export class EtoroBrokerService {
     }
     const stored = this.deps.snapshots.get(last.snapshotId);
     if (!stored) return { kind: 'unreadable' };
+    if (snapshotContentProblems(last.snapshotId, stored.payload.content).length > 0) return { kind: 'inconsistent' };
     return {
       kind: 'snapshot',
       snapshot: {

@@ -325,7 +325,7 @@ describe('O21 runtime: strict input', () => {
     const r = await runtime({ execution: true, injectSafety: true });
     const id = (await call(r, 'POST', INTENTS, { body: routeIntent() })).json.intent.intentId as string;
     const path = INTENTS + '/' + id + '/closed-externally';
-    const claim = { positionId: 2150941015, snapshotId: 'esnap_' + 'b'.repeat(40), statement: 'POSITION_CLOSED_OUTSIDE_NEXUS' };
+    const claim = { positionId: 2150941015, snapshotId: 'esnap_' + 'b'.repeat(40), statement: 'POSITION_CLOSED_OUTSIDE_NEXUS', accountStatement: 'SAME_ETORO_DEMO_ACCOUNT' };
     expect(await call(r, 'POST', path, { body: claim, auth: false })).toMatchObject({ status: 401, json: { error: { code: 'OPERATOR_AUTH_REQUIRED' } } });
     expect((await call(r, 'POST', path)).json.error.code).toBe('REQUEST_INVALID');
     expect((await call(r, 'POST', path, { body: { ...claim, attestedBy: { kind: 'human', id: 'someone-else' } } })).json.error.code).toBe('REQUEST_INVALID');
@@ -339,7 +339,7 @@ describe('O21 runtime: strict input', () => {
 
   it('O22 Plan B: without operator configuration closed-externally is refused', async () => {
     const r = await runtime({ execution: true, auth: false });
-    const claim = { positionId: 2150941015, snapshotId: 'esnap_' + 'b'.repeat(40), statement: 'POSITION_CLOSED_OUTSIDE_NEXUS' };
+    const claim = { positionId: 2150941015, snapshotId: 'esnap_' + 'b'.repeat(40), statement: 'POSITION_CLOSED_OUTSIDE_NEXUS', accountStatement: 'SAME_ETORO_DEMO_ACCOUNT' };
     expect((await call(r, 'POST', INTENTS + '/eint_' + 'a'.repeat(40) + '/closed-externally', { body: claim })).json.error.code).toBe('OPERATOR_AUTH_NOT_CONFIGURED');
   });
 

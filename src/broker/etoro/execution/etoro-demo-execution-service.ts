@@ -58,6 +58,7 @@ import type { EtoroSnapshotHistory } from '../etoro-broker-service.js';
 import {
   EXTERNAL_CLOSURE_SCHEMA,
   ExternalClosureClaimError,
+  externalClosureEffective,
   externalClosureId,
   externalClosureOpenRefusals,
   externalClosureRefusals,
@@ -228,6 +229,8 @@ export interface ExternalClosureView {
   readonly snapshotObservedAt: string;
   readonly attestedBy: IntentActor;
   readonly attestedAt: string;
+  /** R1: false while a NEXUS close of the position may have been sent (or was filled): the attestation then has no effect. */
+  readonly effective: boolean;
 }
 
 /** O22 F6: one order status read of an intent, exactly as recorded. */
@@ -470,6 +473,18 @@ export class EtoroDemoExecutionService {
     }
     if (submitting.status !== 'APPLIED') throw new DemoExecutionError('INTENT_STATE_INVALID', 'SUBMITTING');
     await this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation, phase: 'started', requestId, at: this.now(), by: operator });
+
+    // O22 Plan B review R1: a close reads the attestation log again AFTER its reservation is recorded and before the write. An
+    // attestation of its position that committed in the meantime stops it: not sent (REJECTED), the budget stays spent. Together with
+    // the read-time rule (an attestation has no effect while a close may have been sent), one of the two always sees the other.
+    if (p.intent.action === 'close' && this.deps.externalClosures !== undefined) {
+      await this.deps.externalClosures.sync();
+      if (this.externalClosureRecords().some((r) => r.openIntentId === p.intent.closesIntentId && r.positionId === p.intent.positionId)) {
+        await this.finishAttempt(attemptId, intentId, operation, requestId, { outcome: 'not_sent', httpStatus: null, code: 'EXTERNAL_CLOSURE_ATTESTED' });
+        await this.transition(intentId, 'REJECTED', 'NOT_SENT_EXTERNAL_CLOSURE_ATTESTED', { attemptId });
+        throw new DemoExecutionError('GATE_REFUSED', 'EXTERNAL_CLOSURE_ATTESTED', ['EXTERNAL_CLOSURE_ATTESTED']);
+      }
+    }
 
     let outcome: WriteOutcome<{ brokerOrderId?: number; closeOrderId?: number; statusId?: number }>;
     try {
@@ -784,6 +799,10 @@ export class EtoroDemoExecutionService {
       snapshotObservedAt: e.snapshot.observedAt,
       snapshotSyncSequence: e.snapshot.sequence,
       snapshotPositionCount: e.snapshot.content.positionCount,
+      continuitySnapshotId: e.continuity.snapshotId,
+      continuitySnapshotObservedAt: e.continuity.observedAt,
+      accountIdentity: 'not_verified',
+      accountStatement: claim.accountStatement,
       evidenceHeads: {
         intents: { size: this.deps.intents.size, headHash: this.deps.intents.headHash },
         confirmations: { size: this.deps.confirmations.size, headHash: this.deps.confirmations.headHash },
@@ -838,10 +857,16 @@ export class EtoroDemoExecutionService {
     return this.deps.externalClosures === undefined ? [] : this.deps.externalClosures.all().map((r) => r.payload);
   }
 
-  /** The positions attested as closed outside NEXUS, per open intent. */
+  /** R1: whether an attestation takes effect now: no NEXUS close of its position may have been sent (externalClosureEffective). */
+  private attestationEffective(record: ExternalClosureRecord): boolean {
+    const closes = [...this.projections().values()].filter((p) => p.intent.action === 'close').map((p) => ({ closesIntentId: p.intent.closesIntentId, positionId: p.intent.positionId, state: p.state }));
+    return externalClosureEffective(record, closes);
+  }
+
+  /** The positions attested as closed outside NEXUS, per open intent: only attestations that take effect (R1). */
   private attestedPositions(): Map<string, Set<number>> {
     const map = new Map<string, Set<number>>();
-    for (const r of this.externalClosureRecords()) {
+    for (const r of this.externalClosureRecords().filter((c) => this.attestationEffective(c))) {
       const set = map.get(r.openIntentId) ?? new Set<number>();
       set.add(r.positionId);
       map.set(r.openIntentId, set);
@@ -1014,7 +1039,7 @@ export class EtoroDemoExecutionService {
 
   private externalClosureOf(intentId: string): ExternalClosureView | null {
     const r = this.externalClosureRecords().find((c) => c.openIntentId === intentId);
-    return r === undefined ? null : Object.freeze({ closureId: r.closureId, positionId: r.positionId, snapshotId: r.snapshotId, snapshotObservedAt: r.snapshotObservedAt, attestedBy: r.attestedBy, attestedAt: r.attestedAt });
+    return r === undefined ? null : Object.freeze({ closureId: r.closureId, positionId: r.positionId, snapshotId: r.snapshotId, snapshotObservedAt: r.snapshotObservedAt, attestedBy: r.attestedBy, attestedAt: r.attestedAt, effective: this.attestationEffective(r) });
   }
 
   /** O22 F6: the order status reads of an intent, in log order, unmerged. */

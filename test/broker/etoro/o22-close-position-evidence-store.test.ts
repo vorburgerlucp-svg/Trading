@@ -103,6 +103,22 @@ describe('O22 D4 R1: latestStoredSnapshot reads the store, with every process\'s
     expect(await a.service.latestStoredSnapshot()).toEqual({ kind: 'unreadable' });
   });
 
+  it('O22 Plan B review R2: the newest snapshot whose content contradicts its counts or its id is not used: inconsistent', async () => {
+    const stores = sharedStores();
+    const a = await etoroProcess(stores);
+    a.portfolio.response = { status: 200, body: withPosition() };
+    await a.service.sync();
+    const good = (await a.service.latestStoredSnapshot()) as { kind: 'snapshot'; snapshot: { content: EtoroSnapshotRecord['content'] } };
+    const snapshots = await AppendOnlyLog.open<EtoroSnapshotRecord>('etoro-snapshots', stores.snapshots);
+    const observedAt = '2026-10-16T14:00:30.000Z';
+    // A stored record whose stated count does not match its list (and whose id is therefore not its content hash).
+    const content = { ...good.snapshot.content, positionCount: 0 };
+    await snapshots.append('esnap_' + 'e'.repeat(40), { schema: 'etoro-snapshot:v1', snapshotId: 'esnap_' + 'e'.repeat(40), content });
+    await a.syncs.append('esync_bad', { schema: 'etoro-sync:v1', syncId: 'esync_bad', outcome: 'success', snapshotId: 'esnap_' + 'e'.repeat(40), reconciliationId: 'erec_bad', observedAt, retrievedAt: observedAt });
+    expect(await a.service.latestStoredSnapshot()).toEqual({ kind: 'inconsistent' });
+    expect(await storedPositionSource(a.service).latest()).toEqual({ snapshot: null, problem: 'inconsistent' });
+  });
+
   it('storedPositionSource maps the stored snapshot (position, instrument, direction, opening order) and passes problems on', async () => {
     const stores = sharedStores();
     const a = await etoroProcess(stores);
@@ -128,6 +144,7 @@ describe('O22 D4 R1: latestStoredSnapshot reads the store, with every process\'s
     expect(closePositionRefusals(intent, base, T0, DEFAULT_DEMO_EXECUTION_POLICY)).toEqual([]);
     expect(closePositionRefusals(intent, { ...base, problem: 'ambiguous' }, T0, DEFAULT_DEMO_EXECUTION_POLICY)).toEqual(['CLOSE_POSITION_EVIDENCE_AMBIGUOUS']);
     expect(closePositionRefusals(intent, { ...base, problem: 'unreadable' }, T0, DEFAULT_DEMO_EXECUTION_POLICY)).toEqual(['CLOSE_POSITION_EVIDENCE_UNREADABLE']);
+    expect(closePositionRefusals(intent, { ...base, problem: 'inconsistent' }, T0, DEFAULT_DEMO_EXECUTION_POLICY)).toEqual(['CLOSE_POSITION_EVIDENCE_INCONSISTENT']);
   });
 });
 

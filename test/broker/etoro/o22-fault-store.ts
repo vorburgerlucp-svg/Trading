@@ -102,3 +102,58 @@ export class BarrierStore<T> implements AppendOnlyStore<T> {
     return this.inner.writeExclusive(knownSequence, decide);
   }
 }
+
+/**
+ * O22 Plan B TEST ONLY: holds one process at a chosen point of its writes until the test releases it. "before": the next write waits
+ * before it enters the store's critical section (the process has already decided). "after": a write whose record matches waits after
+ * it committed (the record is visible to every process; the writer has not taken its next step yet). Holds once.
+ */
+export class HoldStore<T> implements AppendOnlyStore<T> {
+  private armed: { point: CrashPoint; match: (payload: T) => boolean } | null = null;
+  private releaseGate!: () => void;
+  private reachedGate!: () => void;
+  private gate: Promise<void> = Promise.resolve();
+  /** Resolves when the held write has arrived at its hold point. */
+  reached: Promise<void> = Promise.resolve();
+
+  constructor(private readonly inner: AppendOnlyStore<T>) {}
+
+  hold(point: CrashPoint, match: (payload: T) => boolean = () => true): void {
+    this.armed = { point, match };
+    this.gate = new Promise<void>((resolve) => (this.releaseGate = resolve));
+    this.reached = new Promise<void>((resolve) => (this.reachedGate = resolve));
+  }
+
+  release(): void {
+    this.releaseGate();
+  }
+
+  loadAll(): Promise<readonly LogRecord<T>[]> {
+    return this.inner.loadAll();
+  }
+
+  loadAfter(sequence: number): Promise<readonly LogRecord<T>[]> {
+    return this.inner.loadAfter(sequence);
+  }
+
+  async writeExclusive<R>(knownSequence: number, decide: (newer: readonly LogRecord<T>[]) => WriteDecision<T, R>): Promise<R> {
+    const armed = this.armed;
+    if (armed !== null && armed.point === 'before') {
+      this.armed = null;
+      this.reachedGate();
+      await this.gate;
+    }
+    let matched = false;
+    const result = await this.inner.writeExclusive<R>(knownSequence, (newer) => {
+      const decision = decide(newer);
+      if (armed !== null && armed.point === 'after' && decision.kind === 'append' && armed.match(decision.record.payload)) matched = true;
+      return decision;
+    });
+    if (matched) {
+      this.armed = null;
+      this.reachedGate();
+      await this.gate;
+    }
+    return result;
+  }
+}

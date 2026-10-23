@@ -32,7 +32,12 @@ export type CycleItemKind =
    */
   | 'closed_externally'
   /** O22 Plan B: the snapshot shows a position that was attested as closed outside NEXUS: the attestation is contradicted. */
-  | 'closed_externally_contradicted';
+  | 'closed_externally_contradicted'
+  /**
+   * O22 Plan B review R1: an attestation exists, but a NEXUS close of the position may have been sent: the attestation has no
+   * effect, and the operator's statement and NEXUS's own action conflict.
+   */
+  | 'external_closure_without_effect';
 
 export interface CycleItem {
   readonly intentId: string;
@@ -57,7 +62,7 @@ export interface DemoCycleReconciliation {
   readonly brokerPendingOrders: number;
 }
 
-const INCONSISTENT: ReadonlySet<CycleItemKind> = new Set(['open_position_missing', 'position_mismatch', 'closed_position_still_open', 'closed_externally_contradicted']);
+const INCONSISTENT: ReadonlySet<CycleItemKind> = new Set(['open_position_missing', 'position_mismatch', 'closed_position_still_open', 'closed_externally_contradicted', 'external_closure_without_effect']);
 const UNKNOWN: ReadonlySet<CycleItemKind> = new Set(['outcome_pending', 'snapshot_predates_intent']);
 /** States in which a write may have reached the broker without a confirmed final outcome. */
 const PENDING_STATES: ReadonlySet<string> = new Set(['SUBMITTING', 'SUBMITTED', 'ACCEPTED', 'AMBIGUOUS', 'RECONCILED', 'PARTIALLY_FILLED']);
@@ -84,6 +89,9 @@ export function reconcileDemoCycle(intents: readonly IntentView[], snapshot: Eto
 
   for (const v of intents) {
     const base = { intentId: v.intentId, action: v.intent.action, state: v.state, settlementType: v.brokerSettlementType ?? null };
+    if (v.externalClosure !== null && v.externalClosure !== undefined && v.externalClosure.effective === false) {
+      items.push({ ...base, kind: 'external_closure_without_effect', positionId: v.externalClosure.positionId });
+    }
     if (PENDING_STATES.has(v.state)) {
       items.push({ ...base, kind: 'outcome_pending', positionId: v.intent.positionId });
       continue;
@@ -99,7 +107,7 @@ export function reconcileDemoCycle(intents: readonly IntentView[], snapshot: Eto
     // A FILLED open: each broker-confirmed position, unless a FILLED close of NEXUS closed it.
     for (const id of v.brokerPositionIds) {
       if (closedBy.has(id)) continue;
-      if (v.externalClosure?.positionId === id) {
+      if (v.externalClosure?.positionId === id && v.externalClosure.effective !== false) {
         // Judged against the attestation's own snapshot: an older snapshot decides nothing, a newer one must not show the position.
         if (snapshot === null || Date.parse(snapshot.observedAt) < Date.parse(v.externalClosure.snapshotObservedAt)) items.push({ ...base, kind: 'snapshot_predates_intent', positionId: id });
         else items.push({ ...base, kind: byId.has(id) ? 'closed_externally_contradicted' : 'closed_externally', positionId: id });

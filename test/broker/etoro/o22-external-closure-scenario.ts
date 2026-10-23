@@ -5,7 +5,7 @@
 import { AppendOnlyLog, InMemoryAppendOnlyStore, type AppendOnlyStore } from '../../../src/persistence/append-only-log.js';
 import { EtoroBrokerService, type EtoroReconciliationRecord, type EtoroSnapshotRecord, type EtoroSyncRecord } from '../../../src/broker/etoro/etoro-broker-service.js';
 import { EtoroBrokerSyncAdapter } from '../../../src/broker/etoro/etoro-sync-adapter.js';
-import { EXTERNAL_CLOSURE_STATEMENT, type ExternalClosureRecord } from '../../../src/broker/etoro/execution/external-closure.js';
+import { EXTERNAL_CLOSURE_ACCOUNT_STATEMENT, EXTERNAL_CLOSURE_STATEMENT, type ExternalClosureRecord } from '../../../src/broker/etoro/execution/external-closure.js';
 import type { DemoExecutionPolicy } from '../../../src/broker/etoro/execution/execution-gate.js';
 import { storedPositionSource } from '../../../src/runtime/demo-execution-sources.js';
 import { FixtureEtoroTransport, emptyDemoPortfolio } from './o20-fixture.js';
@@ -90,7 +90,7 @@ export async function closureProcess(options: {
       return (await etoro.sync()).snapshot.snapshotId;
     },
     attest: (openIntentId, snapshotId, overrides = {}, by = HUMAN) =>
-      f.service.attestExternalClosure(openIntentId, { positionId: POSITION, snapshotId, statement: EXTERNAL_CLOSURE_STATEMENT, ...overrides }, by as typeof HUMAN),
+      f.service.attestExternalClosure(openIntentId, { positionId: POSITION, snapshotId, statement: EXTERNAL_CLOSURE_STATEMENT, accountStatement: EXTERNAL_CLOSURE_ACCOUNT_STATEMENT, ...overrides }, by as typeof HUMAN),
   };
 }
 

@@ -177,9 +177,10 @@ export interface ClosePositionSnapshot {
 
 /**
  * Why the store names no usable newest snapshot although it holds observations: the newest one's snapshot record cannot be read,
- * or two observations share the newest observedAt with different contents.
+ * two observations share the newest observedAt with different contents, or (O22 Plan B review R2) its content contradicts itself
+ * or its id (snapshotContentProblems).
  */
-export type ClosePositionEvidenceProblem = 'unreadable' | 'ambiguous';
+export type ClosePositionEvidenceProblem = 'unreadable' | 'ambiguous' | 'inconsistent';
 
 export interface ClosePositionEvidence {
   readonly snapshot: ClosePositionSnapshot | null;
@@ -201,6 +202,7 @@ export function closePositionRefusals(intent: ExecutionIntent, evidence: ClosePo
   if (intent.action !== 'close') return [];
   if (evidence?.problem === 'unreadable') return ['CLOSE_POSITION_EVIDENCE_UNREADABLE'];
   if (evidence?.problem === 'ambiguous') return ['CLOSE_POSITION_EVIDENCE_AMBIGUOUS'];
+  if (evidence?.problem === 'inconsistent') return ['CLOSE_POSITION_EVIDENCE_INCONSISTENT'];
   const snapshot = evidence?.snapshot ?? null;
   if (evidence === null || evidence === undefined || snapshot === null || intent.positionId === null) return ['CLOSE_POSITION_EVIDENCE_MISSING'];
   const reasons: string[] = [];

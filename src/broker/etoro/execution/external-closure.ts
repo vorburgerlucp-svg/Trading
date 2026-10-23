@@ -16,15 +16,34 @@
 //      show the open's order as pending;
 //   5. an authenticated human operator states it explicitly;
 //   6. no attestation of this open exists yet (one per position, fixed record id).
+// Review of PR #33:
+//   R2  every stored observation is consistent (counts equal the lists, coverage agrees with them, no duplicate, id = content hash);
+//   R3  account identity: NEXUS stores none (no CID, no /me identifier), so no binding of order and snapshot to one account is
+//       claimed (record: accountIdentity 'not_verified'). Two fail-closed controls narrow it: continuity (a snapshot taken after the
+//       order was submitted showed the position as opened by exactly that order, so the portfolio read then was of the account
+//       that holds the order) and the operator's explicit statement that every read came from that same demo account;
+//   R1  the effect is decided at read time: an attestation has no effect while a NEXUS close of the position may have been sent
+//       (externalClosureEffective), and a close is not sent once it sees an attestation after its reservation (service).
 
 import { hashOf } from '../../../persistence/canonical-json.js';
-import { compareObservations, type EtoroSnapshotHistory, type EtoroSnapshotObservation } from '../etoro-broker-service.js';
+import { compareObservations, snapshotContentProblems, type EtoroSnapshotHistory, type EtoroSnapshotObservation } from '../etoro-broker-service.js';
 import type { IntentActor, IntentSide, IntentState } from './execution-intent.js';
 import type { ClosePositionEvidenceProblem, ClosePositionSnapshot } from './execution-gate.js';
 
 export const EXTERNAL_CLOSURE_SCHEMA = 'etoro-demo-external-closure:v1' as const;
 /** The one statement an operator can make; anything else is refused. */
 export const EXTERNAL_CLOSURE_STATEMENT = 'POSITION_CLOSED_OUTSIDE_NEXUS' as const;
+/**
+ * R3: the operator's explicit statement that the order and every portfolio read come from the same eToro demo account (the same
+ * configured credentials). A fail-closed operator control, not a technical proof: NEXUS stores no account identity.
+ */
+export const EXTERNAL_CLOSURE_ACCOUNT_STATEMENT = 'SAME_ETORO_DEMO_ACCOUNT' as const;
+
+/**
+ * R1: the states of a NEXUS close in which it may have been sent to the broker (or was filled). While a close of the position is in
+ * one of them, an attestation has no effect.
+ */
+export const CLOSE_POSSIBLY_SENT_STATES: ReadonlySet<IntentState> = new Set(['SUBMITTING', 'SUBMITTED', 'ACCEPTED', 'PARTIALLY_FILLED', 'FILLED', 'AMBIGUOUS', 'RECONCILED']);
 
 /** The head of a log the evidence was checked against: its record count and the hash of its last record. */
 export interface LogHead {
@@ -49,6 +68,12 @@ export interface ExternalClosureRecord {
   readonly snapshotObservedAt: string;
   readonly snapshotSyncSequence: number;
   readonly snapshotPositionCount: number;
+  /** R3: the earlier snapshot that showed the position as opened by exactly the open's order (continuity of the portfolio reads). */
+  readonly continuitySnapshotId: string;
+  readonly continuitySnapshotObservedAt: string;
+  /** R3: NEXUS has no stored account identity; the binding of order and snapshots to one account is not technically verified. */
+  readonly accountIdentity: 'not_verified';
+  readonly accountStatement: typeof EXTERNAL_CLOSURE_ACCOUNT_STATEMENT;
   /** The heads of the logs the evidence was read from, so the check can be repeated on exactly that stored state. */
   readonly evidenceHeads: { readonly intents: LogHead; readonly confirmations: LogHead; readonly observations: number };
   readonly statement: typeof EXTERNAL_CLOSURE_STATEMENT;
@@ -63,6 +88,7 @@ export interface ExternalClosureClaim {
   readonly positionId: number;
   readonly snapshotId: string;
   readonly statement: typeof EXTERNAL_CLOSURE_STATEMENT;
+  readonly accountStatement: typeof EXTERNAL_CLOSURE_ACCOUNT_STATEMENT;
 }
 
 export class ExternalClosureClaimError extends Error {
@@ -71,16 +97,17 @@ export class ExternalClosureClaimError extends Error {
 
 const SNAPSHOT_ID = /^esnap_[0-9a-f]{40}$/;
 
-/** Exactly { positionId, snapshotId, statement }, nothing else. */
+/** Exactly { positionId, snapshotId, statement, accountStatement }, nothing else. */
 export function parseExternalClosureClaim(input: unknown): ExternalClosureClaim {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) throw new ExternalClosureClaimError('the claim must be an object');
   const v = input as Record<string, unknown>;
   const keys = Object.keys(v).sort();
-  if (keys.join(',') !== 'positionId,snapshotId,statement') throw new ExternalClosureClaimError('the claim has exactly positionId, snapshotId and statement');
+  if (keys.join(',') !== 'accountStatement,positionId,snapshotId,statement') throw new ExternalClosureClaimError('the claim has exactly positionId, snapshotId, statement and accountStatement');
   if (typeof v.positionId !== 'number' || !Number.isSafeInteger(v.positionId) || v.positionId <= 0) throw new ExternalClosureClaimError('positionId');
   if (typeof v.snapshotId !== 'string' || !SNAPSHOT_ID.test(v.snapshotId)) throw new ExternalClosureClaimError('snapshotId');
   if (v.statement !== EXTERNAL_CLOSURE_STATEMENT) throw new ExternalClosureClaimError('statement');
-  return Object.freeze({ positionId: v.positionId, snapshotId: v.snapshotId, statement: EXTERNAL_CLOSURE_STATEMENT });
+  if (v.accountStatement !== EXTERNAL_CLOSURE_ACCOUNT_STATEMENT) throw new ExternalClosureClaimError('accountStatement');
+  return Object.freeze({ positionId: v.positionId, snapshotId: v.snapshotId, statement: EXTERNAL_CLOSURE_STATEMENT, accountStatement: EXTERNAL_CLOSURE_ACCOUNT_STATEMENT });
 }
 
 export function externalClosureId(openIntentId: string, positionId: number): string {
@@ -124,6 +151,7 @@ export interface ExternalClosureEvidence {
   readonly bindingConfirmationId: string;
   readonly boundAt: string;
   readonly snapshot: EtoroSnapshotObservation;
+  readonly continuity: EtoroSnapshotObservation;
 }
 
 const FILL_OUTCOMES: ReadonlySet<string> = new Set(['filled', 'partially_filled', 'partially_filled_final']);
@@ -171,21 +199,41 @@ export function externalClosureRefusals(claim: ExternalClosureClaim, facts: Exte
   // observation, and the operator's snapshot id must name its content.
   const observations = [...facts.history.observations].sort(compareObservations);
   if (facts.history.missingSnapshotRecords > 0) reasons.push('SNAPSHOT_HISTORY_INCOMPLETE');
+  // R2: no stored observation may contradict itself (counts, coverage, duplicates, id = content hash).
+  if (observations.some((o) => snapshotContentProblems(o.snapshotId, o.content).length > 0)) reasons.push('SNAPSHOT_HISTORY_INCONSISTENT');
   const snapshot = observations.at(-1);
   if (snapshot === undefined || !observations.some((o) => o.snapshotId === claim.snapshotId)) return refused('SNAPSHOT_NOT_FOUND');
   if (snapshot.snapshotId !== claim.snapshotId) return refused('SNAPSHOT_NOT_NEWEST');
   if (observations.some((o) => ms(o.observedAt) === ms(snapshot.observedAt) && o.snapshotId !== snapshot.snapshotId)) reasons.push('SNAPSHOT_AMBIGUOUS');
   if (!(ms(snapshot.observedAt) > ms(boundAt) && ms(snapshot.observedAt) > ms(binding.observedAt))) reasons.push('SNAPSHOT_PREDATES_BINDING');
   const positions = snapshot.content.positions ?? [];
-  if (!Number.isSafeInteger(snapshot.content.positionCount) || positions.length !== snapshot.content.positionCount) reasons.push('SNAPSHOT_INCOMPLETE');
+  if (snapshotContentProblems(snapshot.snapshotId, snapshot.content).length > 0) reasons.push('SNAPSHOT_INCOMPLETE');
   if (positions.some((p) => p.positionId === positionId)) reasons.push('POSITION_STILL_IN_SNAPSHOT');
   if ((snapshot.content.orders ?? []).some((o) => o.orderId === open.brokerOrderId)) reasons.push('OPEN_ORDER_STILL_AT_BROKER');
 
-  if (reasons.length > 0) return { reasons, evidence: null };
+  // R3 continuity: an earlier consistent snapshot, taken after the order was submitted, showed the position with the intent's
+  // instrument and direction as opened by exactly the open's order. Without it, nothing shows that the portfolio reads were of the
+  // account that holds the order.
+  const submittedAt = open.events.find((e) => e.state === 'SUBMITTING')?.at ?? null;
+  const continuity = submittedAt === null ? undefined : observations.find((o) =>
+    compareObservations(o, snapshot) < 0 && ms(o.observedAt) >= ms(submittedAt) && snapshotContentProblems(o.snapshotId, o.content).length === 0 &&
+    (o.content.positions ?? []).some((p) => p.positionId === positionId && p.etoroInstrumentId === open.etoroInstrumentId && p.direction === open.side && p.openOrder !== null && p.openOrder.orderId === open.brokerOrderId));
+  if (continuity === undefined) reasons.push('ACCOUNT_CONTINUITY_NOT_SHOWN');
+
+  if (reasons.length > 0 || continuity === undefined) return { reasons, evidence: null };
   return {
     reasons: [],
-    evidence: { positionId, etoroInstrumentId: open.etoroInstrumentId, direction: open.side, brokerOrderId: open.brokerOrderId, bindingConfirmationId: binding.confirmationId, boundAt, snapshot },
+    evidence: { positionId, etoroInstrumentId: open.etoroInstrumentId, direction: open.side, brokerOrderId: open.brokerOrderId, bindingConfirmationId: binding.confirmationId, boundAt, snapshot, continuity },
   };
+}
+
+/**
+ * R1: whether an attestation takes effect. It has none while a NEXUS close of its position (of its open, or naming the position)
+ * may have been sent or was filled: the close then decides. Decided at read time from the caught-up intent log, so the order in
+ * which an attestation and a close reservation were recorded does not matter. Pure.
+ */
+export function externalClosureEffective(record: Pick<ExternalClosureRecord, 'openIntentId' | 'positionId'>, closes: readonly { readonly closesIntentId: string | null; readonly positionId: number | null; readonly state: IntentState }[]): boolean {
+  return !closes.some((c) => (c.closesIntentId === record.openIntentId || c.positionId === record.positionId) && CLOSE_POSSIBLY_SENT_STATES.has(c.state));
 }
 
 /**
