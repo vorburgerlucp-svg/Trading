@@ -142,6 +142,63 @@ export interface GateInput {
   readonly broker: { readonly connection: string; readonly lastSuccessfulSync: string | null };
   /** False while the local write pacing or a broker Retry-After forbids a write. */
   readonly writeSlotAvailable: boolean;
+  /** O22 D4: for a close, the broker's evidence that its position is still open (see closePositionRefusals). Missing = refused. */
+  readonly closePosition?: ClosePositionEvidence | null;
+}
+
+/** One position of a stored broker portfolio snapshot, as far as a close needs it. */
+export interface EvidencePosition {
+  readonly positionId: number;
+  readonly etoroInstrumentId: number;
+  readonly direction: string;
+  /** The order that opened the position, when the broker states it. */
+  readonly openOrderId: number | null;
+}
+
+/**
+ * O22 D4: what a close is checked against besides the NEXUS logs: the latest stored read-only broker portfolio snapshot (O20 sync)
+ * and the binding of the position by NEXUS. A snapshot is a past observation: it proves the position was open when it was read,
+ * not that it still is when the close is sent. Between the read and the write the broker state can change (a hand close, a
+ * stop-loss); the broker then refuses the close. The freshness limit keeps that window short; it cannot close it.
+ */
+export interface ClosePositionEvidence {
+  readonly snapshot: {
+    readonly observedAt: string;
+    readonly freshness: 'fresh' | 'stale';
+    /** The number of positions the broker stated; the listed positions must be exactly that many (complete). */
+    readonly positionCount: number;
+    readonly positions: readonly EvidencePosition[];
+  } | null;
+  /** When NEXUS bound the position: the open entered FILLED or PARTIALLY_FILLED (from a broker status read). */
+  readonly boundAt: string | null;
+  /** The broker order id of the open whose position is closed. */
+  readonly openOrderId: number | null;
+}
+
+/**
+ * O22 D4: a close may be sent only when a fresh, complete broker snapshot taken after the binding shows its position exactly once,
+ * open, with the intent's instrument and direction, and (when the broker states it) opened by the open's order. Fail-closed: no
+ * evidence, old evidence or contradicting evidence refuses the close. Runs in the gate (create and execute) and again in the
+ * reservation step, so a refusal spends no budget and sends nothing.
+ */
+export function closePositionRefusals(intent: ExecutionIntent, evidence: ClosePositionEvidence | null | undefined, now: string, policy: DemoExecutionPolicy): string[] {
+  if (intent.action !== 'close') return [];
+  const snapshot = evidence?.snapshot ?? null;
+  if (evidence === null || evidence === undefined || snapshot === null || intent.positionId === null) return ['CLOSE_POSITION_EVIDENCE_MISSING'];
+  const reasons: string[] = [];
+  const age = ageMs(now, snapshot.observedAt);
+  if (snapshot.freshness !== 'fresh' || age === null || age < 0 || age > policy.maxBrokerSyncAgeMs) reasons.push('CLOSE_POSITION_EVIDENCE_STALE');
+  if (evidence.boundAt === null || !(Date.parse(snapshot.observedAt) >= Date.parse(evidence.boundAt))) reasons.push('CLOSE_POSITION_EVIDENCE_PREDATES_BINDING');
+  if (!Number.isSafeInteger(snapshot.positionCount) || snapshot.positions.length !== snapshot.positionCount) reasons.push('CLOSE_POSITION_EVIDENCE_INCOMPLETE');
+  const matches = snapshot.positions.filter((p) => p.positionId === intent.positionId);
+  if (matches.length === 0) reasons.push('CLOSE_POSITION_NOT_OPEN_AT_BROKER');
+  else if (matches.length > 1) reasons.push('CLOSE_POSITION_AMBIGUOUS');
+  else {
+    const p = matches[0]!;
+    const orderMismatch = p.openOrderId !== null && (evidence.openOrderId === null || p.openOrderId !== evidence.openOrderId);
+    if (p.etoroInstrumentId !== intent.etoroInstrumentId || p.direction !== intent.side || orderMismatch) reasons.push('CLOSE_POSITION_MISMATCH');
+  }
+  return reasons;
 }
 
 export type GateCheck = 'pass' | 'fail' | 'not_applicable' | 'not_available';
@@ -292,11 +349,16 @@ export function evaluateDemoExecutionGate(input: GateInput): GateVerdict {
   // and for a close a proved target that nothing else is closing. The same checks run again in the reservation step (bookRefusals).
   for (const c of BOOK_CHECKS) check(c.name, c.ok(input.book, exposure, policy, intent), c.reason, c.applies(opens));
 
-  // Broker connectivity: the last read-only sync succeeded recently. Checked before an open is written. A close does not depend on
-  // it: a position NEXUS opened and the broker confirmed must stay closable even when the read-only sync is failing or stale.
+  // Broker connectivity: the last read-only sync succeeded recently. Checked before an open is written. A close is checked against the
+  // stored snapshot itself instead (closePositionAtBroker, O22 D4): it needs a fresh snapshot too, so a failing sync blocks a close.
+  // That is deliberate (fail-closed): the position can then be closed by hand, never through NEXUS on old evidence.
   const syncAge = ageMs(now, input.broker.lastSuccessfulSync);
   check('brokerConnectivity', input.broker.connection === 'connected' && syncAge !== null && syncAge >= 0 && syncAge <= policy.maxBrokerSyncAgeMs, 'BROKER_NOT_CONNECTED_OR_STALE', atExecute && opens);
   check('writePacing', input.writeSlotAvailable, 'BROKER_WRITE_PACING', atExecute);
+  // O22 D4: a close is never allowed on the NEXUS logs alone: the broker's own, fresh snapshot must still show its position.
+  const closeRefusals = closePositionRefusals(intent, input.closePosition, now, policy);
+  checks.closePositionAtBroker = opens ? 'not_applicable' : closeRefusals.length === 0 ? 'pass' : 'fail';
+  reasons.push(...closeRefusals);
 
   return Object.freeze({ passed: reasons.length === 0, reasons: Object.freeze(reasons), checks: Object.freeze(checks), policyVersion: policy.version });
 }

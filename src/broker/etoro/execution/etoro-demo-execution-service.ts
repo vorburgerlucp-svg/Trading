@@ -35,6 +35,8 @@ import {
   type GateQuote,
   type GateSafetyDecision,
   type GateVerdict,
+  closePositionRefusals,
+  type ClosePositionEvidence,
 } from './execution-gate.js';
 import {
   BROKER_CONFIRMED_STATES,
@@ -133,6 +135,10 @@ export interface ReconciliationRecord {
   readonly checked?: true;
 }
 
+export interface DemoPositionSource {
+  latest(): Promise<ClosePositionEvidence['snapshot']>;
+}
+
 export interface DemoSafetySource {
   /** The current portfolio safety decision from a trusted, verified source, or null when none is connected. */
   current(now: string): Promise<GateSafetyDecision | null>;
@@ -154,6 +160,11 @@ export interface DemoExecutionServiceDeps {
   quotes: DemoQuoteSource;
   /** The O20 read-only broker status: connection and last successful sync. */
   brokerStatus: () => { connection: string; lastSuccessfulSync: string | null };
+  /**
+   * O22 D4: the latest STORED broker portfolio snapshot (no broker request). A close is checked against it; without it every close
+   * is refused (fail-closed).
+   */
+  positions?: DemoPositionSource;
   executionEnabled: boolean;
   clock: () => Date;
   policy?: DemoExecutionPolicy;
@@ -366,7 +377,7 @@ export class EtoroDemoExecutionService {
       throw new DemoExecutionError('INTENT_STATE_INVALID', 'EXPIRED');
     }
 
-    const { verdict, exposure } = await this.runGate(p.intent, 'execute');
+    const { verdict, exposure, closeEvidence } = await this.runGate(p.intent, 'execute');
     if (!verdict.passed) {
       await this.recordGateRefusal(intentId, verdict.reasons);
       throw new DemoExecutionError('GATE_REFUSED', verdict.reasons.join(','), verdict.reasons);
@@ -401,6 +412,8 @@ export class EtoroDemoExecutionService {
           const current = this.projections().get(intentId);
           if (!current || current.state !== 'APPROVED') throw new DemoExecutionError('INTENT_STATE_INVALID', current?.state ?? 'missing');
           const refusals = bookRefusals(p.intent, this.book(p.intent), p.intent.action === 'open' ? exposure : null, this.policy);
+          // O22 D4: the close's broker evidence once more, at the time of the reservation (it may have become too old meanwhile).
+          refusals.push(...closePositionRefusals(p.intent, closeEvidence, this.now(), this.policy));
           if (refusals.length > 0) throw new DemoExecutionError('GATE_REFUSED', refusals.join(','), refusals);
         },
       }));
@@ -964,7 +977,7 @@ export class EtoroDemoExecutionService {
     };
   }
 
-  private async runGate(intent: ExecutionIntent, phase: 'create' | 'execute'): Promise<{ verdict: GateVerdict; exposure: Decimal }> {
+  private async runGate(intent: ExecutionIntent, phase: 'create' | 'execute'): Promise<{ verdict: GateVerdict; exposure: Decimal; closeEvidence: ClosePositionEvidence | null }> {
     const now = this.now();
     await this.deps.killSwitch.sync();
     // O22 C2: the account safety decision is read for an open only. No gate check of a close reads it (every safety check applies to
@@ -975,6 +988,7 @@ export class EtoroDemoExecutionService {
     ]);
     const instrument = this.deps.registry.get(intent.instrumentId) ?? null;
     const mapping = instrument === null ? null : this.deps.registry.mappingAt(intent.instrumentId, ETORO_MAPPING_PROVIDER, now);
+    const closeEvidence = intent.action === 'close' ? await this.closeEvidence(intent) : null;
     const verdict = evaluateDemoExecutionGate({
       phase,
       intent,
@@ -990,13 +1004,25 @@ export class EtoroDemoExecutionService {
       book: this.book(intent),
       broker: this.deps.brokerStatus(),
       writeSlotAvailable: this.deps.adapter.pacer.available(Date.parse(now)),
+      closePosition: closeEvidence,
     });
     let exposure = Decimal.from(0);
     if (intent.action === 'open' && quote !== null && quote.last.isPositive()) {
       const investment = intent.amount !== null ? Decimal.from(intent.amount) : Decimal.from(intent.units ?? '0').times(quote.last);
       exposure = investment.times(intent.leverage);
     }
-    return { verdict, exposure };
+    return { verdict, exposure, closeEvidence };
+  }
+
+  /**
+   * O22 D4: the evidence a close is checked against: the latest stored broker snapshot (no broker request), when NEXUS bound the
+   * position (the open's first FILLED or PARTIALLY_FILLED entry), and the open's broker order id.
+   */
+  private async closeEvidence(intent: ExecutionIntent): Promise<ClosePositionEvidence> {
+    const snapshot = this.deps.positions === undefined ? null : await this.deps.positions.latest();
+    const target = intent.closesIntentId === null ? undefined : this.projections().get(intent.closesIntentId);
+    const bound = target?.events.find((e) => e.state === 'FILLED' || e.state === 'PARTIALLY_FILLED');
+    return { snapshot, boundAt: bound?.at ?? null, openOrderId: target?.brokerOrderId ?? null };
   }
 }
 
