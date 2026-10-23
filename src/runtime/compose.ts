@@ -30,6 +30,7 @@ import {
 } from '../broker/etoro/execution/etoro-demo-execution-service.js';
 import { DEMO_E2E_CYCLE_POLICY } from '../broker/etoro/execution/execution-gate.js';
 import { EtoroDemoAccountSafetySource, type DemoAccountValuationRecord } from '../broker/etoro/execution/demo-account-safety.js';
+import type { ExternalClosureRecord } from '../broker/etoro/execution/external-closure.js';
 import { NO_DEMO_SAFETY_SOURCE, storedPositionSource, storedQuoteSource } from './demo-execution-sources.js';
 
 export interface ComposeInput {
@@ -62,6 +63,8 @@ export interface ComposeInput {
     reconciliations: AppendOnlyLog<ReconciliationRecord>;
     /** O22: the append-only valuations of the demo account (risk day of the demo account safety source). */
     accountValuations?: AppendOnlyLog<DemoAccountValuationRecord>;
+    /** O22 Plan B: the operator attestations of positions closed outside NEXUS. Absent: none can be recorded. */
+    externalClosures?: AppendOnlyLog<ExternalClosureRecord>;
     /** TESTS ONLY. The entry point never passes them: safety comes from the demo account source, quotes from the store. */
     safetyForTests?: DemoSafetySource;
     quotesForTests?: DemoQuoteSource;
@@ -127,6 +130,10 @@ export async function composeRuntime(input: ComposeInput): Promise<RuntimeServic
         // O22 D4: a close is checked against the newest STORED read-only snapshot of any process (no broker request here). Without
         // eToro there is no evidence, and every close is refused.
         positions: storedPositionSource(etoro),
+        // O22 Plan B: attestations need the log and the stored sync history (both read only from the store; no broker request).
+        ...(executionInput.externalClosures !== undefined && etoro !== null
+          ? { externalClosures: executionInput.externalClosures, snapshotHistory: { history: () => etoro.snapshotHistory() } }
+          : {}),
         executionEnabled: true,
         // O22: the runtime runs the one controlled demo cycle only: one open and one close submission over the whole intent log,
         // at most 100 USD at leverage 1. Stricter than the O21 default in every field; a code constant, never configuration.

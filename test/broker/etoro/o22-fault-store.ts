@@ -63,3 +63,42 @@ export function withFaults(base: O21Stores): FaultStores {
   const reconciliations = new FaultStore(base.reconciliations);
   return { stores: { intents, attempts: base.attempts, confirmations, reconciliations }, intents, confirmations, reconciliations };
 }
+
+/** O22 Plan B TEST ONLY: opens once `parties` writers have arrived; shared by the stores of several processes. */
+export class WriteBarrier {
+  private arrived = 0;
+  private release!: () => void;
+  readonly open = new Promise<void>((resolve) => {
+    this.release = resolve;
+  });
+
+  constructor(private readonly parties: number) {}
+
+  arrive(): Promise<void> {
+    this.arrived += 1;
+    if (this.arrived >= this.parties) this.release();
+    return this.open;
+  }
+}
+
+/**
+ * O22 Plan B TEST ONLY: holds every write until all parties of the barrier have arrived, then lets them go into the store's own
+ * critical section. Processes that all decided on the same stored state then race for the lock, so a test can prove that the check
+ * inside the lock, not the order of arrival, decides.
+ */
+export class BarrierStore<T> implements AppendOnlyStore<T> {
+  constructor(private readonly inner: AppendOnlyStore<T>, private readonly barrier: WriteBarrier) {}
+
+  loadAll(): Promise<readonly LogRecord<T>[]> {
+    return this.inner.loadAll();
+  }
+
+  loadAfter(sequence: number): Promise<readonly LogRecord<T>[]> {
+    return this.inner.loadAfter(sequence);
+  }
+
+  async writeExclusive<R>(knownSequence: number, decide: (newer: readonly LogRecord<T>[]) => WriteDecision<T, R>): Promise<R> {
+    await this.barrier.arrive();
+    return this.inner.writeExclusive(knownSequence, decide);
+  }
+}

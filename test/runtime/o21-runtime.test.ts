@@ -13,6 +13,7 @@ import type { KillSwitchState } from '../../src/safety/portfolio-safety-envelope
 import type { EtoroReconciliationRecord, EtoroSnapshotRecord, EtoroSyncRecord } from '../../src/broker/etoro/etoro-broker-service.js';
 import { HttpsDemoExecutionTransport } from '../../src/broker/etoro/execution/etoro-demo-execution-transport.js';
 import type { AttemptRecord, ConfirmationRecord, IntentEvent, ReconciliationRecord } from '../../src/broker/etoro/execution/etoro-demo-execution-service.js';
+import type { ExternalClosureRecord } from '../../src/broker/etoro/execution/external-closure.js';
 import { BUILD_LOCKS } from '../../src/nexus/safety.js';
 import { createRuntimeHandler } from '../../src/runtime/app.js';
 import { composeRuntime, type ComposeInput } from '../../src/runtime/compose.js';
@@ -72,6 +73,7 @@ async function runtime(options: { execution: boolean; injectSafety?: boolean; au
       attempts,
       confirmations: await AppendOnlyLog.inMemory<ConfirmationRecord>('etoro-demo-broker-confirmations', { clock: now }),
       reconciliations: await AppendOnlyLog.inMemory<ReconciliationRecord>('etoro-demo-execution-reconciliations', { clock: now }),
+      externalClosures: await AppendOnlyLog.inMemory<ExternalClosureRecord>('etoro-demo-external-closures', { clock: now }),
       ...(options.injectSafety ? { safetyForTests: { current: async () => normalSafety() }, quotesForTests: { latest: async () => freshQuote() } } : {}),
     };
   }
@@ -317,6 +319,28 @@ describe('O21 runtime: strict input', () => {
     const rejected = await call(r, 'POST', INTENTS, { body: routeIntent() });
     expect(rejected.json.intent.state).toBe('REJECTED');
     expect(await call(r, 'POST', INTENTS + '/' + rejected.json.intent.intentId + '/approve')).toMatchObject({ status: 409, json: { error: { code: 'INTENT_STATE_INVALID' } } });
+  });
+
+  it('O22 Plan B: closed-externally needs the authenticated operator and a claim without an actor; refusals carry their reasons', async () => {
+    const r = await runtime({ execution: true, injectSafety: true });
+    const id = (await call(r, 'POST', INTENTS, { body: routeIntent() })).json.intent.intentId as string;
+    const path = INTENTS + '/' + id + '/closed-externally';
+    const claim = { positionId: 2150941015, snapshotId: 'esnap_' + 'b'.repeat(40), statement: 'POSITION_CLOSED_OUTSIDE_NEXUS' };
+    expect(await call(r, 'POST', path, { body: claim, auth: false })).toMatchObject({ status: 401, json: { error: { code: 'OPERATOR_AUTH_REQUIRED' } } });
+    expect((await call(r, 'POST', path)).json.error.code).toBe('REQUEST_INVALID');
+    expect((await call(r, 'POST', path, { body: { ...claim, attestedBy: { kind: 'human', id: 'someone-else' } } })).json.error.code).toBe('REQUEST_INVALID');
+    expect(await call(r, 'POST', path, { body: { ...claim, statement: 'closed' } })).toMatchObject({ status: 409, json: { error: { code: 'EXTERNAL_CLOSURE_REFUSED', reasons: ['CLAIM_INVALID'] } } });
+    // The open was never filled (and cannot be in this build): fail closed, nothing recorded, no broker request.
+    expect(await call(r, 'POST', path, { body: claim })).toMatchObject({ status: 409, json: { error: { code: 'EXTERNAL_CLOSURE_REFUSED', reasons: ['OPEN_NOT_FILLED'] } } });
+    expect((await call(r, 'GET', INTENTS + '/' + id, { auth: false })).json.intent.externalClosure).toBeNull();
+    expect((await call(r, 'GET', path)).status).toBe(405);
+    expect(r.broker.requests).toHaveLength(0);
+  });
+
+  it('O22 Plan B: without operator configuration closed-externally is refused', async () => {
+    const r = await runtime({ execution: true, auth: false });
+    const claim = { positionId: 2150941015, snapshotId: 'esnap_' + 'b'.repeat(40), statement: 'POSITION_CLOSED_OUTSIDE_NEXUS' };
+    expect((await call(r, 'POST', INTENTS + '/eint_' + 'a'.repeat(40) + '/closed-externally', { body: claim })).json.error.code).toBe('OPERATOR_AUTH_NOT_CONFIGURED');
   });
 
   it('a wrong method is 405, an unknown step is 404', async () => {

@@ -10,6 +10,7 @@ import { Decimal } from '../../../money/decimal.js';
 import type { Instrument, ProviderInstrumentMapping } from '../../../market-data/market-data-types.js';
 import type { KillSwitchState } from '../../../safety/portfolio-safety-envelope.js';
 import type { ExecutionIntent, IntentOrderType, IntentSide } from './execution-intent.js';
+import { externalClosureOpenRefusals } from './external-closure.js';
 
 export const DEMO_EXECUTION_POLICY_VERSION = 'etoro-demo-execution-policy:v1' as const;
 /** O22: the policy of the one controlled demo trading cycle (one market buy, one close, then nothing). v2: long-only, market-only. */
@@ -144,6 +145,11 @@ export interface GateInput {
   readonly writeSlotAvailable: boolean;
   /** O22 D4: for a close, the broker's evidence that its position is still open (see closePositionRefusals). Missing = refused. */
   readonly closePosition?: ClosePositionEvidence | null;
+  /**
+   * O22 Plan B: for an open, the positions an operator attested as closed outside NEXUS, and the newest stored snapshot to check that
+   * none of them is shown again. Absent: no attestation exists.
+   */
+  readonly externalClosures?: { readonly attestedPositionIds: readonly number[]; readonly read: { snapshot: ClosePositionSnapshot | null; problem: ClosePositionEvidenceProblem | null } | null };
 }
 
 /** One position of a stored broker portfolio snapshot, as far as a close needs it. */
@@ -371,6 +377,10 @@ export function evaluateDemoExecutionGate(input: GateInput): GateVerdict {
   const closeRefusals = closePositionRefusals(intent, input.closePosition, now, policy);
   checks.closePositionAtBroker = opens ? 'not_applicable' : closeRefusals.length === 0 ? 'pass' : 'fail';
   reasons.push(...closeRefusals);
+  // O22 Plan B: no open while a position attested as closed outside NEXUS is shown again by the broker, or while that is not checkable.
+  const external = opens ? externalClosureOpenRefusals(input.externalClosures?.attestedPositionIds ?? [], input.externalClosures?.read ?? null, now, policy.maxBrokerSyncAgeMs) : [];
+  checks.externalClosures = !opens || (input.externalClosures?.attestedPositionIds.length ?? 0) === 0 ? 'not_applicable' : external.length === 0 ? 'pass' : 'fail';
+  reasons.push(...external);
 
   return Object.freeze({ passed: reasons.length === 0, reasons: Object.freeze(reasons), checks: Object.freeze(checks), policyVersion: policy.version });
 }

@@ -18,6 +18,8 @@ import {
   type ReconciliationRecord,
 } from '../../../src/broker/etoro/execution/etoro-demo-execution-service.js';
 import { DEFAULT_DEMO_EXECUTION_POLICY, type DemoExecutionPolicy, type EvidencePosition, type GateQuote } from '../../../src/broker/etoro/execution/execution-gate.js';
+import type { ExternalClosureRecord } from '../../../src/broker/etoro/execution/external-closure.js';
+import type { EtoroSnapshotHistory } from '../../../src/broker/etoro/etoro-broker-service.js';
 import { AAPL } from '../../market-data/fixtures.js';
 
 export const O21_NOW = '2026-10-16T14:00:00.000Z';
@@ -151,6 +153,9 @@ export interface FixtureOptions {
   brokerPositions?: EvidencePosition[] | null;
   /** O22 D4: replaces the scripted snapshot by a real position source (e.g. storedPositionSource over the stored O20 logs). */
   positionSource?: DemoPositionSource;
+  /** O22 Plan B: the store of the external closure attestations, and the stored sync history they are checked against. */
+  externalClosures?: AppendOnlyStore<ExternalClosureRecord>;
+  snapshotHistory?: { history(): Promise<EtoroSnapshotHistory> };
 }
 
 /** The position filledOpen() binds by default, as the broker snapshot shows it. */
@@ -166,6 +171,8 @@ export interface Fixture {
   attempts: AppendOnlyLog<AttemptRecord>;
   confirmations: AppendOnlyLog<ConfirmationRecord>;
   reconciliations: AppendOnlyLog<ReconciliationRecord>;
+  /** O22 Plan B: the attestation log (null when the fixture has none). */
+  externalClosures: AppendOnlyLog<ExternalClosureRecord> | null;
   setQuote(quote: GateQuote | null): void;
   setSafety(safety: PortfolioSafetyDecision | null): void;
   setBroker(status: { connection: string; lastSuccessfulSync: string | null }): void;
@@ -223,6 +230,7 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
   const attempts = await AppendOnlyLog.open<AttemptRecord>('etoro-demo-execution-attempts', stores.attempts, { clock: now });
   const confirmations = await AppendOnlyLog.open<ConfirmationRecord>('etoro-demo-broker-confirmations', stores.confirmations, { clock: now });
   const reconciliations = await AppendOnlyLog.open<ReconciliationRecord>('etoro-demo-execution-reconciliations', stores.reconciliations, { clock: now });
+  const externalClosures = options.externalClosures === undefined ? null : await AppendOnlyLog.open<ExternalClosureRecord>('etoro-demo-external-closures', options.externalClosures, { clock: now });
   let quote: GateQuote | null = options.quote === undefined ? freshQuote() : options.quote;
   let safety: PortfolioSafetyDecision | null = options.safety === undefined ? normalSafety() : options.safety;
   let brokerStatus = options.broker ?? { connection: 'connected', lastSuccessfulSync: '2026-10-16T13:58:00.000Z' };
@@ -250,6 +258,8 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
         problem: null,
       }),
     },
+    ...(externalClosures !== null ? { externalClosures } : {}),
+    ...(options.snapshotHistory !== undefined ? { snapshotHistory: options.snapshotHistory } : {}),
     executionEnabled: options.executionEnabled ?? true,
     policy: options.policy ?? DEFAULT_DEMO_EXECUTION_POLICY,
     clock: now,
@@ -260,7 +270,7 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
     }),
   });
   return {
-    service, killSwitch, broker, clock, stores, intents, attempts, confirmations, reconciliations, requestIds,
+    service, killSwitch, broker, clock, stores, intents, attempts, confirmations, reconciliations, externalClosures, requestIds,
     setQuote: (q) => { quote = q; },
     setSafety: (s) => { safety = s; },
     setBroker: (b) => { brokerStatus = b; },

@@ -118,6 +118,8 @@ describe.skipIf(!pgAvailable)('O21 runtime on PostgreSQL' + (pgAvailable ? '' : 
       { log_name: 'etoro-demo-execution-attempts', n: 0 },
       { log_name: 'etoro-demo-execution-intents', n: 2 },
       { log_name: 'etoro-demo-execution-reconciliations', n: 0 },
+      // O22 Plan B: the attestation log exists from the first start, empty; nothing is attested automatically.
+      { log_name: 'etoro-demo-external-closures', n: 0 },
     ]);
     expect(await rows(db.name, 'SELECT count(*)::int AS n FROM ledger_transactions')).toEqual([{ n: 0 }]);
     expect(await rows(db.name, "SELECT count(*)::int AS n FROM append_only_records WHERE log_name = 'portfolio-kill-switch'")).toEqual([{ n: 0 }]);

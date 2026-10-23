@@ -16,6 +16,7 @@ import type { EtoroReconciliationRecord, EtoroSnapshotRecord, EtoroSyncRecord } 
 import { HttpsEtoroTransport, type EtoroCredentials, type EtoroTransport } from '../broker/etoro/etoro-transport.js';
 import { HttpsDemoExecutionTransport, type DemoExecutionTransport } from '../broker/etoro/execution/etoro-demo-execution-transport.js';
 import type { AttemptRecord, ConfirmationRecord, IntentEvent, ReconciliationRecord } from '../broker/etoro/execution/etoro-demo-execution-service.js';
+import type { ExternalClosureRecord } from '../broker/etoro/execution/external-closure.js';
 import type { DemoAccountValuationRecord } from '../broker/etoro/execution/demo-account-safety.js';
 import { createRuntimeHandler } from './app.js';
 import { OperatorAuthenticator } from './operator-auth.js';
@@ -169,6 +170,8 @@ async function openEtoroDemoExecution(pool: PgPool, config: RuntimeConfig, optio
     reconciliations: await AppendOnlyLog.open<ReconciliationRecord>('etoro-demo-execution-reconciliations', await PostgresAppendOnlyStore.open<ReconciliationRecord>(pool, 'etoro-demo-execution-reconciliations'), { clock }),
     // O22: the risk day of the demo account safety source (equity valuations only; no account or position id).
     accountValuations: await AppendOnlyLog.open<DemoAccountValuationRecord>('etoro-demo-account-valuations', await PostgresAppendOnlyStore.open<DemoAccountValuationRecord>(pool, 'etoro-demo-account-valuations'), { clock }),
+    // O22 Plan B: the operator attestations of positions closed outside NEXUS (append-only; no broker request).
+    externalClosures: await AppendOnlyLog.open<ExternalClosureRecord>('etoro-demo-external-closures', await PostgresAppendOnlyStore.open<ExternalClosureRecord>(pool, 'etoro-demo-external-closures'), { clock }),
   };
 }
 

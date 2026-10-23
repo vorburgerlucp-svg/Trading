@@ -91,6 +91,8 @@ export interface DemoExecutionRoutes {
   execute(intentId: string, operator: OperatorIdentity): Promise<unknown>;
   refresh(intentId: string, operator: OperatorIdentity): Promise<unknown>;
   cancel(intentId: string, operator: OperatorIdentity): Promise<unknown>;
+  /** O22 Plan B: the operator's attestation that the open's position was closed outside NEXUS (no broker request). */
+  closedExternally(intentId: string, claim: unknown, operator: OperatorIdentity): Promise<unknown>;
 }
 
 export interface RuntimeHandlerOptions {
@@ -99,7 +101,7 @@ export interface RuntimeHandlerOptions {
 }
 
 const DEMO_INTENTS_PATH = '/api/broker/etoro/demo/intents';
-const DEMO_INTENT_ROUTE = /^\/api\/broker\/etoro\/demo\/intents(?:\/([^/]+)(?:\/(approve|execute|refresh|cancel))?)?$/;
+const DEMO_INTENT_ROUTE = /^\/api\/broker\/etoro\/demo\/intents(?:\/([^/]+)(?:\/(approve|execute|refresh|cancel|closed-externally))?)?$/;
 const INTENT_ID = /^eint_[0-9a-f]{40}$/;
 const JSON_CONTENT_TYPE = /^application\/json\s*(;\s*charset=utf-8\s*)?$/i;
 const LOOPBACK_ORIGIN_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -268,6 +270,16 @@ async function readIntentBody(req: IncomingMessage): Promise<unknown> {
   return value;
 }
 
+/** closed-externally: the operator's claim. It names no actor: the operator is the authenticated one. */
+async function readClaimBody(req: IncomingMessage): Promise<unknown> {
+  const text = await readDemoBody(req);
+  if (text === '') invalid();
+  const value = parseJsonText(text);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid();
+  if ('attestedBy' in value || 'createdBy' in value || 'approvedBy' in value) invalid();
+  return value;
+}
+
 function demoExecution(services: RuntimeServices): DemoExecutionRoutes {
   if (!services.demoExecution) throw new RuntimeApiError('EXECUTION_DISABLED');
   return services.demoExecution;
@@ -316,6 +328,11 @@ async function demoIntentRoute(services: RuntimeServices, auth: OperatorAuthenti
     return true;
   }
   const operator = authenticateOperator(req, auth);
+  if (step === 'closed-externally') {
+    // O22 Plan B: the claim (positionId, snapshotId, statement) is a cross-check of the stored evidence; it never names an actor.
+    send(res, 201, { externalClosure: await routes.closedExternally(id, await readClaimBody(req), operator) });
+    return true;
+  }
   await readNoInput(req);
   switch (step) {
     case 'approve':

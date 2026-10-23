@@ -25,7 +25,14 @@ export type CycleItemKind =
   /** The intent may be live at the broker, but its outcome is not confirmed (submitted, accepted, ambiguous, reconciled, ...). */
   | 'outcome_pending'
   /** The snapshot was observed before the state it would have to confirm. */
-  | 'snapshot_predates_intent';
+  | 'snapshot_predates_intent'
+  /**
+   * O22 Plan B: an operator attested on complete stored evidence that the FILLED open's position was closed outside NEXUS, and the
+   * snapshot does not show it. Not a close by NEXUS: no close order, fill or booking is implied.
+   */
+  | 'closed_externally'
+  /** O22 Plan B: the snapshot shows a position that was attested as closed outside NEXUS: the attestation is contradicted. */
+  | 'closed_externally_contradicted';
 
 export interface CycleItem {
   readonly intentId: string;
@@ -50,7 +57,7 @@ export interface DemoCycleReconciliation {
   readonly brokerPendingOrders: number;
 }
 
-const INCONSISTENT: ReadonlySet<CycleItemKind> = new Set(['open_position_missing', 'position_mismatch', 'closed_position_still_open']);
+const INCONSISTENT: ReadonlySet<CycleItemKind> = new Set(['open_position_missing', 'position_mismatch', 'closed_position_still_open', 'closed_externally_contradicted']);
 const UNKNOWN: ReadonlySet<CycleItemKind> = new Set(['outcome_pending', 'snapshot_predates_intent']);
 /** States in which a write may have reached the broker without a confirmed final outcome. */
 const PENDING_STATES: ReadonlySet<string> = new Set(['SUBMITTING', 'SUBMITTED', 'ACCEPTED', 'AMBIGUOUS', 'RECONCILED', 'PARTIALLY_FILLED']);
@@ -92,6 +99,12 @@ export function reconcileDemoCycle(intents: readonly IntentView[], snapshot: Eto
     // A FILLED open: each broker-confirmed position, unless a FILLED close of NEXUS closed it.
     for (const id of v.brokerPositionIds) {
       if (closedBy.has(id)) continue;
+      if (v.externalClosure?.positionId === id) {
+        // Judged against the attestation's own snapshot: an older snapshot decides nothing, a newer one must not show the position.
+        if (snapshot === null || Date.parse(snapshot.observedAt) < Date.parse(v.externalClosure.snapshotObservedAt)) items.push({ ...base, kind: 'snapshot_predates_intent', positionId: id });
+        else items.push({ ...base, kind: byId.has(id) ? 'closed_externally_contradicted' : 'closed_externally', positionId: id });
+        continue;
+      }
       if (!after(enteredAt(v, 'FILLED'))) {
         items.push({ ...base, kind: 'snapshot_predates_intent', positionId: id });
         continue;
@@ -104,7 +117,7 @@ export function reconcileDemoCycle(intents: readonly IntentView[], snapshot: Eto
   }
 
   for (const item of items) {
-    if (INCONSISTENT.has(item.kind) || UNKNOWN.has(item.kind)) reasons.push(item.kind.toUpperCase());
+    if (INCONSISTENT.has(item.kind) || UNKNOWN.has(item.kind) || item.kind === 'closed_externally') reasons.push(item.kind.toUpperCase());
     // The units of a CFD or margin position are not an asset quantity: a filled open that the broker did not state as "real" is flagged.
     if (item.action === 'open' && item.kind === 'open_position_confirmed' && item.settlementType !== 'real') reasons.push('PRODUCT_TYPE_NOT_CONFIRMED_REAL');
   }

@@ -44,7 +44,9 @@ export type DemoCycleTestFailure =
   | 'CLOSE_TARGET_MISMATCH'
   | 'CLOSE_REJECTED'
   | 'CLOSE_NOT_FILLED'
-  | 'CLOSE_AMBIGUOUS';
+  | 'CLOSE_AMBIGUOUS'
+  /** O22 Plan B: the position was attested as closed outside NEXUS: a manual intervention, the test can never pass. */
+  | 'POSITION_CLOSED_EXTERNALLY';
 
 export type DemoCycleTestPending =
   | 'NO_OPEN_SUBMITTED'
@@ -141,6 +143,8 @@ export function evaluateDemoCycleTest(input: { intents: readonly IntentView[]; s
   else if (OPEN_PENDING_STATES.has(open.state)) pending.add('OPEN_PENDING');
   // The binding can still grow while the open is PARTIALLY_FILLED (a refresh is allowed there), so it is final only in a final state.
   let openBindingFinal = FINAL_STATES.has(open.state);
+  // O22 Plan B: an attested external closure ends the position's liveness, never the test: it is a manual intervention (runbook).
+  if (open.externalClosure !== null && open.externalClosure !== undefined) failures.add('POSITION_CLOSED_EXTERNALLY');
 
   // The positions the broker confirmed by fill reads (the same reads closePositionOf trusts).
   const fillReads = openReads.filter((r) => r.kind === 'order_status' && r.outcome !== null && FILL_OUTCOMES.has(r.outcome));
