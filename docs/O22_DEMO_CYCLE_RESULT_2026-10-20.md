@@ -39,3 +39,7 @@ One read-only sync afterwards (07:49:52): **1 position** – eToro instrument 10
 1. **Manual clarification of the open ETH demo position** (100 USD, opened 07:49:22 UTC) in the eToro demo account. NEXUS does not close it. If it is closed by hand, a read-only sync then shows the account empty; the NEXUS open intent stays `SUBMITTED` (its outcome was never proved).
 2. **The cause of the refused `orders:lookup` answer** (first live response of this endpoint): **found** by one approved read-only lookup. `asset.settlementType` was `"REAL"`, while the parser accepted only the documented lower-case `real`. The fix is on branch `fix/o22-etoro-order-lookup`; see `O22_ORDER_LOOKUP_PARSER_FIX.md`. The order id and instrument checks are evaluated on the next approved read. Until then, the position stays unresolved for NEXUS.
 3. Whether the re-lock is merged now; a later attempt needs a new reviewed release and – because the open budget of this database is spent – a deliberate decision about the budget.
+
+## Update 23.10.2026
+
+The operator reports that the ETH demo position was closed by hand in the eToro demo account, and that the portfolio was then shown as empty. This is an observation; NEXUS has no technical record of the close. The re-lock, the parser fix and the crash-safe status check are merged (`main` `53d2848`, all locks closed). The closure, the missing evidence and the plan for the next cycle are in `O22_CYCLE_CLOSURE_2026-10-23.md`.
