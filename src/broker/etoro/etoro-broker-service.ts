@@ -149,6 +149,13 @@ export interface EtoroSnapshotHistory {
   readonly missingSnapshotRecords: number;
 }
 
+/** O22 D4: the newest stored observation as latestStoredSnapshot() reads it, or why there is none that can be used. */
+export type EtoroStoredSnapshot =
+  | { readonly kind: 'snapshot'; readonly snapshot: EtoroSnapshotView }
+  | { readonly kind: 'none' }
+  | { readonly kind: 'unreadable' }
+  | { readonly kind: 'ambiguous' };
+
 /**
  * The one order of observations: by `observedAt`, then by sync log sequence (the later stored record is the later observation).
  * Used for the history and for the latest snapshot, so both name the same newest observation.
@@ -364,6 +371,37 @@ export class EtoroBrokerService {
       observations.push({ snapshotId: payload.snapshotId, observedAt: payload.observedAt, retrievedAt: payload.retrievedAt, storedAt: record.recordedAt, sequence: record.sequence, content: stored.payload.content });
     }
     return { observations: observations.sort(compareObservations), missingSnapshotRecords };
+  }
+
+  /**
+   * O22 D4 (R1): the newest stored successful observation after catching up with the records of every process sharing the store
+   * (PostgreSQL), never only this process's own copy. Read only: no broker request. Same order as snapshotHistory(): the sync log
+   * first, then the snapshot log, so every sync seen has its snapshot visible. Names no snapshot when the newest successful sync's
+   * snapshot cannot be read ('unreadable'), or when another successful sync has the same observedAt with a different snapshot
+   * ('ambiguous': the storage order between them does not say which portfolio is current).
+   */
+  async latestStoredSnapshot(): Promise<EtoroStoredSnapshot> {
+    await this.deps.syncs.sync();
+    await this.deps.snapshots.sync();
+    const last = this.lastSuccessfulSync();
+    if (last === null) return { kind: 'none' };
+    const observedAt = Date.parse(last.observedAt);
+    for (const record of this.deps.syncs.all()) {
+      const payload = record.payload;
+      if (payload.outcome === 'success' && Date.parse(payload.observedAt) === observedAt && payload.snapshotId !== last.snapshotId) return { kind: 'ambiguous' };
+    }
+    const stored = this.deps.snapshots.get(last.snapshotId);
+    if (!stored) return { kind: 'unreadable' };
+    return {
+      kind: 'snapshot',
+      snapshot: {
+        snapshotId: last.snapshotId,
+        observedAt: last.observedAt,
+        retrievedAt: last.retrievedAt,
+        freshness: freshnessOf(last.observedAt, this.deps.clock().getTime(), this.maxAgeMs),
+        content: stored.payload.content,
+      },
+    };
   }
 
   /** The reconciliation of the newest successful sync. With requireFresh, a stale one is refused (BROKER_SNAPSHOT_STALE). */

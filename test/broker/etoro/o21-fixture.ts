@@ -10,6 +10,7 @@ import { EToroDemoExecutionAdapter, DemoWritePacer } from '../../../src/broker/e
 import { HttpsDemoExecutionTransport, type DemoExecutionFetch } from '../../../src/broker/etoro/execution/etoro-demo-execution-transport.js';
 import {
   EtoroDemoExecutionService,
+  type DemoPositionSource,
   type DemoSafetySource,
   type AttemptRecord,
   type ConfirmationRecord,
@@ -148,6 +149,8 @@ export interface FixtureOptions {
    * complete). Default: the default test position, open (AAPL, buy). null: no snapshot at all.
    */
   brokerPositions?: EvidencePosition[] | null;
+  /** O22 D4: replaces the scripted snapshot by a real position source (e.g. storedPositionSource over the stored O20 logs). */
+  positionSource?: DemoPositionSource;
 }
 
 /** The position filledOpen() binds by default, as the broker snapshot shows it. */
@@ -236,13 +239,16 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
     safety: options.safetySource ?? { current: async () => safety },
     quotes: { latest: async (instrumentId) => (options.quoteSource ? options.quoteSource(instrumentId) : quote) },
     brokerStatus: () => brokerStatus,
-    positions: {
-      latest: async () => snapshot === null ? null : {
-        observedAt: snapshot.observedAt ?? now().toISOString(),
-        freshness: snapshot.freshness ?? 'fresh',
-        positionCount: snapshot.positionCount ?? snapshot.positions.length,
-        positions: snapshot.positions,
-      },
+    positions: options.positionSource ?? {
+      latest: async () => ({
+        snapshot: snapshot === null ? null : {
+          observedAt: snapshot.observedAt ?? now().toISOString(),
+          freshness: snapshot.freshness ?? 'fresh',
+          positionCount: snapshot.positionCount ?? snapshot.positions.length,
+          positions: snapshot.positions,
+        },
+        problem: null,
+      }),
     },
     executionEnabled: options.executionEnabled ?? true,
     policy: options.policy ?? DEFAULT_DEMO_EXECUTION_POLICY,

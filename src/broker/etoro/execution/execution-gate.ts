@@ -161,14 +161,24 @@ export interface EvidencePosition {
  * not that it still is when the close is sent. Between the read and the write the broker state can change (a hand close, a
  * stop-loss); the broker then refuses the close. The freshness limit keeps that window short; it cannot close it.
  */
+export interface ClosePositionSnapshot {
+  readonly observedAt: string;
+  readonly freshness: 'fresh' | 'stale';
+  /** The number of positions the broker stated; the listed positions must be exactly that many (complete). */
+  readonly positionCount: number;
+  readonly positions: readonly EvidencePosition[];
+}
+
+/**
+ * Why the store names no usable newest snapshot although it holds observations: the newest one's snapshot record cannot be read,
+ * or two observations share the newest observedAt with different contents.
+ */
+export type ClosePositionEvidenceProblem = 'unreadable' | 'ambiguous';
+
 export interface ClosePositionEvidence {
-  readonly snapshot: {
-    readonly observedAt: string;
-    readonly freshness: 'fresh' | 'stale';
-    /** The number of positions the broker stated; the listed positions must be exactly that many (complete). */
-    readonly positionCount: number;
-    readonly positions: readonly EvidencePosition[];
-  } | null;
+  readonly snapshot: ClosePositionSnapshot | null;
+  /** Set when the stored observations cannot name one newest snapshot; the close is then refused. */
+  readonly problem?: ClosePositionEvidenceProblem | null;
   /** When NEXUS bound the position: the open entered FILLED or PARTIALLY_FILLED (from a broker status read). */
   readonly boundAt: string | null;
   /** The broker order id of the open whose position is closed. */
@@ -179,10 +189,12 @@ export interface ClosePositionEvidence {
  * O22 D4: a close may be sent only when a fresh, complete broker snapshot taken after the binding shows its position exactly once,
  * open, with the intent's instrument and direction, and (when the broker states it) opened by the open's order. Fail-closed: no
  * evidence, old evidence or contradicting evidence refuses the close. Runs in the gate (create and execute) and again in the
- * reservation step, so a refusal spends no budget and sends nothing.
+ * reservation step on evidence read again right before it, so a refusal spends no budget and sends nothing.
  */
 export function closePositionRefusals(intent: ExecutionIntent, evidence: ClosePositionEvidence | null | undefined, now: string, policy: DemoExecutionPolicy): string[] {
   if (intent.action !== 'close') return [];
+  if (evidence?.problem === 'unreadable') return ['CLOSE_POSITION_EVIDENCE_UNREADABLE'];
+  if (evidence?.problem === 'ambiguous') return ['CLOSE_POSITION_EVIDENCE_AMBIGUOUS'];
   const snapshot = evidence?.snapshot ?? null;
   if (evidence === null || evidence === undefined || snapshot === null || intent.positionId === null) return ['CLOSE_POSITION_EVIDENCE_MISSING'];
   const reasons: string[] = [];

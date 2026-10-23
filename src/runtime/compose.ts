@@ -30,7 +30,7 @@ import {
 } from '../broker/etoro/execution/etoro-demo-execution-service.js';
 import { DEMO_E2E_CYCLE_POLICY } from '../broker/etoro/execution/execution-gate.js';
 import { EtoroDemoAccountSafetySource, type DemoAccountValuationRecord } from '../broker/etoro/execution/demo-account-safety.js';
-import { NO_DEMO_SAFETY_SOURCE, storedQuoteSource } from './demo-execution-sources.js';
+import { NO_DEMO_SAFETY_SOURCE, storedPositionSource, storedQuoteSource } from './demo-execution-sources.js';
 
 export interface ComposeInput {
   instruments: AppendOnlyStore<InstrumentEvent>;
@@ -124,25 +124,9 @@ export async function composeRuntime(input: ComposeInput): Promise<RuntimeServic
           const status = etoro.status().etoro;
           return { connection: status.connection, lastSuccessfulSync: status.lastSuccessfulSync };
         },
-        // O22 D4: a close is checked against the latest STORED read-only snapshot (no broker request here). Without eToro there is
-        // no evidence, and every close is refused.
-        positions: {
-          latest: async () => {
-            const snapshot = etoro === null ? null : await etoro.latestSnapshot();
-            if (snapshot === null) return null;
-            return {
-              observedAt: snapshot.observedAt,
-              freshness: snapshot.freshness,
-              positionCount: snapshot.content.positionCount,
-              positions: (snapshot.content.positions ?? []).map((p) => ({
-                positionId: p.positionId,
-                etoroInstrumentId: p.etoroInstrumentId,
-                direction: p.direction,
-                openOrderId: p.openOrder?.orderId ?? null,
-              })),
-            };
-          },
-        },
+        // O22 D4: a close is checked against the newest STORED read-only snapshot of any process (no broker request here). Without
+        // eToro there is no evidence, and every close is refused.
+        positions: storedPositionSource(etoro),
         executionEnabled: true,
         // O22: the runtime runs the one controlled demo cycle only: one open and one close submission over the whole intent log,
         // at most 100 USD at leverage 1. Stricter than the O21 default in every field; a code constant, never configuration.

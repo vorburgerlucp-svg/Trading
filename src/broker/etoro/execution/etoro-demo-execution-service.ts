@@ -37,6 +37,8 @@ import {
   type GateVerdict,
   closePositionRefusals,
   type ClosePositionEvidence,
+  type ClosePositionEvidenceProblem,
+  type ClosePositionSnapshot,
 } from './execution-gate.js';
 import {
   BROKER_CONFIRMED_STATES,
@@ -135,8 +137,12 @@ export interface ReconciliationRecord {
   readonly checked?: true;
 }
 
+/**
+ * O22 D4: the newest STORED broker portfolio snapshot (no broker request). Every call reads the store anew, including what other
+ * processes stored since the last call (R1); `problem` says why the store names no usable snapshot although it holds observations.
+ */
 export interface DemoPositionSource {
-  latest(): Promise<ClosePositionEvidence['snapshot']>;
+  latest(): Promise<{ readonly snapshot: ClosePositionSnapshot | null; readonly problem: ClosePositionEvidenceProblem | null }>;
 }
 
 export interface DemoSafetySource {
@@ -377,7 +383,7 @@ export class EtoroDemoExecutionService {
       throw new DemoExecutionError('INTENT_STATE_INVALID', 'EXPIRED');
     }
 
-    const { verdict, exposure, closeEvidence } = await this.runGate(p.intent, 'execute');
+    const { verdict, exposure } = await this.runGate(p.intent, 'execute');
     if (!verdict.passed) {
       await this.recordGateRefusal(intentId, verdict.reasons);
       throw new DemoExecutionError('GATE_REFUSED', verdict.reasons.join(','), verdict.reasons);
@@ -401,6 +407,11 @@ export class EtoroDemoExecutionService {
 
     const operation = p.intent.action === 'open' ? 'demo.order.open' : 'demo.position.close';
     const attemptId = 'eatt_' + hashOf({ intentId, operation, requestId }).slice(0, 40);
+    // O22 D4 (R2): the close's broker evidence is read again right before the reservation, from the store and with everything other
+    // processes stored since the gate: a newer snapshot without the position refuses here. It is read before the intent-log lock is
+    // taken, never inside it: the precondition below runs synchronously in that lock and takes no other lock, so no lock order
+    // between logs (and no deadlock) can arise. A snapshot stored after this read is not seen (see O22_CLOSE_POSITION_EVIDENCE.md).
+    const reservationEvidence = p.intent.action === 'close' ? await this.closeEvidence(p.intent) : null;
     // The reservation step and the at-most-once guard. SUBMITTING is entered once, only from APPROVED, and only if the book limits
     // still hold for the book as it is inside the critical section, after every other process's records were applied.
     let submitting;
@@ -412,8 +423,8 @@ export class EtoroDemoExecutionService {
           const current = this.projections().get(intentId);
           if (!current || current.state !== 'APPROVED') throw new DemoExecutionError('INTENT_STATE_INVALID', current?.state ?? 'missing');
           const refusals = bookRefusals(p.intent, this.book(p.intent), p.intent.action === 'open' ? exposure : null, this.policy);
-          // O22 D4: the close's broker evidence once more, at the time of the reservation (it may have become too old meanwhile).
-          refusals.push(...closePositionRefusals(p.intent, closeEvidence, this.now(), this.policy));
+          // O22 D4 (R2): the re-read evidence, judged at this moment (age), with the binding from the caught-up intent log.
+          if (reservationEvidence !== null) refusals.push(...closePositionRefusals(p.intent, { ...reservationEvidence, ...this.bindingOf(p.intent) }, this.now(), this.policy));
           if (refusals.length > 0) throw new DemoExecutionError('GATE_REFUSED', refusals.join(','), refusals);
         },
       }));
@@ -977,7 +988,7 @@ export class EtoroDemoExecutionService {
     };
   }
 
-  private async runGate(intent: ExecutionIntent, phase: 'create' | 'execute'): Promise<{ verdict: GateVerdict; exposure: Decimal; closeEvidence: ClosePositionEvidence | null }> {
+  private async runGate(intent: ExecutionIntent, phase: 'create' | 'execute'): Promise<{ verdict: GateVerdict; exposure: Decimal }> {
     const now = this.now();
     await this.deps.killSwitch.sync();
     // O22 C2: the account safety decision is read for an open only. No gate check of a close reads it (every safety check applies to
@@ -1011,7 +1022,7 @@ export class EtoroDemoExecutionService {
       const investment = intent.amount !== null ? Decimal.from(intent.amount) : Decimal.from(intent.units ?? '0').times(quote.last);
       exposure = investment.times(intent.leverage);
     }
-    return { verdict, exposure, closeEvidence };
+    return { verdict, exposure };
   }
 
   /**
@@ -1019,10 +1030,15 @@ export class EtoroDemoExecutionService {
    * position (the open's first FILLED or PARTIALLY_FILLED entry), and the open's broker order id.
    */
   private async closeEvidence(intent: ExecutionIntent): Promise<ClosePositionEvidence> {
-    const snapshot = this.deps.positions === undefined ? null : await this.deps.positions.latest();
+    const read = this.deps.positions === undefined ? { snapshot: null, problem: null } : await this.deps.positions.latest();
+    return { snapshot: read.snapshot, problem: read.problem, ...this.bindingOf(intent) };
+  }
+
+  /** The binding of the position a close closes, from the intent log as this process has it now. */
+  private bindingOf(intent: ExecutionIntent): { boundAt: string | null; openOrderId: number | null } {
     const target = intent.closesIntentId === null ? undefined : this.projections().get(intent.closesIntentId);
     const bound = target?.events.find((e) => e.state === 'FILLED' || e.state === 'PARTIALLY_FILLED');
-    return { snapshot, boundAt: bound?.at ?? null, openOrderId: target?.brokerOrderId ?? null };
+    return { boundAt: bound?.at ?? null, openOrderId: target?.brokerOrderId ?? null };
   }
 }
 
