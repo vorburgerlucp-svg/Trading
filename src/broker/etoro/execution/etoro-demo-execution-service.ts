@@ -56,6 +56,7 @@ import {
 } from './execution-intent.js';
 import type { EtoroSnapshotHistory } from '../etoro-broker-service.js';
 import { NO_ACCESS_VERIFIER, accessRefusal, type AccessStamp, type AccessVerifier } from '../etoro-access-fingerprint.js';
+import { cancelRefusals } from './cancel-guard.js';
 import {
   EXTERNAL_CLOSURE_SCHEMA,
   ExternalClosureClaimError,
@@ -732,7 +733,11 @@ export class EtoroDemoExecutionService {
 
   // ------------------------------------------------------------------------------------------------------------- cancel
 
-  /** One cancel write for a pending order of an accepted open intent. The cancellation is confirmed by a later refresh. */
+  /**
+   * One cancel write for a pending order of an accepted open intent. The cancellation is confirmed by a later refresh.
+   * O22 cancel review: before the write (and again inside the attempt log's lock) the order must be bound to the intent's one open
+   * attempt, and that attempt must have been sent with the configured broker access (cancelRefusals). Otherwise nothing is sent.
+   */
   async cancel(intentId: string, by: IntentActor): Promise<IntentView> {
     const operator = this.requireHumanOperator(by);
     if (!this.deps.executionEnabled) throw new DemoExecutionError('EXECUTION_DISABLED');
@@ -741,6 +746,13 @@ export class EtoroDemoExecutionService {
     const p = this.require(intentId);
     if (p.intent.action !== 'open' || p.state !== 'ACCEPTED' || p.brokerOrderId === null) throw new DemoExecutionError('INTENT_STATE_INVALID', p.state);
     if (p.lastStatusId === null || !CANCELLABLE_STATUS_IDS.has(p.lastStatusId)) throw new DemoExecutionError('INTENT_STATE_INVALID', 'the order is not pending');
+    // O22 cancel review: fail closed before any write. There is no exception for a risk-reducing cancel: it would be a separate,
+    // documented policy that needs its own explicit approval (docs/O22_CANCEL_ACCESS.md), and it does not exist in this code.
+    const refused = this.cancelRefusals(p);
+    if (refused.length > 0) {
+      await this.recordGateRefusal(intentId, refused);
+      throw new DemoExecutionError('GATE_REFUSED', refused.join(','), refused);
+    }
     if (!this.deps.adapter.pacer.tryAcquire(this.deps.clock().getTime())) throw new DemoExecutionError('GATE_REFUSED', 'BROKER_WRITE_PACING', ['BROKER_WRITE_PACING']);
     // A new cancel is allowed only when every earlier cancel of this intent was conclusively refused by the broker (it did not act).
     // An accepted, ambiguous or unfinished cancel blocks every further one: a cancel is never resent automatically or blindly.
@@ -753,6 +765,9 @@ export class EtoroDemoExecutionService {
       precondition: () => {
         const current = this.cancelAttempts(intentId);
         if (current.length !== earlier.length || current.some((outcome) => outcome !== 'rejected')) throw new DemoExecutionError('INTENT_STATE_INVALID', 'a cancel is in progress');
+        // Again inside the attempt log's lock, on the caught-up attempts (the open attempt and its stamp live in this log).
+        const again = this.cancelRefusals(p);
+        if (again.length > 0) throw new DemoExecutionError('GATE_REFUSED', again.join(','), again);
       },
     }));
     if (started.status !== 'APPLIED') throw new DemoExecutionError('INTENT_STATE_INVALID', 'cancel already sent');
@@ -768,6 +783,18 @@ export class EtoroDemoExecutionService {
       await this.finishAttempt(attemptId, intentId, 'demo.order.cancel', requestId, { outcome: 'ambiguous', httpStatus: outcome.httpStatus, code: outcome.reason });
     }
     return this.get(intentId);
+  }
+
+  /** O22 cancel review: the stored facts of a cancel, checked by cancelRefusals (cancel-guard.ts). */
+  private cancelRefusals(p: Projection): string[] {
+    const intentId = p.intent.intentId;
+    return cancelRefusals({
+      brokerOrderId: p.brokerOrderId,
+      openAttempts: this.deps.attempts.all().map((r) => r.payload).filter((a) => a.intentId === intentId && a.operation === 'demo.order.open' && a.phase === 'started'),
+      acceptedAnswers: this.deps.confirmations.all().map((r) => r.payload).filter((c) => c.intentId === intentId && c.kind === 'open_accepted'),
+      foundReconciliations: this.foundReconciliations(intentId),
+      checkAccess: (stamp) => this.access.check(stamp),
+    });
   }
 
   // ------------------------------------------------------------------------------------------------- external closure
