@@ -8,6 +8,8 @@
 //   refresh  -> reads the broker status (a read, retried): ACCEPTED, FILLED, PARTIALLY_FILLED, REJECTED, CANCELLED; an AMBIGUOUS
 //               intent is reconciled by its referenceId and is never resent; only positive broker evidence resolves it
 //   cancel   -> one cancel write for a pending order of an accepted open intent
+//   attestExternalClosure -> O22 Plan B: the operator's attestation that a FILLED open's position was closed outside NEXUS, on
+//               complete stored evidence only (external-closure.ts). A separate log; no broker request, no state change.
 //
 // Every step is appended to four append-only logs. A state is entered at most once per intent (record id intentId:STATE). The
 // SUBMITTING append is the reservation step: its precondition runs inside the intent log's storage-backed critical section, after
@@ -52,6 +54,20 @@ import {
   type IntentActor,
   type IntentState,
 } from './execution-intent.js';
+import type { EtoroSnapshotHistory } from '../etoro-broker-service.js';
+import { NO_ACCESS_VERIFIER, accessRefusal, type AccessStamp, type AccessVerifier } from '../etoro-access-fingerprint.js';
+import {
+  EXTERNAL_CLOSURE_SCHEMA,
+  ExternalClosureClaimError,
+  externalClosureEffective,
+  externalClosureId,
+  externalClosureOpenRefusals,
+  externalClosureRefusals,
+  parseExternalClosureClaim,
+  type ExternalClosureClaim,
+  type ExternalClosureFacts,
+  type ExternalClosureRecord,
+} from './external-closure.js';
 
 /** A SUBMITTING intent without a recorded answer this long after the write (a crash) is AMBIGUOUS. */
 export const SUBMITTING_STALE_AFTER_MS = 30_000;
@@ -93,6 +109,11 @@ export interface AttemptRecord {
   readonly httpStatus?: number | null;
   readonly code?: string;
   readonly reasons?: readonly string[];
+  /**
+   * O22 Plan B review R3: the fingerprint of the configured broker access a started write attempt was sent with
+   * (etoro-access-fingerprint.ts). Absent on every attempt made before it existed (O22) or by a process without an access key.
+   */
+  readonly access?: AccessStamp;
 }
 
 export interface ConfirmationRecord {
@@ -171,6 +192,15 @@ export interface DemoExecutionServiceDeps {
    * is refused (fail-closed).
    */
   positions?: DemoPositionSource;
+  /** O22 Plan B: the operator attestations of positions closed outside NEXUS. Absent: none can be recorded and none exists. */
+  externalClosures?: AppendOnlyLog<ExternalClosureRecord>;
+  /** O22 Plan B: the stored history of successful read-only syncs, read with every process's records (no broker request). */
+  snapshotHistory?: { history(): Promise<EtoroSnapshotHistory> };
+  /**
+   * O22 Plan B review R3: the configured broker access fingerprint. Write attempts are stamped with it; every open and close needs
+   * the stored broker data it relies on to match it. Absent: nothing matches, every open and close is refused (fail closed).
+   */
+  access?: AccessVerifier;
   executionEnabled: boolean;
   clock: () => Date;
   policy?: DemoExecutionPolicy;
@@ -196,6 +226,22 @@ export interface IntentView {
   gateReasons: readonly string[];
   /** confirmationId: the stored broker confirmation a broker-confirmed state rests on (present only for those states). */
   history: { state: IntentState; at: string; reason: string; confirmationId?: string }[];
+  /**
+   * O22 Plan B: the operator's attestation that this open's position was closed outside NEXUS, or null. It ends the position's
+   * liveness for NEXUS only; the intent stays in its state and no close, fill or booking is implied.
+   */
+  externalClosure: ExternalClosureView | null;
+}
+
+export interface ExternalClosureView {
+  readonly closureId: string;
+  readonly positionId: number;
+  readonly snapshotId: string;
+  readonly snapshotObservedAt: string;
+  readonly attestedBy: IntentActor;
+  readonly attestedAt: string;
+  /** R1: false while a NEXUS close of the position may have been sent (or was filled): the attestation then has no effect. */
+  readonly effective: boolean;
 }
 
 /** O22 F6: one order status read of an intent, exactly as recorded. */
@@ -412,6 +458,12 @@ export class EtoroDemoExecutionService {
     // taken, never inside it: the precondition below runs synchronously in that lock and takes no other lock, so no lock order
     // between logs (and no deadlock) can arise. A snapshot stored after this read is not seen (see O22_CLOSE_POSITION_EVIDENCE.md).
     const reservationEvidence = p.intent.action === 'close' ? await this.closeEvidence(p.intent) : null;
+    // O22 Plan B: likewise for an open: the newest stored snapshot must not show an attested position, and (review R3) the stored data
+    // the write relies on must have been read with the configured broker access.
+    await this.deps.externalClosures?.sync();
+    const reservationRead = p.intent.action === 'open' ? await this.readPositions() : null;
+    const reservationExternal = this.externalClosureInput(p.intent, reservationRead);
+    const reservationAccess = this.accessRefusals(p.intent, p.intent.action === 'close' ? reservationEvidence?.snapshot ?? null : reservationRead?.snapshot ?? null);
     // The reservation step and the at-most-once guard. SUBMITTING is entered once, only from APPROVED, and only if the book limits
     // still hold for the book as it is inside the critical section, after every other process's records were applied.
     let submitting;
@@ -425,6 +477,8 @@ export class EtoroDemoExecutionService {
           const refusals = bookRefusals(p.intent, this.book(p.intent), p.intent.action === 'open' ? exposure : null, this.policy);
           // O22 D4 (R2): the re-read evidence, judged at this moment (age), with the binding from the caught-up intent log.
           if (reservationEvidence !== null) refusals.push(...closePositionRefusals(p.intent, { ...reservationEvidence, ...this.bindingOf(p.intent) }, this.now(), this.policy));
+          if (reservationExternal !== undefined) refusals.push(...externalClosureOpenRefusals(reservationExternal.attestedPositionIds, reservationExternal.read, this.now(), this.policy.maxBrokerSyncAgeMs));
+          refusals.push(...reservationAccess);
           if (refusals.length > 0) throw new DemoExecutionError('GATE_REFUSED', refusals.join(','), refusals);
         },
       }));
@@ -433,7 +487,19 @@ export class EtoroDemoExecutionService {
       throw error;
     }
     if (submitting.status !== 'APPLIED') throw new DemoExecutionError('INTENT_STATE_INVALID', 'SUBMITTING');
-    await this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation, phase: 'started', requestId, at: this.now(), by: operator });
+    await this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation, phase: 'started', requestId, at: this.now(), by: operator, ...this.accessStamp() });
+
+    // O22 Plan B review R1: a close reads the attestation log again AFTER its reservation is recorded and before the write. An
+    // attestation of its position that committed in the meantime stops it: not sent (REJECTED), the budget stays spent. Together with
+    // the read-time rule (an attestation has no effect while a close may have been sent), one of the two always sees the other.
+    if (p.intent.action === 'close' && this.deps.externalClosures !== undefined) {
+      await this.deps.externalClosures.sync();
+      if (this.externalClosureRecords().some((r) => r.openIntentId === p.intent.closesIntentId && r.positionId === p.intent.positionId)) {
+        await this.finishAttempt(attemptId, intentId, operation, requestId, { outcome: 'not_sent', httpStatus: null, code: 'EXTERNAL_CLOSURE_ATTESTED' });
+        await this.transition(intentId, 'REJECTED', 'NOT_SENT_EXTERNAL_CLOSURE_ATTESTED', { attemptId });
+        throw new DemoExecutionError('GATE_REFUSED', 'EXTERNAL_CLOSURE_ATTESTED', ['EXTERNAL_CLOSURE_ATTESTED']);
+      }
+    }
 
     let outcome: WriteOutcome<{ brokerOrderId?: number; closeOrderId?: number; statusId?: number }>;
     try {
@@ -683,7 +749,7 @@ export class EtoroDemoExecutionService {
     const requestId = this.nextRequestId().toLowerCase();
     const attemptId = 'eatt_' + hashOf({ intentId, operation: 'demo.order.cancel', n: earlier.length }).slice(0, 40);
     // The started record id is fixed per attempt number, and the precondition re-checks inside the critical section.
-    const started = await guarded(() => this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation: 'demo.order.cancel', phase: 'started', requestId, at: this.now(), by: operator }, {
+    const started = await guarded(() => this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation: 'demo.order.cancel', phase: 'started', requestId, at: this.now(), by: operator, ...this.accessStamp() }, {
       precondition: () => {
         const current = this.cancelAttempts(intentId);
         if (current.length !== earlier.length || current.some((outcome) => outcome !== 'rejected')) throw new DemoExecutionError('INTENT_STATE_INVALID', 'a cancel is in progress');
@@ -702,6 +768,180 @@ export class EtoroDemoExecutionService {
       await this.finishAttempt(attemptId, intentId, 'demo.order.cancel', requestId, { outcome: 'ambiguous', httpStatus: outcome.httpStatus, code: outcome.reason });
     }
     return this.get(intentId);
+  }
+
+  // ------------------------------------------------------------------------------------------------- external closure
+
+  /**
+   * O22 Plan B: records an authenticated human operator's attestation that the position of a FILLED open was closed outside NEXUS.
+   * Only on complete stored evidence (externalClosureRefusals): a checked status read bound the order to exactly one position, the
+   * newest stored complete snapshot, observed after that, no longer shows it, and no NEXUS close of it is filled or unresolved.
+   * Anything missing or contradicting refuses (EXTERNAL_CLOSURE_REFUSED) and records nothing. No broker request; the intent keeps its
+   * state; no confirmation, booking or budget change. One attestation per position: the record id is fixed, and the rule runs again
+   * inside the attestation log's lock after catching up with every process.
+   */
+  async attestExternalClosure(openIntentId: string, claimInput: unknown, by: IntentActor): Promise<ExternalClosureRecord> {
+    const operator = this.requireHumanOperator(by);
+    let claim: ExternalClosureClaim;
+    try {
+      claim = parseExternalClosureClaim(claimInput);
+    } catch (error) {
+      if (error instanceof ExternalClosureClaimError) throw new DemoExecutionError('EXTERNAL_CLOSURE_REFUSED', 'claim', ['CLAIM_INVALID']);
+      throw error;
+    }
+    const log = this.deps.externalClosures;
+    const source = this.deps.snapshotHistory;
+    if (log === undefined || source === undefined) throw new DemoExecutionError('EXTERNAL_CLOSURE_NOT_AVAILABLE');
+    if (!isIntentId(openIntentId)) throw new DemoExecutionError('INTENT_NOT_FOUND');
+    // The snapshot history first (it catches up with the sync and snapshot logs), the execution logs after it: every intent state
+    // read is at least as recent as the newest snapshot the rule judges.
+    const history = await source.history();
+    await this.syncAll();
+    const planned = externalClosureRefusals(claim, this.externalClosureFacts(openIntentId, history));
+    if (planned.evidence === null) throw new DemoExecutionError('EXTERNAL_CLOSURE_REFUSED', planned.reasons.join(','), planned.reasons);
+    const e = planned.evidence;
+    const record: ExternalClosureRecord = {
+      schema: EXTERNAL_CLOSURE_SCHEMA,
+      closureId: externalClosureId(openIntentId, e.positionId),
+      openIntentId,
+      positionId: e.positionId,
+      etoroInstrumentId: e.etoroInstrumentId,
+      direction: e.direction,
+      brokerOrderId: e.brokerOrderId,
+      bindingConfirmationId: e.bindingConfirmationId,
+      boundAt: e.boundAt,
+      snapshotId: e.snapshot.snapshotId,
+      snapshotObservedAt: e.snapshot.observedAt,
+      snapshotSyncSequence: e.snapshot.sequence,
+      snapshotPositionCount: e.snapshot.content.positionCount,
+      continuitySnapshotId: e.continuity.snapshotId,
+      continuitySnapshotObservedAt: e.continuity.observedAt,
+      accountIdentity: 'not_verified',
+      accessContinuity: 'same_configured_credentials',
+      access: e.access,
+      accountStatement: claim.accountStatement,
+      evidenceHeads: {
+        intents: { size: this.deps.intents.size, headHash: this.deps.intents.headHash },
+        confirmations: { size: this.deps.confirmations.size, headHash: this.deps.confirmations.headHash },
+        observations: history.observations.length,
+      },
+      statement: claim.statement,
+      attestedBy: operator,
+      attestedAt: this.now(),
+      effect: 'liveness_ended',
+    };
+    try {
+      const result = await log.append(record.closureId, record, {
+        // Inside the attestation log's lock, after catching up with it: no other attestation of the open, and the same evidence.
+        precondition: () => {
+          const again = externalClosureRefusals(claim, this.externalClosureFacts(openIntentId, history));
+          if (again.evidence === null) throw new DemoExecutionError('EXTERNAL_CLOSURE_REFUSED', again.reasons.join(','), again.reasons);
+        },
+      });
+      if (result.status !== 'APPLIED') throw new DemoExecutionError('EXTERNAL_CLOSURE_REFUSED', 'ALREADY_ATTESTED', ['ALREADY_ATTESTED']);
+      return result.record.payload;
+    } catch (error) {
+      if (error instanceof AppendOnlyLogError && error.code === 'idempotency_conflict') throw new DemoExecutionError('EXTERNAL_CLOSURE_REFUSED', 'ALREADY_ATTESTED', ['ALREADY_ATTESTED']);
+      throw error;
+    }
+  }
+
+  /** The stored facts the external closure rule reads, from this process's caught-up logs. */
+  private externalClosureFacts(openIntentId: string, history: EtoroSnapshotHistory): ExternalClosureFacts {
+    const projections = this.projections();
+    const p = projections.get(openIntentId);
+    const bound = p === undefined ? [] : this.brokerConfirmedPositions(openIntentId);
+    return {
+      open: p === undefined ? null : {
+        intentId: openIntentId,
+        action: p.intent.action,
+        state: p.state,
+        etoroInstrumentId: p.intent.etoroInstrumentId,
+        side: p.intent.side,
+        brokerOrderId: p.brokerOrderId,
+        events: p.events.map((e) => ({ state: e.state, at: e.at, ...(e.confirmationId !== undefined ? { confirmationId: e.confirmationId } : {}) })),
+      },
+      confirmations: this.deps.confirmations.all().map((r) => r.payload).filter((c) => c.intentId === openIntentId),
+      closes: [...projections.values()]
+        .filter((c) => c.intent.action === 'close' && (c.intent.closesIntentId === openIntentId || (c.intent.positionId !== null && bound.includes(c.intent.positionId))))
+        .map((c) => ({ state: c.state })),
+      existing: this.externalClosureRecords().filter((r) => r.openIntentId === openIntentId || bound.includes(r.positionId)),
+      history,
+      openAccess: this.openAttemptAccess(openIntentId),
+      checkAccess: (stamp) => this.access.check(stamp),
+    };
+  }
+
+  private externalClosureRecords(): ExternalClosureRecord[] {
+    return this.deps.externalClosures === undefined ? [] : this.deps.externalClosures.all().map((r) => r.payload);
+  }
+
+  /** R1: whether an attestation takes effect now: no NEXUS close of its position may have been sent (externalClosureEffective). */
+  private attestationEffective(record: ExternalClosureRecord): boolean {
+    const closes = [...this.projections().values()].filter((p) => p.intent.action === 'close').map((p) => ({ closesIntentId: p.intent.closesIntentId, positionId: p.intent.positionId, state: p.state }));
+    return externalClosureEffective(record, closes);
+  }
+
+  /** The positions attested as closed outside NEXUS, per open intent: only attestations that take effect (R1). */
+  private attestedPositions(): Map<string, Set<number>> {
+    const map = new Map<string, Set<number>>();
+    for (const r of this.externalClosureRecords().filter((c) => this.attestationEffective(c))) {
+      const set = map.get(r.openIntentId) ?? new Set<number>();
+      set.add(r.positionId);
+      map.set(r.openIntentId, set);
+    }
+    return map;
+  }
+
+  /** O22 Plan B: what an open is checked against once an attestation exists (the newest stored snapshot; no broker request). */
+  private externalClosureInput(intent: ExecutionIntent, read: Awaited<ReturnType<DemoPositionSource['latest']>> | null): { attestedPositionIds: number[]; read: Awaited<ReturnType<DemoPositionSource['latest']>> | null } | undefined {
+    if (intent.action !== 'open') return undefined;
+    const attestedPositionIds = this.externalClosureRecords().map((r) => r.positionId);
+    if (attestedPositionIds.length === 0) return undefined;
+    return { attestedPositionIds, read: this.deps.positions === undefined ? null : read };
+  }
+
+  /** The newest stored snapshot (no broker request); none without a position source. */
+  private async readPositions(): Promise<Awaited<ReturnType<DemoPositionSource['latest']>>> {
+    return this.deps.positions === undefined ? { snapshot: null, problem: null } : this.deps.positions.latest();
+  }
+
+  // ------------------------------------------------------------------------------------------------ broker access (review R3)
+
+  private get access(): AccessVerifier {
+    return this.deps.access ?? NO_ACCESS_VERIFIER;
+  }
+
+  /** The stamp of a write attempt, when this process has an access key. */
+  private accessStamp(): { access: AccessStamp } | Record<string, never> {
+    return this.deps.access === undefined ? {} : { access: this.deps.access.stamp() };
+  }
+
+  /** The stamp of the open's write attempt (the one that sent the open), or null. */
+  private openAttemptAccess(openIntentId: string | null): AccessStamp | null {
+    if (openIntentId === null) return null;
+    const started = this.deps.attempts.all().map((r) => r.payload).filter((a) => a.intentId === openIntentId && a.operation === 'demo.order.open' && a.phase === 'started');
+    return started.length === 1 ? started[0]!.access ?? null : null;
+  }
+
+  /**
+   * O22 Plan B review R3: an open or a close may rely only on stored broker data read with the configured broker access: the newest
+   * stored snapshot (for an open), the close's evidence snapshot and the write attempt of the open it closes (for a close). Fixed
+   * reason codes; no value. A missing stamp (every O22 record), another configuration, a rotated-out key or no configured key refuse.
+   */
+  private accessRefusals(intent: ExecutionIntent, snapshot: { access?: unknown } | null): string[] {
+    const reasons: string[] = [];
+    const push = (prefix: string, stamp: unknown) => {
+      const refusal = accessRefusal(prefix, this.access.check(stamp));
+      if (refusal !== null) reasons.push(refusal);
+    };
+    if (intent.action === 'open') {
+      push('BROKER_SNAPSHOT', snapshot?.access ?? null);
+    } else {
+      push('CLOSE_POSITION_EVIDENCE', snapshot?.access ?? null);
+      push('CLOSE_TARGET_OPEN', this.openAttemptAccess(intent.closesIntentId));
+    }
+    return reasons;
   }
 
   // -------------------------------------------------------------------------------------------------------- internals
@@ -790,7 +1030,10 @@ export class EtoroDemoExecutionService {
   }
 
   private async syncAll(): Promise<void> {
-    await Promise.all([this.deps.intents.sync(), this.deps.attempts.sync(), this.deps.confirmations.sync(), this.deps.reconciliations.sync()]);
+    await Promise.all([
+      this.deps.intents.sync(), this.deps.attempts.sync(), this.deps.confirmations.sync(), this.deps.reconciliations.sync(),
+      ...(this.deps.externalClosures !== undefined ? [this.deps.externalClosures.sync()] : []),
+    ]);
   }
 
   /** Folds the intent log into one projection per intent. The log is the only source of state. */
@@ -852,7 +1095,13 @@ export class EtoroDemoExecutionService {
       statusReads: this.statusReadsOf(p.intent.intentId),
       gateReasons: p.gateReasons,
       history: p.events.map((e) => ({ state: e.state, at: e.at, reason: e.reason, ...(e.confirmationId !== undefined ? { confirmationId: e.confirmationId } : {}) })),
+      externalClosure: this.externalClosureOf(p.intent.intentId),
     };
+  }
+
+  private externalClosureOf(intentId: string): ExternalClosureView | null {
+    const r = this.externalClosureRecords().find((c) => c.openIntentId === intentId);
+    return r === undefined ? null : Object.freeze({ closureId: r.closureId, positionId: r.positionId, snapshotId: r.snapshotId, snapshotObservedAt: r.snapshotObservedAt, attestedBy: r.attestedBy, attestedAt: r.attestedAt, effective: this.attestationEffective(r) });
   }
 
   /** O22 F6: the order status reads of an intent, in log order, unmerged. */
@@ -947,7 +1196,10 @@ export class EtoroDemoExecutionService {
     const all = [...this.projections().values()].filter((p) => p.intent.intentId !== intent.intentId);
     const closedPositions = new Set<number>();
     for (const p of all) if (p.intent.action === 'close' && p.state === 'FILLED' && p.intent.positionId !== null) closedPositions.add(p.intent.positionId);
-    const liveOpens = all.filter((p) => p.intent.action === 'open' && LIVE_AT_BROKER_STATES.has(p.state) && !(p.positionIds.length > 0 && p.positionIds.every((id) => closedPositions.has(id))));
+    // O22 Plan B: a position attested as closed outside NEXUS no longer counts as live (only for the open it was attested for).
+    const attested = this.attestedPositions();
+    const settled = (p: Projection, id: number) => closedPositions.has(id) || (attested.get(p.intent.intentId)?.has(id) ?? false);
+    const liveOpens = all.filter((p) => p.intent.action === 'open' && LIVE_AT_BROKER_STATES.has(p.state) && !(p.positionIds.length > 0 && p.positionIds.every((id) => settled(p, id))));
     let gross = Decimal.from(0);
     for (const p of liveOpens) gross = gross.plus(p.exposureUsd);
     let closeTargetKnown = false;
@@ -957,7 +1209,7 @@ export class EtoroDemoExecutionService {
       closeTargetKnown =
         target !== undefined && target.intent.action === 'open' && (target.state === 'FILLED' || target.state === 'PARTIALLY_FILLED') &&
         this.brokerConfirmedPositions(target.intent.intentId).includes(intent.positionId) && target.intent.instrumentId === intent.instrumentId && target.intent.etoroInstrumentId === intent.etoroInstrumentId &&
-        target.intent.side === intent.side && !closedPositions.has(intent.positionId);
+        target.intent.side === intent.side && !settled(target, intent.positionId);
       // Any other close of this position that is not finished (or that filled) counts, from CREATED on.
       closeTargetAlreadyClosing = all.some((p) => p.intent.action === 'close' && p.intent.positionId === intent.positionId && (!TERMINAL.has(p.state) || p.state === 'FILLED'));
     }
@@ -1000,6 +1252,9 @@ export class EtoroDemoExecutionService {
     const instrument = this.deps.registry.get(intent.instrumentId) ?? null;
     const mapping = instrument === null ? null : this.deps.registry.mappingAt(intent.instrumentId, ETORO_MAPPING_PROVIDER, now);
     const closeEvidence = intent.action === 'close' ? await this.closeEvidence(intent) : null;
+    const openRead = intent.action === 'open' ? await this.readPositions() : null;
+    const externalClosures = this.externalClosureInput(intent, openRead);
+    const accessRefusals = this.accessRefusals(intent, closeEvidence !== null ? closeEvidence.snapshot : openRead?.snapshot ?? null);
     const verdict = evaluateDemoExecutionGate({
       phase,
       intent,
@@ -1016,6 +1271,8 @@ export class EtoroDemoExecutionService {
       broker: this.deps.brokerStatus(),
       writeSlotAvailable: this.deps.adapter.pacer.available(Date.parse(now)),
       closePosition: closeEvidence,
+      ...(externalClosures !== undefined ? { externalClosures } : {}),
+      accessRefusals,
     });
     let exposure = Decimal.from(0);
     if (intent.action === 'open' && quote !== null && quote.last.isPositive()) {

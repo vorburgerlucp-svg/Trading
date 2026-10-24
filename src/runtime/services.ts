@@ -172,6 +172,8 @@ export class RuntimeServiceImpl implements RuntimeServices {
         execute: (intentId: string, operator: OperatorIdentity) => execution.execute(intentId, { kind: operator.kind, id: operator.id }),
         refresh: (intentId: string) => execution.refresh(intentId),
         cancel: (intentId: string, operator: OperatorIdentity) => execution.cancel(intentId, { kind: operator.kind, id: operator.id }),
+        // O22 Plan B: the attestation is made by the operator the server authenticated, never by a name in the body.
+        closedExternally: (intentId: string, claim: unknown, operator: OperatorIdentity) => execution.attestExternalClosure(intentId, claim, { kind: operator.kind, id: operator.id }),
       });
     }
   }

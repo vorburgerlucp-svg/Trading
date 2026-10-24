@@ -17,7 +17,9 @@ export type DemoExecutionErrorCode =
   | 'BROKER_RESPONSE_INVALID'
   | 'BROKER_NOT_CONNECTED'
   | 'EXECUTION_AMBIGUOUS'
-  | 'RECONCILIATION_PENDING';
+  | 'RECONCILIATION_PENDING'
+  | 'EXTERNAL_CLOSURE_REFUSED'
+  | 'EXTERNAL_CLOSURE_NOT_AVAILABLE';
 
 const FIXED_MESSAGE: Readonly<Record<DemoExecutionErrorCode, string>> = Object.freeze({
   EXECUTION_DISABLED: 'eToro demo execution is not enabled for this process',
@@ -36,6 +38,8 @@ const FIXED_MESSAGE: Readonly<Record<DemoExecutionErrorCode, string>> = Object.f
   BROKER_NOT_CONNECTED: 'the broker is not reachable',
   EXECUTION_AMBIGUOUS: 'the outcome at the broker is unknown: the intent is AMBIGUOUS and is never resent; reconcile it first',
   RECONCILIATION_PENDING: 'the broker state does not yet decide the outcome: reconcile again later',
+  EXTERNAL_CLOSURE_REFUSED: 'the evidence does not prove that the position was closed outside NEXUS: nothing was recorded',
+  EXTERNAL_CLOSURE_NOT_AVAILABLE: 'external closure attestations are not available in this process: nothing was recorded',
 });
 
 export class DemoExecutionError extends Error {
@@ -43,7 +47,7 @@ export class DemoExecutionError extends Error {
   constructor(
     readonly code: DemoExecutionErrorCode,
     detail?: string,
-    /** Gate reason codes (fixed strings of this code base), when code is GATE_REFUSED. */
+    /** Fixed reason codes of this code base: the gate's (GATE_REFUSED) or the evidence check's (EXTERNAL_CLOSURE_REFUSED). */
     readonly reasons: readonly string[] = [],
   ) {
     super(code + ': ' + FIXED_MESSAGE[code] + (detail ? ' (' + detail + ')' : ''));

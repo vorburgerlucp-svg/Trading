@@ -59,6 +59,7 @@ export function storedPositionSource(etoro: Pick<EtoroBrokerService, 'latestStor
             direction: p.direction,
             openOrderId: p.openOrder?.orderId ?? null,
           })),
+          access: snapshot.access ?? null,
         },
         problem: null,
       };

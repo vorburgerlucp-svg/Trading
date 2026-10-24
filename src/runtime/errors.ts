@@ -40,6 +40,8 @@ export type RuntimeErrorCode =
   | 'BROKER_REJECTED'
   | 'EXECUTION_AMBIGUOUS'
   | 'RECONCILIATION_PENDING'
+  | 'EXTERNAL_CLOSURE_REFUSED'
+  | 'EXTERNAL_CLOSURE_NOT_AVAILABLE'
   | 'OPERATOR_AUTH_REQUIRED'
   | 'OPERATOR_AUTH_NOT_CONFIGURED'
   | 'ORIGIN_REFUSED'
@@ -77,6 +79,8 @@ const FIXED_MESSAGE: Readonly<Record<RuntimeErrorCode, string>> = Object.freeze(
   BROKER_REJECTED: 'the broker rejected the request',
   EXECUTION_AMBIGUOUS: 'the outcome at the broker is unknown: the intent is never resent; reconcile it first',
   RECONCILIATION_PENDING: 'the broker state does not yet decide the outcome: refresh again later',
+  EXTERNAL_CLOSURE_REFUSED: 'the evidence does not prove that the position was closed outside NEXUS: nothing was recorded',
+  EXTERNAL_CLOSURE_NOT_AVAILABLE: 'external closure attestations are not available in this process: nothing was recorded',
   OPERATOR_AUTH_REQUIRED: 'operator authentication is required for this route',
   OPERATOR_AUTH_NOT_CONFIGURED: 'operator authentication is not configured: demo execution routes that change state are refused',
   ORIGIN_REFUSED: 'requests from this origin are refused',
@@ -115,6 +119,8 @@ const STATUS: Readonly<Record<RuntimeErrorCode, number>> = Object.freeze({
   BROKER_REJECTED: 502,
   EXECUTION_AMBIGUOUS: 502,
   RECONCILIATION_PENDING: 409,
+  EXTERNAL_CLOSURE_REFUSED: 409,
+  EXTERNAL_CLOSURE_NOT_AVAILABLE: 403,
   OPERATOR_AUTH_REQUIRED: 401,
   OPERATOR_AUTH_NOT_CONFIGURED: 403,
   ORIGIN_REFUSED: 403,
@@ -149,7 +155,7 @@ export function toRuntimeApiError(error: unknown): RuntimeApiError {
   if (error instanceof DemoExecutionError) {
     // Broker failures keep the existing broker codes; the rest map one to one. Only fixed reason codes are passed on: the gate's,
     // and (O22) the code of a refused broker answer, which names the failed field or check and never a value of the answer.
-    const passes = error.code === 'GATE_REFUSED' || error.code === 'BROKER_RESPONSE_INVALID';
+    const passes = error.code === 'GATE_REFUSED' || error.code === 'BROKER_RESPONSE_INVALID' || error.code === 'EXTERNAL_CLOSURE_REFUSED';
     return new RuntimeApiError(error.code, passes ? error.reasons.filter((r) => GATE_REASON.test(r)) : []);
   }
   if (error instanceof MarketDataError) {

@@ -16,6 +16,8 @@ import type { EtoroReconciliationRecord, EtoroSnapshotRecord, EtoroSyncRecord } 
 import { HttpsEtoroTransport, type EtoroCredentials, type EtoroTransport } from '../broker/etoro/etoro-transport.js';
 import { HttpsDemoExecutionTransport, type DemoExecutionTransport } from '../broker/etoro/execution/etoro-demo-execution-transport.js';
 import type { AttemptRecord, ConfirmationRecord, IntentEvent, ReconciliationRecord } from '../broker/etoro/execution/etoro-demo-execution-service.js';
+import type { ExternalClosureRecord } from '../broker/etoro/execution/external-closure.js';
+import { BrokerAccessFingerprint } from '../broker/etoro/etoro-access-fingerprint.js';
 import type { DemoAccountValuationRecord } from '../broker/etoro/execution/demo-account-safety.js';
 import { createRuntimeHandler } from './app.js';
 import { OperatorAuthenticator } from './operator-auth.js';
@@ -67,6 +69,11 @@ export async function startRuntime(env: Environment, options: StartOptions = {})
     const summary = summarizeRuntimeConfig(config);
     const etoro = config.etoro.enabled ? await openEtoro(pool, config, options) : undefined;
     const etoroDemoExecution = config.etoroDemoExecution.enabled ? await openEtoroDemoExecution(pool, config, options) : undefined;
+    // O22 Plan B review R3: the access fingerprint of the configured eToro credentials, under the separately managed NEXUS key. The same
+    // credentials (etoroCredentials) are passed to the read-only and the execution transport, so one fingerprint covers both.
+    const brokerAccess = config.etoro.enabled && config.brokerAccess.current !== null
+      ? new BrokerAccessFingerprint({ broker: 'etoro', environment: 'demo', credentials: etoroCredentials(config), current: config.brokerAccess.current, previous: config.brokerAccess.previous })
+      : null;
     const services = await composeRuntime({
       instruments: stores.instruments,
       marketData: stores.marketData,
@@ -79,6 +86,7 @@ export async function startRuntime(env: Environment, options: StartOptions = {})
       ...(options.clock ? { clock: options.clock } : {}),
       ...(etoro ? { etoro } : {}),
       ...(etoroDemoExecution ? { etoroDemoExecution } : {}),
+      ...(brokerAccess !== null ? { brokerAccess } : {}),
     });
     // Operator authentication of the O21 control plane: from the configuration only. Without it, mutating demo routes are refused.
     const operatorAuth = config.operator !== null ? new OperatorAuthenticator(config.operator) : null;
@@ -169,6 +177,8 @@ async function openEtoroDemoExecution(pool: PgPool, config: RuntimeConfig, optio
     reconciliations: await AppendOnlyLog.open<ReconciliationRecord>('etoro-demo-execution-reconciliations', await PostgresAppendOnlyStore.open<ReconciliationRecord>(pool, 'etoro-demo-execution-reconciliations'), { clock }),
     // O22: the risk day of the demo account safety source (equity valuations only; no account or position id).
     accountValuations: await AppendOnlyLog.open<DemoAccountValuationRecord>('etoro-demo-account-valuations', await PostgresAppendOnlyStore.open<DemoAccountValuationRecord>(pool, 'etoro-demo-account-valuations'), { clock }),
+    // O22 Plan B: the operator attestations of positions closed outside NEXUS (append-only; no broker request).
+    externalClosures: await AppendOnlyLog.open<ExternalClosureRecord>('etoro-demo-external-closures', await PostgresAppendOnlyStore.open<ExternalClosureRecord>(pool, 'etoro-demo-external-closures'), { clock }),
   };
 }
 

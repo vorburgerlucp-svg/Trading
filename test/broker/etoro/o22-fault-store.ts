@@ -63,3 +63,97 @@ export function withFaults(base: O21Stores): FaultStores {
   const reconciliations = new FaultStore(base.reconciliations);
   return { stores: { intents, attempts: base.attempts, confirmations, reconciliations }, intents, confirmations, reconciliations };
 }
+
+/** O22 Plan B TEST ONLY: opens once `parties` writers have arrived; shared by the stores of several processes. */
+export class WriteBarrier {
+  private arrived = 0;
+  private release!: () => void;
+  readonly open = new Promise<void>((resolve) => {
+    this.release = resolve;
+  });
+
+  constructor(private readonly parties: number) {}
+
+  arrive(): Promise<void> {
+    this.arrived += 1;
+    if (this.arrived >= this.parties) this.release();
+    return this.open;
+  }
+}
+
+/**
+ * O22 Plan B TEST ONLY: holds every write until all parties of the barrier have arrived, then lets them go into the store's own
+ * critical section. Processes that all decided on the same stored state then race for the lock, so a test can prove that the check
+ * inside the lock, not the order of arrival, decides.
+ */
+export class BarrierStore<T> implements AppendOnlyStore<T> {
+  constructor(private readonly inner: AppendOnlyStore<T>, private readonly barrier: WriteBarrier) {}
+
+  loadAll(): Promise<readonly LogRecord<T>[]> {
+    return this.inner.loadAll();
+  }
+
+  loadAfter(sequence: number): Promise<readonly LogRecord<T>[]> {
+    return this.inner.loadAfter(sequence);
+  }
+
+  async writeExclusive<R>(knownSequence: number, decide: (newer: readonly LogRecord<T>[]) => WriteDecision<T, R>): Promise<R> {
+    await this.barrier.arrive();
+    return this.inner.writeExclusive(knownSequence, decide);
+  }
+}
+
+/**
+ * O22 Plan B TEST ONLY: holds one process at a chosen point of its writes until the test releases it. "before": the next write waits
+ * before it enters the store's critical section (the process has already decided). "after": a write whose record matches waits after
+ * it committed (the record is visible to every process; the writer has not taken its next step yet). Holds once.
+ */
+export class HoldStore<T> implements AppendOnlyStore<T> {
+  private armed: { point: CrashPoint; match: (payload: T) => boolean } | null = null;
+  private releaseGate!: () => void;
+  private reachedGate!: () => void;
+  private gate: Promise<void> = Promise.resolve();
+  /** Resolves when the held write has arrived at its hold point. */
+  reached: Promise<void> = Promise.resolve();
+
+  constructor(private readonly inner: AppendOnlyStore<T>) {}
+
+  hold(point: CrashPoint, match: (payload: T) => boolean = () => true): void {
+    this.armed = { point, match };
+    this.gate = new Promise<void>((resolve) => (this.releaseGate = resolve));
+    this.reached = new Promise<void>((resolve) => (this.reachedGate = resolve));
+  }
+
+  release(): void {
+    this.releaseGate();
+  }
+
+  loadAll(): Promise<readonly LogRecord<T>[]> {
+    return this.inner.loadAll();
+  }
+
+  loadAfter(sequence: number): Promise<readonly LogRecord<T>[]> {
+    return this.inner.loadAfter(sequence);
+  }
+
+  async writeExclusive<R>(knownSequence: number, decide: (newer: readonly LogRecord<T>[]) => WriteDecision<T, R>): Promise<R> {
+    const armed = this.armed;
+    if (armed !== null && armed.point === 'before') {
+      this.armed = null;
+      this.reachedGate();
+      await this.gate;
+    }
+    let matched = false;
+    const result = await this.inner.writeExclusive<R>(knownSequence, (newer) => {
+      const decision = decide(newer);
+      if (armed !== null && armed.point === 'after' && decision.kind === 'append' && armed.match(decision.record.payload)) matched = true;
+      return decision;
+    });
+    if (matched) {
+      this.armed = null;
+      this.reachedGate();
+      await this.gate;
+    }
+    return result;
+  }
+}

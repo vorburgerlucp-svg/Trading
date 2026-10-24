@@ -10,6 +10,7 @@ import { Decimal } from '../../../money/decimal.js';
 import type { Instrument, ProviderInstrumentMapping } from '../../../market-data/market-data-types.js';
 import type { KillSwitchState } from '../../../safety/portfolio-safety-envelope.js';
 import type { ExecutionIntent, IntentOrderType, IntentSide } from './execution-intent.js';
+import { externalClosureOpenRefusals } from './external-closure.js';
 
 export const DEMO_EXECUTION_POLICY_VERSION = 'etoro-demo-execution-policy:v1' as const;
 /** O22: the policy of the one controlled demo trading cycle (one market buy, one close, then nothing). v2: long-only, market-only. */
@@ -144,6 +145,17 @@ export interface GateInput {
   readonly writeSlotAvailable: boolean;
   /** O22 D4: for a close, the broker's evidence that its position is still open (see closePositionRefusals). Missing = refused. */
   readonly closePosition?: ClosePositionEvidence | null;
+  /**
+   * O22 Plan B: for an open, the positions an operator attested as closed outside NEXUS, and the newest stored snapshot to check that
+   * none of them is shown again. Absent: no attestation exists.
+   */
+  readonly externalClosures?: { readonly attestedPositionIds: readonly number[]; readonly read: { snapshot: ClosePositionSnapshot | null; problem: ClosePositionEvidenceProblem | null } | null };
+  /**
+   * O22 Plan B review R3: the refusals of the broker access continuity check (etoro-access-fingerprint.ts), computed by the service:
+   * the stored snapshot an open or a close relies on, and for a close the open's write attempt, must have been made with the
+   * configured broker access. Absent: the check did not run, which refuses (fail closed).
+   */
+  readonly accessRefusals?: readonly string[];
 }
 
 /** One position of a stored broker portfolio snapshot, as far as a close needs it. */
@@ -167,13 +179,16 @@ export interface ClosePositionSnapshot {
   /** The number of positions the broker stated; the listed positions must be exactly that many (complete). */
   readonly positionCount: number;
   readonly positions: readonly EvidencePosition[];
+  /** O22 Plan B review R3: the access stamp of the sync that stored the snapshot (unchecked here; the service checks it). */
+  readonly access?: unknown;
 }
 
 /**
  * Why the store names no usable newest snapshot although it holds observations: the newest one's snapshot record cannot be read,
- * or two observations share the newest observedAt with different contents.
+ * two observations share the newest observedAt with different contents, or (O22 Plan B review R2) its content contradicts itself
+ * or its id (snapshotContentProblems).
  */
-export type ClosePositionEvidenceProblem = 'unreadable' | 'ambiguous';
+export type ClosePositionEvidenceProblem = 'unreadable' | 'ambiguous' | 'inconsistent';
 
 export interface ClosePositionEvidence {
   readonly snapshot: ClosePositionSnapshot | null;
@@ -195,6 +210,7 @@ export function closePositionRefusals(intent: ExecutionIntent, evidence: ClosePo
   if (intent.action !== 'close') return [];
   if (evidence?.problem === 'unreadable') return ['CLOSE_POSITION_EVIDENCE_UNREADABLE'];
   if (evidence?.problem === 'ambiguous') return ['CLOSE_POSITION_EVIDENCE_AMBIGUOUS'];
+  if (evidence?.problem === 'inconsistent') return ['CLOSE_POSITION_EVIDENCE_INCONSISTENT'];
   const snapshot = evidence?.snapshot ?? null;
   if (evidence === null || evidence === undefined || snapshot === null || intent.positionId === null) return ['CLOSE_POSITION_EVIDENCE_MISSING'];
   const reasons: string[] = [];
@@ -371,6 +387,15 @@ export function evaluateDemoExecutionGate(input: GateInput): GateVerdict {
   const closeRefusals = closePositionRefusals(intent, input.closePosition, now, policy);
   checks.closePositionAtBroker = opens ? 'not_applicable' : closeRefusals.length === 0 ? 'pass' : 'fail';
   reasons.push(...closeRefusals);
+  // O22 Plan B: no open while a position attested as closed outside NEXUS is shown again by the broker, or while that is not checkable.
+  const external = opens ? externalClosureOpenRefusals(input.externalClosures?.attestedPositionIds ?? [], input.externalClosures?.read ?? null, now, policy.maxBrokerSyncAgeMs) : [];
+  checks.externalClosures = !opens || (input.externalClosures?.attestedPositionIds.length ?? 0) === 0 ? 'not_applicable' : external.length === 0 ? 'pass' : 'fail';
+  reasons.push(...external);
+  // O22 Plan B review R3: the stored broker data the decision relies on was read with the configured broker access (and, for a close,
+  // the position was opened with it). Without the check's result: refused.
+  const access = input.accessRefusals ?? ['BROKER_ACCESS_NOT_CHECKED'];
+  checks.brokerAccess = access.length === 0 ? 'pass' : 'fail';
+  reasons.push(...access);
 
   return Object.freeze({ passed: reasons.length === 0, reasons: Object.freeze(reasons), checks: Object.freeze(checks), policyVersion: policy.version });
 }
