@@ -166,7 +166,7 @@ describe.skipIf(!pgAvailable)('O22 Plan C cycles, two processes on PostgreSQL' +
     expect(await b.service.cycleBudget('cycle-1')).toMatchObject({ openSubmissions: 0 });
   }, 60_000);
 
-  it('window 2: B closes the cycle after A read the cycle log and before A reserves: no order is sent, but the closed cycle\'s budget is spent (residual)', async () => {
+  it('window 2 (review R2): B closes the cycle after A read the cycle log and before A reserves: the reservation sees the close in its own critical section: nothing reserved, no budget spent', async () => {
     // A is held right before its SUBMITTING write enters the intent log's lock; its read of the cycle log for the reservation is done.
     let hold: HoldStore<IntentRecordPayload> | null = null;
     const db = await createTestDatabase();
@@ -186,18 +186,20 @@ describe.skipIf(!pgAvailable)('O22 Plan C cycles, two processes on PostgreSQL' +
     await hold!.reached;
     await b.service.closeCycle('cycle-1', HUMAN);
     hold!.release();
-    // No broker order: the re-read after the reservation stops the write.
+    // The reservation read the cycle log inside its own transaction (the guard): it saw CLOSING and refused. On e431079 (the copy read
+    // before) SUBMITTING was recorded here and the closed cycle's budget counted it; that residual is gone.
     await expect(execution).rejects.toMatchObject({ code: 'GATE_REFUSED', reasons: ['CYCLE_NOT_ACTIVE'] });
     expect(broker.requests).toHaveLength(0);
-    // But the reservation's check ran on A's copy of the cycle log, read before the close: SUBMITTING was recorded, and the closed
-    // cycle's budget counts it. Not atomic across the two logs; documented as a residual risk (docs/O22_PLAN_C_CYCLES.md).
-    expect((await b.service.get(id)).history.map((h) => h.state)).toEqual(['CREATED', 'RISK_APPROVED', 'APPROVED', 'SUBMITTING', 'REJECTED']);
-    expect(await b.service.cycleBudget('cycle-1')).toMatchObject({ openSubmissions: 1 });
-    // A new cycle is not affected: it has its own count, and the spent record stays as it is.
+    expect((await b.service.get(id)).history.map((h) => h.state)).toEqual(['CREATED', 'RISK_APPROVED', 'APPROVED']);
+    expect(await b.service.cycleBudget('cycle-1')).toMatchObject({ openSubmissions: 0 });
+    // A new cycle is not affected: it has its own count. (The refused intent is still APPROVED, a pending approval: it blocks the next
+    // activation until it is withdrawn or expired.)
     await b.service.defineCycle({ cycleId: 'cycle-2', policy: policyOf('two'), maxActiveMs: HOUR }, HUMAN);
+    await expect(b.service.activateCycle('cycle-2', authorize('two'), HUMAN)).rejects.toMatchObject({ reasons: ['PRIOR_INTENT_PENDING'] });
+    await b.service.withdraw(id);
     await b.service.activateCycle('cycle-2', authorize('two'), HUMAN);
     expect(await b.service.cycleBudget()).toMatchObject({ cycleId: 'cycle-2', openSubmissions: 0 });
-    expect(await b.service.cycleBudget('cycle-1')).toMatchObject({ openSubmissions: 1 });
+    expect(await b.service.cycleBudget('cycle-1')).toMatchObject({ openSubmissions: 0 });
   }, 60_000);
 
   it('A crashes right after its activation record committed: B sees the active cycle, and a second activation is refused', async () => {

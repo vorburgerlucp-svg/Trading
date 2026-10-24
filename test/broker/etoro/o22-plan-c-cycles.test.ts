@@ -343,6 +343,7 @@ describe('Plan C: the service with a cycle log', () => {
     // open): cycle 1 closed and cycle 2 active, written directly to the cycle log. So nothing before the cross-cycle rule refuses.
     const two = policyOf('two');
     const at = f.clock.now.toISOString();
+    await f.cycles!.append('cycle-1:closing', { schema: 'etoro-demo-cycle:v1', kind: 'closing', cycleId: 'cycle-1', closingBy: OPERATOR, closingAt: at });
     await f.cycles!.append('cycle-1:closed', { schema: 'etoro-demo-cycle:v1', kind: 'closed', cycleId: 'cycle-1', closedBy: OPERATOR, closedAt: at, verdict: 'not_evaluated', failures: [] });
     await f.cycles!.append('cycle-2:defined', { schema: 'etoro-demo-cycle:v1', kind: 'defined', cycleId: 'cycle-2', policy: two, policyHash: policyHashOf(two), maxActiveMs: HOUR, definedBy: OPERATOR, definedAt: at });
     await f.cycles!.append('cycle-2:activated', { schema: 'etoro-demo-cycle:v1', kind: 'activated', cycleId: 'cycle-2', policyHash: policyHashOf(two), statement: CYCLE_ACTIVATION_STATEMENT, activatedBy: OPERATOR, activatedAt: at, activeUntil: new Date(f.clock.now.getTime() + HOUR).toISOString(), checkedIntentLogSize: 0 });
@@ -356,12 +357,19 @@ describe('Plan C: the service with a cycle log', () => {
     expect(f.broker.writes).toHaveLength(1);
   });
 
-  it('closing records the cycle verdict; a second close or a second activation is refused', async () => {
+  it('closing records CLOSING, then CLOSED with the verdict; a second close records nothing more; a re-activation and a draft close are refused', async () => {
     const f = await withCycles();
     await defineAndActivate(f, 'cycle-1', policyOf('one'));
     const closed = await f.service.closeCycle('cycle-1', OPERATOR);
-    expect(closed).toMatchObject({ status: 'closed', verdict: 'not_evaluated' });
-    expect((await refusal(f.service.closeCycle('cycle-1', OPERATOR))).reasons).toEqual(['CYCLE_NOT_ACTIVE']);
+    expect(closed).toMatchObject({ status: 'closed', verdict: 'not_evaluated', inFlight: 0 });
+    expect(f.cycles!.all().map((r) => r.payload.kind)).toEqual(['defined', 'activated', 'closing', 'closed']);
+    // A second close of a closed cycle is idempotent: it reports the state and records nothing (a closing cycle is completed by a
+    // later call, so the call must be repeatable).
+    expect(await f.service.closeCycle('cycle-1', OPERATOR)).toMatchObject({ status: 'closed', inFlight: 0 });
+    expect(f.cycles!.size).toBe(4);
+    await f.service.defineCycle({ cycleId: 'cycle-2', policy: policyOf('two'), maxActiveMs: HOUR }, OPERATOR);
+    expect((await refusal(f.service.closeCycle('cycle-2', OPERATOR))).reasons).toEqual(['CYCLE_NOT_ACTIVE']);
+    expect((await refusal(f.service.closeCycle('cycle-9', OPERATOR))).reasons).toEqual(['CYCLE_NOT_ACTIVE']);
     expect((await refusal(f.service.activateCycle('cycle-1', { policyHash: policyHashOf(policyOf('one')), statement: CYCLE_ACTIVATION_STATEMENT }, OPERATOR))).reasons).toEqual(['CYCLE_NOT_DRAFT']);
   });
 });

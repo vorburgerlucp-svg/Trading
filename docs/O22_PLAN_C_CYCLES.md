@@ -15,7 +15,8 @@
 |---|---|---|---|
 | `defined` (draft) | a human (`defineCycle`) | cycle id, **its own policy** (limits, budget, sides, order types, instruments), its hash, the maximum active time | the id is invalid or used; the policy version is not `etoro-demo-cycle-policy:…` or was used by another cycle; the budget is not 1–3 per kind; the active time is not 1 ms to 7 days |
 | `activated` | a human (`activateCycle`) who names the **policy hash** and makes the statement `ACTIVATE_DEMO_CYCLE_WITH_THIS_POLICY` | approver, time, `activeUntil` = activation time + maximum active time, the intent log size checked | not a draft, wrong hash or statement, another cycle active, kill switch tripped, or an earlier broker state not settled (below) |
-| `closed` | a human (`closeCycle`) | approver, time, **the cycle's test verdict** over its own intents (`passed` / `failed` / `incomplete` / `not_evaluated`), the failures | the cycle is not active |
+| `closing` | a human (`closeCycle`) | approver, time. From then on, no reservation of the cycle can commit (section 1a) | the cycle is not active |
+| `closed` | `closeCycle` again, once nothing is in flight | approver, time, **the cycle's test verdict** over its own intents (`passed` / `failed` / `incomplete` / `not_evaluated`), the failures | the cycle is not `closing`, or an intent of it is `SUBMITTING` or `AMBIGUOUS` (the call then reports `closing` and the number in flight) |
 
 The definition and activation steps run their rule again inside the cycle log's lock, after catching up with every process. So there is at most one activation per cycle and at most one active cycle, whatever the order of arrival.
 
@@ -24,15 +25,17 @@ The definition and activation steps run their rule again inside the cycle log's 
 - **Without an active cycle nothing is created** (`CYCLE_NOT_ACTIVE`).
 - **The policy of an intent** is the policy of its cycle, fixed at definition. Its **budget** counts only the intents of that cycle that reached `SUBMITTING`.
 - **When the cycle is checked.** Every gate check (create, execute) and the reservation require the intent's cycle to be the active one and not past `activeUntil` (`CYCLE_NOT_ACTIVE`, `INTENT_NOT_OF_ACTIVE_CYCLE`).
-- **Closed cycle, held write.** After the reservation, and before the write, the cycle log is read again. A cycle closed or expired in the meantime stops the write (`NOT_SENT_CYCLE_NOT_ACTIVE`). A close record therefore stops every later write, also one that is already reserved.
+- **A closing cycle and a write already reserved.** After the reservation, and before the write, the cycle log is read again. A close that began in the meantime stops the write (`NOT_SENT_CYCLE_NOT_ACTIVE`).
 - **Which check catches a close, by window** (the cycle log has no transaction with the intent log):
 
   | The cycle is closed … | Caught by | Effect |
   |---|---|---|
   | before the gate | the gate (create, execute) | refused, nothing recorded |
   | after the gate, before the cycle log is read for the reservation | the reservation check (P4) | refused, **no `SUBMITTING`, no budget spent** |
-  | after that read, before or during the reservation ("window 2") | the re-read after the reservation (P5) | **not sent** (`REJECTED`), but the closed cycle's budget **is spent** (residual, see below) |
-  | after the write was sent | – | the write was made while the cycle was active |
+  | after that read, before the reservation's transaction ("window 2") | the reservation's guarded read (section 1a) | refused, **no `SUBMITTING`, no budget spent** (on `e431079`: spent) |
+  | while the reservation's transaction runs | the cycle writer waits for it (`FOR SHARE` against `FOR UPDATE`) | the reservation commits first; the close then sees it in flight and stays `closing` |
+  | after the reservation, before the last cycle read | the re-read after the reservation (P5) | not sent (`REJECTED`); the budget was spent by a reservation made while the cycle was active |
+  | after the last cycle read (the write's start point) | – | the write may be sent; the cycle stays `closing` until it is settled, and is never reported `closed` before that |
 - **A close closes only an open of its own cycle** (book check `closeTargetKnown`).
 
 **Gate rules across all cycles.** These stay **global**:
@@ -45,6 +48,39 @@ An old live position therefore blocks a new cycle's open, whichever cycle it bel
 **The build lock is independent of cycles.** No cycle and no policy opens it. Every write is still `EXECUTION_LOCKED_IN_BUILD` (`o22-plan-c-locked.test.ts`, without the test mock).
 
 **Without a cycle log, behavior is unchanged.** The service then behaves exactly as before: the service policy, the budget of the whole intent log, and an unchanged `cycleBudget` answer. The runtime does not open the log, so a merge changes nothing in production.
+
+## 1a. Closing a cycle safely (review of PR #35: R1–R3)
+
+**Found on `e431079` (reproduced on PostgreSQL with two processes, simulated broker).** A had reserved, and had passed its last read of the cycle log. B then ran `closeCycle()`, which recorded `closed` at once. A sent its write afterwards: **one broker write after a cycle reported as closed.** Separately, a close committed after A's read and before A's reservation was not seen by the reservation, so the closed cycle's budget was spent (window 2).
+
+**Change.**
+
+1. **The reservation reads the cycle log in its own transaction (a guarded write).** In PostgreSQL, the reservation's transaction holds the intent log's head row `FOR UPDATE`. It then also takes the cycle log's head row `FOR SHARE` and reads the cycle records in it (`writeExclusiveGuarded`).
+   - A cycle writer (`CLOSING`, `CLOSED`, activation) takes that row `FOR UPDATE`. It therefore either committed before, and is seen, or waits until the reservation committed.
+   - In memory, the cycle records are read synchronously in the same event-loop turn as the decision.
+   - The guard records are checked for sequence, chain and hash.
+   - **No reservation can commit on a cycle whose close has begun, so no budget is spent on it.** Window 2 is closed.
+2. **`closeCycle()` has two stages.**
+   - **`CLOSING`:** from its commit on, by point 1, no reservation of the cycle can commit, so the set of the cycle's writes in flight can only shrink.
+   - **`CLOSED`:** recorded only once the intents, read **after** `CLOSING` committed, show none of the cycle in `SUBMITTING` (a write may still be sent, or its answer is outstanding) or `AMBIGUOUS` (the result is unclear). Otherwise the call reports `closing` with the number in flight, and a later call completes the close.
+   - A `closing` cycle takes no new intent, and blocks every activation (`ANOTHER_CYCLE_ACTIVE`).
+3. **The irreversible start point of a write** is its last cycle read after the reservation, with the cycle still `active`.
+   - A write that has passed that point may still be sent while the cycle is `closing`. That is allowed, because it started before the close.
+   - The cycle then stays `closing` until that write is settled.
+   - **A cycle reported `closed` therefore has no write that can still be sent.**
+
+**What is not claimed.** There is no compare-and-set at the broker. "Started before the close" means: recorded and checked before `CLOSING` committed. A write cannot be withdrawn after its start point.
+
+**Lock order.**
+- The reservation takes the intent log first (`FOR UPDATE`), then the cycle log (`FOR SHARE`).
+- Cycle writers take only the cycle log. No code path holds the cycle log's lock and then asks for the intent log's.
+- So there is no wait cycle and no deadlock. The intent log's `lock_timeout` still bounds every wait.
+
+**Crash and restart.**
+- A crash after the reservation leaves `SUBMITTING`, later `AMBIGUOUS`. The cycle stays `closing`; this is fail closed, because whether the write was sent cannot be known.
+- An ambiguous open can be reconciled by its reference id. An ambiguous close is never reconciled by NEXUS, so its cycle stays `closing` until a human handles it outside this code.
+- A restarted process sees `closing` and takes no new intent.
+- Each stage is one record (fixed ids `<cycleId>:closing`, `<cycleId>:closed`). Concurrent closes give one record of each, and a repeated call records nothing more.
 
 ## 2. Activation preconditions (requirement 6)
 
@@ -65,21 +101,6 @@ An old live position therefore blocks a new cycle's open, whichever cycle it bel
 - a settled intent never becomes unsettled again (the state machine only moves forward);
 - an intent of a closed cycle can never be sent (the re-read after the reservation);
 - an intent from before cycles can never be sent by a process with cycles (no cycle id).
-
-### Window 2: a residual, not an atomic guarantee
-
-A has read the cycle log for its reservation, B then closes the cycle, and A reserves. Tested deterministically on PostgreSQL: A is held right before its `SUBMITTING` write.
-
-| Question | Answer |
-|---|---|
-| Is a broker order prevented? | **Yes.** The re-read after the reservation sees the close, and nothing is sent. |
-| Is budget spent anyway? | **Yes:** the closed cycle counts one reservation that was never sent (`SUBMITTING` → `REJECTED`, attempt `not_sent`). A new cycle is not affected: it has its own count. The record is never reset. |
-| Can the cycle log be synchronized bindingly before the reservation? | **No.** The reservation's check runs inside the intent log's transaction and does no I/O. A close committed after the last read of the cycle log and before that transaction is not seen there. |
-| Would an additional lock or transaction be needed? | **Yes**, for an atomic decision. For example, the reservation's transaction would also take a shared row lock on the cycle log's head (`SELECT … FOR SHARE`) and read the cycle state in it, while `closeCycle` takes that row lock exclusively. The lock order would be intent log first, then cycle log; `closeCycle` takes no intent lock, so no deadlock. That needs an extension of the append-only store (two logs in one transaction). **Not implemented.** |
-
-**Effect of the residual.** The closed cycle's budget can end higher than the number of orders actually sent. Such a cycle can never take a write again. No order is sent, no other cycle's budget changes, and the never-sent reservation is recorded as such.
-
-It is a residual in accounting, not in trading. **Plan C is therefore not released without restriction:** the residual must be accepted, or the store extension above implemented, before cycle budgets are used as a hard audit figure.
 
 ## 3. Budget separation (requirements 3, 4, 9, 10)
 
@@ -143,7 +164,8 @@ It is a residual in accounting, not in trading. **Plan C is therefore not releas
 |---|---|---|
 | `test/broker/etoro/o22-plan-c-cycles.test.ts` | 22 | **Rules:** definition, activation (every refusal, every unresolved state, a hand-closed position, a pending and an expired approval, the O22 case), use of the active cycle only, the projection, the strictness of the cycle 2 draft. **Service:** without an active cycle nothing is created; only humans; without the log the steps are unavailable; binding and the own budget; budget isolation between two cycles with nothing reset; an unsettled position and a hand-closed attested position block the next cycle, and the close verdict is `failed` with `POSITION_CLOSED_EXTERNALLY`; an intent of a closed cycle and one from before cycles are never executed; expiry; the kill switch; the instrument allowlist; close and re-activation refused. **Budget isolation from O22:** a spent budget from before cycles stays spent and byte for byte unchanged, the cycle starts at 0 and counts only its own intents, and the old intent is never executed. **P16:** a close in cycle 2 of an open of cycle 1, with a cycle state written directly to the log so that no earlier rule refuses: the only refusal is `CLOSE_TARGET_UNKNOWN` |
 | `test/broker/etoro/o22-plan-c-locked.test.ts` | 1 | Without the lock mock: all four locks closed, and with an active cycle the write is `EXECUTION_LOCKED_IN_BUILD`, 0 broker requests, budget unchanged |
-| `test/pg/o22-plan-c-cycles.pg.test.ts` | 7, two processes | the same activation at once (one record); two drafts with a barrier (one active); two opens of one cycle (one write); the cycle closed while a reserved write is held (not sent, budget stays spent); **P4:** the cycle closed after A passed the gate and before A read the cycle for its reservation, with A held deterministically on its second snapshot read (refused in the reservation, no `SUBMITTING`, budget 0); **window 2:** the cycle closed after A read the cycle log and before A reserves (no order, the closed cycle's budget spent, a new cycle at 0); a crash after the activation record |
+| `test/pg/o22-plan-c-cycles.pg.test.ts` | 7, two processes | the same activation at once (one record); two drafts with a barrier (one active); two opens of one cycle (one write); the cycle closed while a reserved write is held (not sent, budget stays spent); **P4:** the cycle closed after A passed the gate and before A read the cycle for its reservation, with A held deterministically on its second snapshot read (refused in the reservation, no `SUBMITTING`, budget 0); **window 2:** the cycle closed after A read the cycle log and before A reserves (refused in the guarded reservation: nothing reserved, budget 0); a crash after the activation record |
+| `test/pg/o22-plan-c-close-race.pg.test.ts` | 11 | **Review of PR #35:**<br>R1/R3 for an open and for a close intent: A past its last cycle read is about to send, B closes, the cycle stays `closing` (1 in flight) until A's write is settled, then `closed`;<br>R4 close wins, for an open and a close intent: nothing reserved or sent, the budget unchanged;<br>two closes at once: one `closing` and one `closed` record;<br>a crash right after the reservation, with a restart and the timeout: the cycle stays `closing`, `AMBIGUOUS`, no new intent;<br>an ambiguous write: `closing`, no other cycle can be activated;<br>the guarded write in memory (the guard is read, a refusal writes nothing, a foreign store is refused);<br>in PostgreSQL: a guarded write **waits** for an open transaction of a guard writer and then sees its record (`FOR SHARE`), a forged guard record is refused (`integrity`), and a guard of another pool is refused |
 
 **Counter-proof (24.10.2026, one mutation at a time, one test worker, memory checked before each, `src` restored and checked after each).** Each rule was removed on its own, and the 30 Plan C tests were run:
 
@@ -161,6 +183,22 @@ It is a residual in accounting, not in trading. **Plan C is therefore not releas
 | P10 | the kill switch | 2 | | | | |
 
 **19 of 19 detected.**
+
+**Review of PR #35: counter-proof**, again one mutation at a time with one worker, over the 41 Plan C tests including the race tests.
+- **The 19 rules above:** all detected again; P4 and P19 were adapted to the changed code.
+- **The 7 new rules:**
+
+| # | Removed | Failing |
+|---|---|---|
+| G1 | the reservation's cycle guard | 2 |
+| G2 | `FOR SHARE` in the PostgreSQL guard read | 1 |
+| G3 | `CLOSED` only without a write in flight | 4 |
+| G4 | `AMBIGUOUS` counts as in flight | 2 |
+| G5 | the `CLOSING` record | 17 |
+| G6 | a closing cycle blocks activation | 1 |
+| G7 | the guard records are verified | 1 |
+
+**26 of 26 detected.** The two R1 tests were written first and failed on `e431079` (the cycle was reported `closed`, then one write was sent).
 
 ## 7. Overlap with PR #34 (cancel bound to the open attempt)
 

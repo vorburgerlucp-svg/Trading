@@ -56,6 +56,17 @@ export type DemoCycleRecord =
       readonly checkedIntentLogSize: number;
     }
   | {
+      /**
+       * Review of PR #35 (R3): the close has begun. From this record on no new reservation of the cycle is possible (the reservation
+       * reads the cycle log in its own critical section). It becomes 'closed' only when no write of the cycle can still be sent.
+       */
+      readonly schema: typeof DEMO_CYCLE_RECORD_SCHEMA;
+      readonly kind: 'closing';
+      readonly cycleId: string;
+      readonly closingBy: IntentActor;
+      readonly closingAt: string;
+    }
+  | {
       readonly schema: typeof DEMO_CYCLE_RECORD_SCHEMA;
       readonly kind: 'closed';
       readonly cycleId: string;
@@ -71,9 +82,10 @@ export interface DemoCycle {
   readonly policy: DemoExecutionPolicy;
   readonly policyHash: string;
   readonly maxActiveMs: number;
-  readonly status: 'draft' | 'active' | 'closed';
+  readonly status: 'draft' | 'active' | 'closing' | 'closed';
   readonly activatedAt: string | null;
   readonly activeUntil: string | null;
+  readonly closingAt: string | null;
   readonly closedAt: string | null;
   readonly verdict: string | null;
 }
@@ -93,10 +105,12 @@ export function projectCycles(records: readonly DemoCycleRecord[]): Map<string, 
   for (const r of records) {
     const c = map.get(r.cycleId);
     if (r.kind === 'defined') {
-      if (c === undefined) map.set(r.cycleId, { cycleId: r.cycleId, policy: r.policy, policyHash: r.policyHash, maxActiveMs: r.maxActiveMs, status: 'draft', activatedAt: null, activeUntil: null, closedAt: null, verdict: null });
+      if (c === undefined) map.set(r.cycleId, { cycleId: r.cycleId, policy: r.policy, policyHash: r.policyHash, maxActiveMs: r.maxActiveMs, status: 'draft', activatedAt: null, activeUntil: null, closingAt: null, closedAt: null, verdict: null });
     } else if (r.kind === 'activated') {
       if (c !== undefined && c.status === 'draft' && r.policyHash === c.policyHash) map.set(r.cycleId, { ...c, status: 'active', activatedAt: r.activatedAt, activeUntil: r.activeUntil });
-    } else if (c !== undefined && c.status === 'active') {
+    } else if (r.kind === 'closing') {
+      if (c !== undefined && c.status === 'active') map.set(r.cycleId, { ...c, status: 'closing', closingAt: r.closingAt });
+    } else if (c !== undefined && c.status === 'closing') {
       map.set(r.cycleId, { ...c, status: 'closed', closedAt: r.closedAt, verdict: r.verdict });
     }
   }
@@ -134,6 +148,12 @@ export interface CycleIntentFact {
   readonly positionId: number | null;
 }
 
+/**
+ * Review of PR #35 (R3): the states in which a write of a cycle may still be sent or its answer is outstanding (SUBMITTING), or its
+ * result is unclear (AMBIGUOUS). While one exists, a closing cycle is not reported closed.
+ */
+export const CYCLE_IN_FLIGHT_STATES: ReadonlySet<IntentState> = new Set(['SUBMITTING', 'AMBIGUOUS']);
+
 /** States in which a write may have reached the broker without a final, confirmed outcome. */
 const UNRESOLVED: ReadonlySet<IntentState> = new Set(['SUBMITTING', 'SUBMITTED', 'ACCEPTED', 'AMBIGUOUS', 'RECONCILED', 'PARTIALLY_FILLED']);
 const PENDING: ReadonlySet<IntentState> = new Set(['CREATED', 'RISK_APPROVED', 'APPROVED']);
@@ -162,7 +182,7 @@ export function cycleActivationRefusals(input: {
   if (c.status !== 'draft') reasons.push('CYCLE_NOT_DRAFT');
   if (input.statement !== CYCLE_ACTIVATION_STATEMENT) reasons.push('CYCLE_ACTIVATION_STATEMENT_MISSING');
   if (input.policyHash !== c.policyHash) reasons.push('CYCLE_POLICY_HASH_MISMATCH');
-  if ([...input.cycles.values()].some((o) => o.cycleId !== c.cycleId && o.status === 'active')) reasons.push('ANOTHER_CYCLE_ACTIVE');
+  if ([...input.cycles.values()].some((o) => o.cycleId !== c.cycleId && (o.status === 'active' || o.status === 'closing'))) reasons.push('ANOTHER_CYCLE_ACTIVE');
   if (!input.killSwitchArmed) reasons.push('KILL_SWITCH_TRIPPED');
   const closedByNexus = new Set(input.intents.filter((i) => i.action === 'close' && i.state === 'FILLED' && i.positionId !== null).map((i) => i.positionId!));
   if (input.intents.some((i) => UNRESOLVED.has(i.state))) reasons.push('PRIOR_INTENT_UNRESOLVED');

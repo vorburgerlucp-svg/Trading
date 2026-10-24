@@ -57,6 +57,7 @@ import {
 } from './execution-intent.js';
 import type { EtoroSnapshotHistory } from '../etoro-broker-service.js';
 import {
+  CYCLE_IN_FLIGHT_STATES,
   DEMO_CYCLE_RECORD_SCHEMA,
   activeCycle,
   cycleActivationRefusals,
@@ -497,9 +498,20 @@ export class EtoroDemoExecutionService {
     // still hold for the book as it is inside the critical section, after every other process's records were applied.
     let submitting;
     try {
-      submitting = await guarded(() => this.deps.intents.append(intentId + ':SUBMITTING', {
+      // Review of PR #35 (R2): with cycles, the reservation reads the cycle log INSIDE its own critical section (a guarded write: in
+      // PostgreSQL the cycle log's head row FOR SHARE in the same transaction). A CLOSING or CLOSED record committed before it is seen,
+      // and none can commit while it runs: no reservation on a cycle whose close has begun, so no budget spent on it.
+      let cycleRefusalsInLock: string[] = [];
+      const cycleGuard = this.deps.cycles === undefined ? undefined : {
+        log: this.deps.cycles,
+        check: (records: readonly { payload: DemoCycleRecord }[]) => {
+          cycleRefusalsInLock = intentCycleRefusals(p.intent.cycleId, projectCycles(records.map((r) => r.payload)), this.now());
+        },
+      };
+      submitting = await guarded(() => this.deps.intents.append<DemoCycleRecord>(intentId + ':SUBMITTING', {
         schema: 'etoro-demo-intent-event:v1', intentId, state: 'SUBMITTING', from: 'APPROVED', at: this.now(), reason: 'SUBMISSION_STARTED', requestId, attemptId,
       }, {
+        ...(cycleGuard !== undefined ? { guard: cycleGuard } : {}),
         precondition: () => {
           const current = this.projections().get(intentId);
           if (!current || current.state !== 'APPROVED') throw new DemoExecutionError('INTENT_STATE_INVALID', current?.state ?? 'missing');
@@ -508,8 +520,8 @@ export class EtoroDemoExecutionService {
           if (reservationEvidence !== null) refusals.push(...closePositionRefusals(p.intent, { ...reservationEvidence, ...this.bindingOf(p.intent) }, this.now(), policy));
           if (reservationExternal !== undefined) refusals.push(...externalClosureOpenRefusals(reservationExternal.attestedPositionIds, reservationExternal.read, this.now(), policy.maxBrokerSyncAgeMs));
           refusals.push(...reservationAccess);
-          // O22 Plan C: the intent's cycle is still the active one (and not expired), on the cycle log caught up just before.
-          if (this.deps.cycles !== undefined) refusals.push(...intentCycleRefusals(p.intent.cycleId, this.cycleMap(), this.now()));
+          // O22 Plan C: the intent's cycle is still the active one (and not expired), read in this critical section (the guard).
+          if (this.deps.cycles !== undefined) refusals.push(...cycleRefusalsInLock);
           if (refusals.length > 0) throw new DemoExecutionError('GATE_REFUSED', refusals.join(','), refusals);
         },
       }));
@@ -1394,22 +1406,49 @@ export class EtoroDemoExecutionService {
    * stopped by the re-read after its reservation). The record carries the cycle's test verdict over its own intents: a position
    * closed outside NEXUS fails it (POSITION_CLOSED_EXTERNALLY), so it can never count as a passed NEXUS cycle.
    */
-  async closeCycle(cycleId: string, by: IntentActor): Promise<DemoCycle> {
+  async closeCycle(cycleId: string, by: IntentActor): Promise<DemoCycle & { readonly inFlight: number }> {
     const operator = this.requireHumanOperator(by);
     this.requireCycles();
     const history = this.deps.snapshotHistory === undefined ? null : await this.deps.snapshotHistory.history();
     await this.syncAll();
     const status = () => this.cycleMap().get(cycleId)?.status ?? null;
-    if (status() !== 'active') throw new DemoExecutionError('CYCLE_REFUSED', 'CYCLE_NOT_ACTIVE', ['CYCLE_NOT_ACTIVE']);
+    const current = (inFlight: number) => ({ ...this.cycleMap().get(cycleId)!, inFlight });
+    // Review of PR #35 (R3), step 1: CLOSING. From its commit on, no reservation of the cycle can commit (the reservation reads the
+    // cycle log in its own critical section), so the set of the cycle's writes in flight can only shrink.
+    if (status() === 'active') {
+      try {
+        await this.appendCycle({ schema: DEMO_CYCLE_RECORD_SCHEMA, kind: 'closing', cycleId, closingBy: operator, closingAt: this.now() }, () => {
+          if (status() !== 'active') throw new DemoExecutionError('CYCLE_REFUSED', 'CYCLE_NOT_ACTIVE', ['CYCLE_NOT_ACTIVE']);
+        });
+      } catch (error) {
+        // Another process began (or completed) the close first: continue from what is stored.
+        if (!(error instanceof DemoExecutionError && error.code === 'CYCLE_REFUSED')) throw error;
+        await this.syncAll();
+      }
+    }
+    if (status() === 'closed') return current(0);
+    if (status() !== 'closing') throw new DemoExecutionError('CYCLE_REFUSED', 'CYCLE_NOT_ACTIVE', ['CYCLE_NOT_ACTIVE']);
+    // Step 2: CLOSED, only when nothing of the cycle is in flight: no SUBMITTING (a write may still be sent, an answer is outstanding)
+    // and no AMBIGUOUS (the result is unclear). The intents are read AFTER CLOSING committed: every reservation of the cycle committed
+    // before it is seen, and none can follow. Otherwise the cycle stays CLOSING; a later call completes it.
+    await this.syncAll();
+    const inFlight = [...this.projections().values()].filter((p) => p.intent.cycleId === cycleId && CYCLE_IN_FLIGHT_STATES.has(p.state)).length;
+    if (inFlight > 0) return current(inFlight);
     const views = [...this.projections().values()].filter((p) => p.intent.cycleId === cycleId).map((p) => this.view(p));
     const verdict = history === null ? null : evaluateDemoCycleTest({ intents: views, snapshots: history.observations, missingSnapshotRecords: history.missingSnapshotRecords });
-    await this.appendCycle(
-      { schema: DEMO_CYCLE_RECORD_SCHEMA, kind: 'closed', cycleId, closedBy: operator, closedAt: this.now(), verdict: verdict?.result ?? 'not_evaluated', failures: verdict?.failures ?? [] },
-      () => {
-        if (status() !== 'active') throw new DemoExecutionError('CYCLE_REFUSED', 'CYCLE_NOT_ACTIVE', ['CYCLE_NOT_ACTIVE']);
-      },
-    );
-    return this.cycleMap().get(cycleId)!;
+    try {
+      await this.appendCycle(
+        { schema: DEMO_CYCLE_RECORD_SCHEMA, kind: 'closed', cycleId, closedBy: operator, closedAt: this.now(), verdict: verdict?.result ?? 'not_evaluated', failures: verdict?.failures ?? [] },
+        () => {
+          if (status() !== 'closing') throw new DemoExecutionError('CYCLE_REFUSED', 'CYCLE_NOT_CLOSING', ['CYCLE_NOT_CLOSING']);
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof DemoExecutionError && error.code === 'CYCLE_REFUSED')) throw error;
+      await this.syncAll();
+      if (status() !== 'closed') throw error;
+    }
+    return current(0);
   }
 
   private async runGate(intent: ExecutionIntent, phase: 'create' | 'execute'): Promise<{ verdict: GateVerdict; exposure: Decimal }> {
