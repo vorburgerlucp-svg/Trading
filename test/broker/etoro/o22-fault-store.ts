@@ -2,7 +2,16 @@
 // simulates a process crash at one chosen record: "before" the commit (the record is not stored) or "after" it (the record is
 // stored, then the process dies before its next step). The test then drops that service and starts a new one on the same stores
 // (a restart), exactly like a second NEXUS process.
-import type { AppendOnlyStore, LogRecord, WriteDecision } from '../../../src/persistence/append-only-log.js';
+import type { AppendOnlyStore, GuardRead, LogRecord, WriteDecision } from '../../../src/persistence/append-only-log.js';
+
+type Decide<T, R> = (newer: readonly LogRecord<T>[]) => WriteDecision<T, R>;
+type DecideGuarded<T, R, G> = (newer: readonly LogRecord<T>[], guardNewer: readonly LogRecord<G>[]) => WriteDecision<T, R>;
+
+/** Every wrapper passes a guarded write and the storage target through to the wrapped store, with its own hooks around it. */
+function guarded<T, R, G>(inner: AppendOnlyStore<T>, knownSequence: number, guard: GuardRead<G>, decide: DecideGuarded<T, R, G>): Promise<R> {
+  if (inner.writeExclusiveGuarded === undefined) return Promise.reject(new Error('the wrapped store cannot make a guarded write'));
+  return inner.writeExclusiveGuarded<R, G>(knownSequence, guard, decide);
+}
 import type { O21Stores } from './o21-fixture.js';
 
 export class InjectedCrash extends Error {
@@ -30,10 +39,21 @@ export class FaultStore<T> implements AppendOnlyStore<T> {
     return this.inner.loadAfter(sequence);
   }
 
-  async writeExclusive<R>(knownSequence: number, decide: (newer: readonly LogRecord<T>[]) => WriteDecision<T, R>): Promise<R> {
+  writeExclusive<R>(knownSequence: number, decide: Decide<T, R>): Promise<R> {
+    return this.crashing<R>((inspect) => this.inner.writeExclusive<R>(knownSequence, (newer) => inspect(decide(newer))));
+  }
+
+  writeExclusiveGuarded<R, G>(knownSequence: number, guard: GuardRead<G>, decide: DecideGuarded<T, R, G>): Promise<R> {
+    return this.crashing<R>((inspect) => guarded<T, R, G>(this.inner, knownSequence, guard, (newer, guardNewer) => inspect(decide(newer, guardNewer))));
+  }
+
+  storageTarget(): AppendOnlyStore<T> {
+    return this.inner.storageTarget?.() ?? this.inner;
+  }
+
+  private async crashing<R>(invoke: (inspect: (decision: WriteDecision<T, R>) => WriteDecision<T, R>) => Promise<R>): Promise<R> {
     let hit = false;
-    const result = await this.inner.writeExclusive<R>(knownSequence, (newer) => {
-      const decision = decide(newer);
+    const result = await invoke((decision) => {
       const armed = this.armed;
       if (armed !== null && !this.fired && decision.kind === 'append' && armed.match(decision.record.payload)) {
         this.fired = true;
@@ -97,9 +117,18 @@ export class BarrierStore<T> implements AppendOnlyStore<T> {
     return this.inner.loadAfter(sequence);
   }
 
-  async writeExclusive<R>(knownSequence: number, decide: (newer: readonly LogRecord<T>[]) => WriteDecision<T, R>): Promise<R> {
+  async writeExclusive<R>(knownSequence: number, decide: Decide<T, R>): Promise<R> {
     await this.barrier.arrive();
     return this.inner.writeExclusive(knownSequence, decide);
+  }
+
+  async writeExclusiveGuarded<R, G>(knownSequence: number, guard: GuardRead<G>, decide: DecideGuarded<T, R, G>): Promise<R> {
+    await this.barrier.arrive();
+    return guarded<T, R, G>(this.inner, knownSequence, guard, decide);
+  }
+
+  storageTarget(): AppendOnlyStore<T> {
+    return this.inner.storageTarget?.() ?? this.inner;
   }
 }
 
@@ -136,7 +165,19 @@ export class HoldStore<T> implements AppendOnlyStore<T> {
     return this.inner.loadAfter(sequence);
   }
 
-  async writeExclusive<R>(knownSequence: number, decide: (newer: readonly LogRecord<T>[]) => WriteDecision<T, R>): Promise<R> {
+  writeExclusive<R>(knownSequence: number, decide: Decide<T, R>): Promise<R> {
+    return this.holding<R>((inspect) => this.inner.writeExclusive<R>(knownSequence, (newer) => inspect(decide(newer))));
+  }
+
+  writeExclusiveGuarded<R, G>(knownSequence: number, guard: GuardRead<G>, decide: DecideGuarded<T, R, G>): Promise<R> {
+    return this.holding<R>((inspect) => guarded<T, R, G>(this.inner, knownSequence, guard, (newer, guardNewer) => inspect(decide(newer, guardNewer))));
+  }
+
+  storageTarget(): AppendOnlyStore<T> {
+    return this.inner.storageTarget?.() ?? this.inner;
+  }
+
+  private async holding<R>(invoke: (inspect: (decision: WriteDecision<T, R>) => WriteDecision<T, R>) => Promise<R>): Promise<R> {
     const armed = this.armed;
     if (armed !== null && armed.point === 'before') {
       this.armed = null;
@@ -144,8 +185,7 @@ export class HoldStore<T> implements AppendOnlyStore<T> {
       await this.gate;
     }
     let matched = false;
-    const result = await this.inner.writeExclusive<R>(knownSequence, (newer) => {
-      const decision = decide(newer);
+    const result = await invoke((decision) => {
       if (armed !== null && armed.point === 'after' && decision.kind === 'append' && armed.match(decision.record.payload)) matched = true;
       return decision;
     });
@@ -155,5 +195,58 @@ export class HoldStore<T> implements AppendOnlyStore<T> {
       await this.gate;
     }
     return result;
+  }
+}
+
+/**
+ * O22 Plan C TEST ONLY: holds one process right AFTER its n-th catch-up read of a log completed (counted from arming): the process has
+ * seen the log as it was, and has not used it yet. Used to put another process's write exactly after a read and before its use.
+ */
+export class ReadHoldStore<T> implements AppendOnlyStore<T> {
+  private remaining = 0;
+  private releaseGate!: () => void;
+  private reachedGate!: () => void;
+  private gate: Promise<void> = Promise.resolve();
+  reached: Promise<void> = Promise.resolve();
+
+  constructor(readonly inner: AppendOnlyStore<T>) {}
+
+  /** Holds after the n-th loadAfter from now on. */
+  holdAfterRead(n: number): void {
+    this.remaining = n;
+    this.gate = new Promise<void>((resolve) => (this.releaseGate = resolve));
+    this.reached = new Promise<void>((resolve) => (this.reachedGate = resolve));
+  }
+
+  release(): void {
+    this.releaseGate();
+  }
+
+  loadAll(): Promise<readonly LogRecord<T>[]> {
+    return this.inner.loadAll();
+  }
+
+  async loadAfter(sequence: number): Promise<readonly LogRecord<T>[]> {
+    const records = await this.inner.loadAfter(sequence);
+    if (this.remaining > 0) {
+      this.remaining -= 1;
+      if (this.remaining === 0) {
+        this.reachedGate();
+        await this.gate;
+      }
+    }
+    return records;
+  }
+
+  writeExclusive<R>(knownSequence: number, decide: Decide<T, R>): Promise<R> {
+    return this.inner.writeExclusive(knownSequence, decide);
+  }
+
+  writeExclusiveGuarded<R, G>(knownSequence: number, guard: GuardRead<G>, decide: DecideGuarded<T, R, G>): Promise<R> {
+    return guarded<T, R, G>(this.inner, knownSequence, guard, decide);
+  }
+
+  storageTarget(): AppendOnlyStore<T> {
+    return this.inner.storageTarget?.() ?? this.inner;
   }
 }

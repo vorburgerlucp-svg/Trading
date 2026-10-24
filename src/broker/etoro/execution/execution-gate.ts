@@ -15,7 +15,9 @@ import { externalClosureOpenRefusals } from './external-closure.js';
 export const DEMO_EXECUTION_POLICY_VERSION = 'etoro-demo-execution-policy:v1' as const;
 /** O22: the policy of the one controlled demo trading cycle (one market buy, one close, then nothing). v2: long-only, market-only. */
 export const DEMO_E2E_CYCLE_POLICY_VERSION = 'etoro-demo-e2e-cycle-policy:v2' as const;
-export type DemoExecutionPolicyVersion = typeof DEMO_EXECUTION_POLICY_VERSION | typeof DEMO_E2E_CYCLE_POLICY_VERSION;
+/** O22 Plan C: a cycle policy has its own version, used by exactly one cycle (demo-cycles.ts). */
+export type DemoCyclePolicyVersion = `etoro-demo-cycle-policy:${string}`;
+export type DemoExecutionPolicyVersion = typeof DEMO_EXECUTION_POLICY_VERSION | typeof DEMO_E2E_CYCLE_POLICY_VERSION | DemoCyclePolicyVersion;
 
 /** The provider name of the human-governed eToro instrument mapping in the instrument registry. */
 export const ETORO_MAPPING_PROVIDER = 'etoro';
@@ -47,6 +49,8 @@ export interface DemoExecutionPolicy {
    */
   readonly allowedOpenSides?: readonly IntentSide[];
   readonly allowedOpenOrderTypes?: readonly IntentOrderType[];
+  /** O22 Plan C: the only eToro instruments an open or a close may name. Absent = no restriction. Checked like the sides. */
+  readonly allowedEtoroInstrumentIds?: readonly number[];
 }
 
 /** Conservative demo defaults. A change is a code change and a review, never a request field. */
@@ -156,6 +160,11 @@ export interface GateInput {
    * configured broker access. Absent: the check did not run, which refuses (fail closed).
    */
   readonly accessRefusals?: readonly string[];
+  /**
+   * O22 Plan C: the refusals of the cycle system (demo-cycles.ts), computed by the service: the intent belongs to the cycle that is
+   * active now. Absent: the service runs without cycles (the runtime today); the budget is then the whole log's, as before.
+   */
+  readonly cycleRefusals?: readonly string[];
 }
 
 /** One position of a stored broker portfolio snapshot, as far as a close needs it. */
@@ -257,6 +266,7 @@ const BOOK_CHECKS: readonly BookCheck[] = Object.freeze([
   { name: 'closeTargetKnown', reason: 'CLOSE_TARGET_UNKNOWN', applies: (o) => !o, ok: (b) => b.closeTargetKnown },
   { name: 'closeTargetNotClosing', reason: 'CLOSE_TARGET_ALREADY_CLOSING', applies: (o) => !o, ok: (b) => !b.closeTargetAlreadyClosing },
   // O22 cycle budget: spent by every submission, whatever its outcome. Never reset by a rejection, a timeout or a crash.
+  { name: 'cycleInstrument', reason: 'CYCLE_INSTRUMENT_NOT_ALLOWED', applies: () => true, ok: (_b, _e, p, i) => p.allowedEtoroInstrumentIds === undefined || p.allowedEtoroInstrumentIds.includes(i.etoroInstrumentId) },
   { name: 'cycleOpenBudget', reason: 'CYCLE_OPEN_BUDGET_EXHAUSTED', applies: (o) => o, ok: (b, _e, p) => p.maxOpenSubmissions === null || b.openSubmissions < p.maxOpenSubmissions },
   { name: 'cycleCloseBudget', reason: 'CYCLE_CLOSE_BUDGET_EXHAUSTED', applies: (o) => !o, ok: (b, _e, p) => p.maxCloseSubmissions === null || b.closeSubmissions < p.maxCloseSubmissions },
   // O22 open restrictions: they read only the intent and the policy, and are in this table so that the reservation step checks
@@ -396,6 +406,10 @@ export function evaluateDemoExecutionGate(input: GateInput): GateVerdict {
   const access = input.accessRefusals ?? ['BROKER_ACCESS_NOT_CHECKED'];
   checks.brokerAccess = access.length === 0 ? 'pass' : 'fail';
   reasons.push(...access);
+  if (input.cycleRefusals !== undefined) {
+    checks.cycle = input.cycleRefusals.length === 0 ? 'pass' : 'fail';
+    reasons.push(...input.cycleRefusals);
+  }
 
   return Object.freeze({ passed: reasons.length === 0, reasons: Object.freeze(reasons), checks: Object.freeze(checks), policyVersion: policy.version });
 }

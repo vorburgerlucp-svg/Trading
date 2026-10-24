@@ -105,6 +105,12 @@ export interface ExecutionIntent {
   readonly expiresAt: string;
   readonly strategyRunId: string;
   readonly createdBy: IntentActor;
+  /**
+   * O22 Plan C: the demo cycle the intent belongs to. Never taken from input (an input field cycleId is refused as unknown): the
+   * service binds the cycle that is active at creation (bindCycle), and the intent id is computed over it. Absent on every intent
+   * made without cycles (all O22 intents); their ids are unchanged.
+   */
+  readonly cycleId?: string;
 }
 
 const TEXT_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -252,6 +258,16 @@ export function bindClosePosition(intent: ExecutionIntent, positionId: number): 
   const { intentId: _unbound, ...rest } = intent;
   void _unbound;
   const content: Omit<ExecutionIntent, 'intentId'> = { ...rest, positionId };
+  return Object.freeze({ ...content, intentId: intentIdOf(content) });
+}
+
+/** O22 Plan C: binds the active cycle to a parsed (and, for a close, position-bound) intent; the id is recomputed over it. */
+export function bindCycle(intent: ExecutionIntent, cycleId: string): ExecutionIntent {
+  if (intent.cycleId !== undefined) throw new DemoExecutionError('INTENT_INVALID', 'the intent is already bound to a cycle');
+  if (!TEXT_ID.test(cycleId)) throw new DemoExecutionError('INTENT_INVALID', 'the cycle id is invalid');
+  const { intentId: _unbound, ...rest } = intent;
+  void _unbound;
+  const content: Omit<ExecutionIntent, 'intentId'> = { ...rest, cycleId };
   return Object.freeze({ ...content, intentId: intentIdOf(content) });
 }
 
