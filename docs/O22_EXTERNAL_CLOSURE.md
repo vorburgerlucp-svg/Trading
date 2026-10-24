@@ -145,16 +145,17 @@ The risk: a portfolio read made with **other credentials** (another account) doe
    - **For O22:** the snapshot of 20.10. 07:49:52 meets this condition, and both stored O22 snapshots pass every R2 check, including the content hash. This was checked read-only on 23.10.2026 (`nexus_readonly`, the repository's own decoder and hash; only yes/no and counts were output).
 2. **The operator's statement (organizational).** The claim must carry `accountStatement: "SAME_ETORO_DEMO_ACCOUNT"`: the operator confirms that the order and every portfolio read come from the same demo account (the same configured credentials). It is recorded.
 
-**Considered and not implemented:**
-- **Storing the CID, or the `demoCid` of `/me`.** That would put an account identifier into the database, which the project's privacy rule excludes. It needs a separate decision.
-- **A keyed fingerprint of the credentials on every write attempt and every sync record** (for example an HMAC under the user key, truncated, irreversible). It would detect a change of credentials between the order and the evidence snapshot. It would *not* prove the account (one account can have several keys; that case would be refused, which is fail closed).
-  - It needs schema changes to the attempt and sync records, and a decision on storing key-derived values.
-  - It does not cover the existing O22 records: no fingerprint was stored for them.
+**Implemented after the review (24.10.2026): the broker access fingerprint.** See `O22_BROKER_ACCESS_FINGERPRINT.md`.
+- Every sync and every write attempt is stamped with an HMAC of the configured eToro credentials, under a separately managed NEXUS key with key rotation.
+- The attestation requires the open's attempt, the continuity snapshot and the evidence snapshot to match the configured access (`OPEN_ATTEMPT_…`, `CONTINUITY_SNAPSHOT_…`, `EVIDENCE_SNAPSHOT_…`). Every open and close requires the stored data it relies on to match.
+- **It proves the same configured credentials, not the same eToro account.**
+- **Considered and not implemented:**
+  - storing the CID, or the `demoCid` of `/me` (privacy rule; never observed live);
+  - an HMAC of `demoCid`, which would prove the account. That needs a broker request to verify the field and a decision; it is the recommended follow-up.
 
-**Conclusion for production use: not released on this basis alone.**
-- The bridge between the continuity snapshot and the evidence snapshot is only the operator's statement.
-- For O22 that remains the only control, because the existing records carry no fingerprint.
-- Production use needs an explicit decision that this residual risk is accepted (demo account, no ledger effect, liveness only), or the fingerprint first.
+**Conclusion for production use:**
+- **For future cycles:** the fingerprint closes the R3 gap "a read with other credentials". What remains is "another account behind the same credentials", which only a verified account identity would close.
+- **For O22: not possible with this code.** The O22 records carry no stamp, and nothing is filled in after the fact. An attestation of the O22 open is refused even after a status read and a sync (`OPEN_ATTEMPT_ACCESS_NOT_SHOWN`, `CONTINUITY_SNAPSHOT_ACCESS_NOT_SHOWN`). Settling O22 would need a separately decided, reviewed exception for records made before the fingerprint.
 
 ## Tests
 

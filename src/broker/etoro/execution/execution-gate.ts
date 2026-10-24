@@ -150,6 +150,12 @@ export interface GateInput {
    * none of them is shown again. Absent: no attestation exists.
    */
   readonly externalClosures?: { readonly attestedPositionIds: readonly number[]; readonly read: { snapshot: ClosePositionSnapshot | null; problem: ClosePositionEvidenceProblem | null } | null };
+  /**
+   * O22 Plan B review R3: the refusals of the broker access continuity check (etoro-access-fingerprint.ts), computed by the service:
+   * the stored snapshot an open or a close relies on, and for a close the open's write attempt, must have been made with the
+   * configured broker access. Absent: the check did not run, which refuses (fail closed).
+   */
+  readonly accessRefusals?: readonly string[];
 }
 
 /** One position of a stored broker portfolio snapshot, as far as a close needs it. */
@@ -173,6 +179,8 @@ export interface ClosePositionSnapshot {
   /** The number of positions the broker stated; the listed positions must be exactly that many (complete). */
   readonly positionCount: number;
   readonly positions: readonly EvidencePosition[];
+  /** O22 Plan B review R3: the access stamp of the sync that stored the snapshot (unchecked here; the service checks it). */
+  readonly access?: unknown;
 }
 
 /**
@@ -383,6 +391,11 @@ export function evaluateDemoExecutionGate(input: GateInput): GateVerdict {
   const external = opens ? externalClosureOpenRefusals(input.externalClosures?.attestedPositionIds ?? [], input.externalClosures?.read ?? null, now, policy.maxBrokerSyncAgeMs) : [];
   checks.externalClosures = !opens || (input.externalClosures?.attestedPositionIds.length ?? 0) === 0 ? 'not_applicable' : external.length === 0 ? 'pass' : 'fail';
   reasons.push(...external);
+  // O22 Plan B review R3: the stored broker data the decision relies on was read with the configured broker access (and, for a close,
+  // the position was opened with it). Without the check's result: refused.
+  const access = input.accessRefusals ?? ['BROKER_ACCESS_NOT_CHECKED'];
+  checks.brokerAccess = access.length === 0 ? 'pass' : 'fail';
+  reasons.push(...access);
 
   return Object.freeze({ passed: reasons.length === 0, reasons: Object.freeze(reasons), checks: Object.freeze(checks), policyVersion: policy.version });
 }

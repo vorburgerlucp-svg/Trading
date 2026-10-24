@@ -11,6 +11,7 @@ import { reconcilePositionQuantities, type ReconciliationIssue } from '../broker
 import { Decimal } from '../../money/decimal.js';
 import type { EtoroPendingOrder, EtoroPosition } from './etoro-validation.js';
 import type { EtoroBrokerSyncAdapter, EtoroCoverage, EtoroSnapshot } from './etoro-sync-adapter.js';
+import type { AccessStamp } from './etoro-access-fingerprint.js';
 
 /** A snapshot older than this is stale: it is not current broker state. */
 export const ETORO_SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
@@ -77,6 +78,11 @@ export type EtoroSyncRecord =
       readonly schema: 'etoro-sync:v1';
       readonly syncId: string;
       readonly outcome: 'success';
+      /**
+       * O22 Plan B review R3: the fingerprint of the configured broker access the read was made with (etoro-access-fingerprint.ts).
+       * Absent on every record made before it existed, or by a process without an access key.
+       */
+      readonly access?: AccessStamp;
       readonly snapshotId: string;
       readonly reconciliationId: string;
       readonly observedAt: string;
@@ -100,6 +106,8 @@ export interface EtoroServiceDeps {
   maxAgeMs?: number;
   /** The instrument registry. Without it every eToro instrument is unmapped, so a non-empty portfolio never matches. */
   instruments?: EtoroInstrumentResolver | null;
+  /** O22 Plan B review R3: stamps every successful sync with the configured broker access. Absent: no stamp (records say so). */
+  access?: { stamp(): AccessStamp } | null;
 }
 
 export interface EtoroSnapshotView {
@@ -108,6 +116,8 @@ export interface EtoroSnapshotView {
   retrievedAt: string;
   freshness: 'fresh' | 'stale';
   content: EtoroSnapshotContent;
+  /** O22 Plan B review R3: the access stamp of the sync record (null: none). */
+  access?: AccessStamp | null;
 }
 
 export interface EtoroReconciliationView {
@@ -122,6 +132,7 @@ export interface EtoroReconciliationView {
 }
 
 interface SuccessfulSync {
+  access: AccessStamp | null;
   snapshotId: string;
   reconciliationId: string;
   observedAt: string;
@@ -141,6 +152,8 @@ export interface EtoroSnapshotObservation {
   readonly storedAt: string;
   readonly sequence: number;
   readonly content: EtoroSnapshotContent;
+  /** O22 Plan B review R3: the access stamp of the sync record (null: none). */
+  readonly access?: AccessStamp | null;
 }
 
 /** O22: the stored history; `missingSnapshotRecords` counts successful syncs whose snapshot record could not be read. */
@@ -296,7 +309,8 @@ export class EtoroBrokerService {
 
     const snapshotId = 'esnap_' + hashOf(content).slice(0, 40);
     const reconciliationId = 'erec_' + hashOf({ snapshotId, observedAt: snapshot.observedAt, ledgerFingerprint: reconciled.ledgerFingerprint }).slice(0, 40);
-    const syncId = 'esync_' + hashOf({ snapshotId, reconciliationId, observedAt: snapshot.observedAt, retrievedAt: snapshot.retrievedAt }).slice(0, 40);
+    const access = this.deps.access ? this.deps.access.stamp() : null;
+    const syncId = 'esync_' + hashOf({ snapshotId, reconciliationId, observedAt: snapshot.observedAt, retrievedAt: snapshot.retrievedAt, ...(access !== null ? { access } : {}) }).slice(0, 40);
 
     await this.deps.snapshots.append(snapshotId, { schema: 'etoro-snapshot:v1', snapshotId, content });
     await this.deps.reconciliations.append(reconciliationId, {
@@ -317,6 +331,7 @@ export class EtoroBrokerService {
       reconciliationId,
       observedAt: snapshot.observedAt,
       retrievedAt: snapshot.retrievedAt,
+      ...(access !== null ? { access } : {}),
     });
     this.lastErrorCode = null;
 
@@ -350,7 +365,7 @@ export class EtoroBrokerService {
     for (const record of this.deps.syncs.all()) {
       const payload = record.payload;
       if (payload.outcome !== 'success') continue;
-      const candidate = { snapshotId: payload.snapshotId, reconciliationId: payload.reconciliationId, observedAt: payload.observedAt, retrievedAt: payload.retrievedAt, sequence: record.sequence };
+      const candidate = { snapshotId: payload.snapshotId, reconciliationId: payload.reconciliationId, observedAt: payload.observedAt, retrievedAt: payload.retrievedAt, sequence: record.sequence, access: payload.access ?? null };
       if (last === null || compareObservations(candidate, last) > 0) last = candidate;
     }
     return last;
@@ -389,7 +404,7 @@ export class EtoroBrokerService {
         missingSnapshotRecords += 1;
         continue;
       }
-      observations.push({ snapshotId: payload.snapshotId, observedAt: payload.observedAt, retrievedAt: payload.retrievedAt, storedAt: record.recordedAt, sequence: record.sequence, content: stored.payload.content });
+      observations.push({ snapshotId: payload.snapshotId, observedAt: payload.observedAt, retrievedAt: payload.retrievedAt, storedAt: record.recordedAt, sequence: record.sequence, content: stored.payload.content, access: payload.access ?? null });
     }
     return { observations: observations.sort(compareObservations), missingSnapshotRecords };
   }
@@ -422,6 +437,7 @@ export class EtoroBrokerService {
         retrievedAt: last.retrievedAt,
         freshness: freshnessOf(last.observedAt, this.deps.clock().getTime(), this.maxAgeMs),
         content: stored.payload.content,
+        access: last.access,
       },
     };
   }

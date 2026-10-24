@@ -55,6 +55,7 @@ import {
   type IntentState,
 } from './execution-intent.js';
 import type { EtoroSnapshotHistory } from '../etoro-broker-service.js';
+import { NO_ACCESS_VERIFIER, accessRefusal, type AccessStamp, type AccessVerifier } from '../etoro-access-fingerprint.js';
 import {
   EXTERNAL_CLOSURE_SCHEMA,
   ExternalClosureClaimError,
@@ -108,6 +109,11 @@ export interface AttemptRecord {
   readonly httpStatus?: number | null;
   readonly code?: string;
   readonly reasons?: readonly string[];
+  /**
+   * O22 Plan B review R3: the fingerprint of the configured broker access a started write attempt was sent with
+   * (etoro-access-fingerprint.ts). Absent on every attempt made before it existed (O22) or by a process without an access key.
+   */
+  readonly access?: AccessStamp;
 }
 
 export interface ConfirmationRecord {
@@ -190,6 +196,11 @@ export interface DemoExecutionServiceDeps {
   externalClosures?: AppendOnlyLog<ExternalClosureRecord>;
   /** O22 Plan B: the stored history of successful read-only syncs, read with every process's records (no broker request). */
   snapshotHistory?: { history(): Promise<EtoroSnapshotHistory> };
+  /**
+   * O22 Plan B review R3: the configured broker access fingerprint. Write attempts are stamped with it; every open and close needs
+   * the stored broker data it relies on to match it. Absent: nothing matches, every open and close is refused (fail closed).
+   */
+  access?: AccessVerifier;
   executionEnabled: boolean;
   clock: () => Date;
   policy?: DemoExecutionPolicy;
@@ -447,9 +458,12 @@ export class EtoroDemoExecutionService {
     // taken, never inside it: the precondition below runs synchronously in that lock and takes no other lock, so no lock order
     // between logs (and no deadlock) can arise. A snapshot stored after this read is not seen (see O22_CLOSE_POSITION_EVIDENCE.md).
     const reservationEvidence = p.intent.action === 'close' ? await this.closeEvidence(p.intent) : null;
-    // O22 Plan B: likewise for an open once an attestation exists: the newest stored snapshot must not show an attested position.
+    // O22 Plan B: likewise for an open: the newest stored snapshot must not show an attested position, and (review R3) the stored data
+    // the write relies on must have been read with the configured broker access.
     await this.deps.externalClosures?.sync();
-    const reservationExternal = await this.externalClosureInput(p.intent);
+    const reservationRead = p.intent.action === 'open' ? await this.readPositions() : null;
+    const reservationExternal = this.externalClosureInput(p.intent, reservationRead);
+    const reservationAccess = this.accessRefusals(p.intent, p.intent.action === 'close' ? reservationEvidence?.snapshot ?? null : reservationRead?.snapshot ?? null);
     // The reservation step and the at-most-once guard. SUBMITTING is entered once, only from APPROVED, and only if the book limits
     // still hold for the book as it is inside the critical section, after every other process's records were applied.
     let submitting;
@@ -464,6 +478,7 @@ export class EtoroDemoExecutionService {
           // O22 D4 (R2): the re-read evidence, judged at this moment (age), with the binding from the caught-up intent log.
           if (reservationEvidence !== null) refusals.push(...closePositionRefusals(p.intent, { ...reservationEvidence, ...this.bindingOf(p.intent) }, this.now(), this.policy));
           if (reservationExternal !== undefined) refusals.push(...externalClosureOpenRefusals(reservationExternal.attestedPositionIds, reservationExternal.read, this.now(), this.policy.maxBrokerSyncAgeMs));
+          refusals.push(...reservationAccess);
           if (refusals.length > 0) throw new DemoExecutionError('GATE_REFUSED', refusals.join(','), refusals);
         },
       }));
@@ -472,7 +487,7 @@ export class EtoroDemoExecutionService {
       throw error;
     }
     if (submitting.status !== 'APPLIED') throw new DemoExecutionError('INTENT_STATE_INVALID', 'SUBMITTING');
-    await this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation, phase: 'started', requestId, at: this.now(), by: operator });
+    await this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation, phase: 'started', requestId, at: this.now(), by: operator, ...this.accessStamp() });
 
     // O22 Plan B review R1: a close reads the attestation log again AFTER its reservation is recorded and before the write. An
     // attestation of its position that committed in the meantime stops it: not sent (REJECTED), the budget stays spent. Together with
@@ -734,7 +749,7 @@ export class EtoroDemoExecutionService {
     const requestId = this.nextRequestId().toLowerCase();
     const attemptId = 'eatt_' + hashOf({ intentId, operation: 'demo.order.cancel', n: earlier.length }).slice(0, 40);
     // The started record id is fixed per attempt number, and the precondition re-checks inside the critical section.
-    const started = await guarded(() => this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation: 'demo.order.cancel', phase: 'started', requestId, at: this.now(), by: operator }, {
+    const started = await guarded(() => this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation: 'demo.order.cancel', phase: 'started', requestId, at: this.now(), by: operator, ...this.accessStamp() }, {
       precondition: () => {
         const current = this.cancelAttempts(intentId);
         if (current.length !== earlier.length || current.some((outcome) => outcome !== 'rejected')) throw new DemoExecutionError('INTENT_STATE_INVALID', 'a cancel is in progress');
@@ -802,6 +817,8 @@ export class EtoroDemoExecutionService {
       continuitySnapshotId: e.continuity.snapshotId,
       continuitySnapshotObservedAt: e.continuity.observedAt,
       accountIdentity: 'not_verified',
+      accessContinuity: 'same_configured_credentials',
+      access: e.access,
       accountStatement: claim.accountStatement,
       evidenceHeads: {
         intents: { size: this.deps.intents.size, headHash: this.deps.intents.headHash },
@@ -850,6 +867,8 @@ export class EtoroDemoExecutionService {
         .map((c) => ({ state: c.state })),
       existing: this.externalClosureRecords().filter((r) => r.openIntentId === openIntentId || bound.includes(r.positionId)),
       history,
+      openAccess: this.openAttemptAccess(openIntentId),
+      checkAccess: (stamp) => this.access.check(stamp),
     };
   }
 
@@ -875,11 +894,54 @@ export class EtoroDemoExecutionService {
   }
 
   /** O22 Plan B: what an open is checked against once an attestation exists (the newest stored snapshot; no broker request). */
-  private async externalClosureInput(intent: ExecutionIntent): Promise<{ attestedPositionIds: number[]; read: Awaited<ReturnType<DemoPositionSource['latest']>> | null } | undefined> {
+  private externalClosureInput(intent: ExecutionIntent, read: Awaited<ReturnType<DemoPositionSource['latest']>> | null): { attestedPositionIds: number[]; read: Awaited<ReturnType<DemoPositionSource['latest']>> | null } | undefined {
     if (intent.action !== 'open') return undefined;
     const attestedPositionIds = this.externalClosureRecords().map((r) => r.positionId);
     if (attestedPositionIds.length === 0) return undefined;
-    return { attestedPositionIds, read: this.deps.positions === undefined ? null : await this.deps.positions.latest() };
+    return { attestedPositionIds, read: this.deps.positions === undefined ? null : read };
+  }
+
+  /** The newest stored snapshot (no broker request); none without a position source. */
+  private async readPositions(): Promise<Awaited<ReturnType<DemoPositionSource['latest']>>> {
+    return this.deps.positions === undefined ? { snapshot: null, problem: null } : this.deps.positions.latest();
+  }
+
+  // ------------------------------------------------------------------------------------------------ broker access (review R3)
+
+  private get access(): AccessVerifier {
+    return this.deps.access ?? NO_ACCESS_VERIFIER;
+  }
+
+  /** The stamp of a write attempt, when this process has an access key. */
+  private accessStamp(): { access: AccessStamp } | Record<string, never> {
+    return this.deps.access === undefined ? {} : { access: this.deps.access.stamp() };
+  }
+
+  /** The stamp of the open's write attempt (the one that sent the open), or null. */
+  private openAttemptAccess(openIntentId: string | null): AccessStamp | null {
+    if (openIntentId === null) return null;
+    const started = this.deps.attempts.all().map((r) => r.payload).filter((a) => a.intentId === openIntentId && a.operation === 'demo.order.open' && a.phase === 'started');
+    return started.length === 1 ? started[0]!.access ?? null : null;
+  }
+
+  /**
+   * O22 Plan B review R3: an open or a close may rely only on stored broker data read with the configured broker access: the newest
+   * stored snapshot (for an open), the close's evidence snapshot and the write attempt of the open it closes (for a close). Fixed
+   * reason codes; no value. A missing stamp (every O22 record), another configuration, a rotated-out key or no configured key refuse.
+   */
+  private accessRefusals(intent: ExecutionIntent, snapshot: { access?: unknown } | null): string[] {
+    const reasons: string[] = [];
+    const push = (prefix: string, stamp: unknown) => {
+      const refusal = accessRefusal(prefix, this.access.check(stamp));
+      if (refusal !== null) reasons.push(refusal);
+    };
+    if (intent.action === 'open') {
+      push('BROKER_SNAPSHOT', snapshot?.access ?? null);
+    } else {
+      push('CLOSE_POSITION_EVIDENCE', snapshot?.access ?? null);
+      push('CLOSE_TARGET_OPEN', this.openAttemptAccess(intent.closesIntentId));
+    }
+    return reasons;
   }
 
   // -------------------------------------------------------------------------------------------------------- internals
@@ -1190,7 +1252,9 @@ export class EtoroDemoExecutionService {
     const instrument = this.deps.registry.get(intent.instrumentId) ?? null;
     const mapping = instrument === null ? null : this.deps.registry.mappingAt(intent.instrumentId, ETORO_MAPPING_PROVIDER, now);
     const closeEvidence = intent.action === 'close' ? await this.closeEvidence(intent) : null;
-    const externalClosures = await this.externalClosureInput(intent);
+    const openRead = intent.action === 'open' ? await this.readPositions() : null;
+    const externalClosures = this.externalClosureInput(intent, openRead);
+    const accessRefusals = this.accessRefusals(intent, closeEvidence !== null ? closeEvidence.snapshot : openRead?.snapshot ?? null);
     const verdict = evaluateDemoExecutionGate({
       phase,
       intent,
@@ -1208,6 +1272,7 @@ export class EtoroDemoExecutionService {
       writeSlotAvailable: this.deps.adapter.pacer.available(Date.parse(now)),
       closePosition: closeEvidence,
       ...(externalClosures !== undefined ? { externalClosures } : {}),
+      accessRefusals,
     });
     let exposure = Decimal.from(0);
     if (intent.action === 'open' && quote !== null && quote.last.isPositive()) {

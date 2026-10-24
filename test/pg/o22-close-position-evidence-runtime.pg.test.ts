@@ -13,7 +13,7 @@ import { DemoExecutionError } from '../../src/broker/etoro/execution/etoro-demo-
 import { storedPositionSource } from '../../src/runtime/demo-execution-sources.js';
 import { FixtureEtoroTransport, emptyDemoPortfolio } from '../broker/etoro/o20-fixture.js';
 import { documentedPortfolio, documentedPosition } from '../broker/etoro/o21a-documented-fixture.js';
-import { CREATOR, ETORO_AAPL_ID, HUMAN, ScriptedBroker, closeInput, filledOpen, o21Fixture, type Fixture, type O21Stores } from '../broker/etoro/o21-fixture.js';
+import { CREATOR, ETORO_AAPL_ID, HUMAN, ScriptedBroker, TEST_ACCESS, closeInput, filledOpen, o21Fixture, type Fixture, type O21Stores } from '../broker/etoro/o21-fixture.js';
 import { createTestDatabase, pgAvailable, pgSkipReason, type TestDatabase } from './db.js';
 
 // TEST ONLY: the write path needs the compile-time lock open for this module.
@@ -77,6 +77,8 @@ describe.skipIf(!pgAvailable)('O22 D4 close evidence through the runtime evidenc
       reconciliations: await AppendOnlyLog.open<EtoroReconciliationRecord>('etoro-reconciliations', await PostgresAppendOnlyStore.open<EtoroReconciliationRecord>(pool, 'etoro-reconciliations'), { clock }),
       syncs: await AppendOnlyLog.open<EtoroSyncRecord>('etoro-sync-events', await PostgresAppendOnlyStore.open<EtoroSyncRecord>(pool, 'etoro-sync-events'), { clock }),
       clock,
+      // O22 Plan B review R3: the read is stamped with the same configured access as the execution service of the fixture.
+      access: TEST_ACCESS,
     });
     return { f, etoro, portfolio, beforeNextRead: (step) => { pending = step; } };
   }
@@ -88,7 +90,12 @@ describe.skipIf(!pgAvailable)('O22 D4 close evidence through the runtime evidenc
     const broker = new ScriptedBroker();
     const a = await startProcess(db.pool, broker);
     const b = await startProcess(db.extraPool(), broker);
+    // Review R3: an open needs the newest stored snapshot read with the configured access: A's first (empty) read.
+    a.portfolio.response = { status: 200, body: emptyDemoPortfolio() };
+    await a.etoro.sync();
     const open = await filledOpen(a.f, POSITION);
+    // A later read (one at the same time with another content would be ambiguous, and refused).
+    a.f.advance(1_000);
     a.portfolio.response = { status: 200, body: withPosition() };
     await a.etoro.sync();
     const created = await a.f.service.create(closeInput(open), CREATOR);

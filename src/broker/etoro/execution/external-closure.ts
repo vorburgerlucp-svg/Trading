@@ -29,6 +29,7 @@ import { hashOf } from '../../../persistence/canonical-json.js';
 import { compareObservations, snapshotContentProblems, type EtoroSnapshotHistory, type EtoroSnapshotObservation } from '../etoro-broker-service.js';
 import type { IntentActor, IntentSide, IntentState } from './execution-intent.js';
 import type { ClosePositionEvidenceProblem, ClosePositionSnapshot } from './execution-gate.js';
+import { accessRefusal, type AccessStamp, type AccessVerdict } from '../etoro-access-fingerprint.js';
 
 export const EXTERNAL_CLOSURE_SCHEMA = 'etoro-demo-external-closure:v1' as const;
 /** The one statement an operator can make; anything else is refused. */
@@ -73,6 +74,13 @@ export interface ExternalClosureRecord {
   readonly continuitySnapshotObservedAt: string;
   /** R3: NEXUS has no stored account identity; the binding of order and snapshots to one account is not technically verified. */
   readonly accountIdentity: 'not_verified';
+  /**
+   * R3 access continuity: the open's write attempt, the continuity snapshot and the evidence snapshot were each stamped with the
+   * configured broker access, and each stamp matched it when the record was made. It shows the same configured CREDENTIALS, never
+   * the same account (see etoro-access-fingerprint.ts).
+   */
+  readonly accessContinuity: 'same_configured_credentials';
+  readonly access: { readonly openAttempt: AccessStamp; readonly continuitySnapshot: AccessStamp; readonly evidenceSnapshot: AccessStamp };
   readonly accountStatement: typeof EXTERNAL_CLOSURE_ACCOUNT_STATEMENT;
   /** The heads of the logs the evidence was read from, so the check can be repeated on exactly that stored state. */
   readonly evidenceHeads: { readonly intents: LogHead; readonly confirmations: LogHead; readonly observations: number };
@@ -141,6 +149,9 @@ export interface ExternalClosureFacts {
   /** Attestations already stored for the open. */
   readonly existing: readonly ExternalClosureRecord[];
   readonly history: EtoroSnapshotHistory;
+  /** R3: the access stamp of the open's write attempt (null: none), and the check of a stamp against the configured access. */
+  readonly openAccess: AccessStamp | null;
+  readonly checkAccess: (stamp: unknown) => AccessVerdict;
 }
 
 export interface ExternalClosureEvidence {
@@ -152,6 +163,7 @@ export interface ExternalClosureEvidence {
   readonly boundAt: string;
   readonly snapshot: EtoroSnapshotObservation;
   readonly continuity: EtoroSnapshotObservation;
+  readonly access: { readonly openAttempt: AccessStamp; readonly continuitySnapshot: AccessStamp; readonly evidenceSnapshot: AccessStamp };
 }
 
 const FILL_OUTCOMES: ReadonlySet<string> = new Set(['filled', 'partially_filled', 'partially_filled_final']);
@@ -220,10 +232,22 @@ export function externalClosureRefusals(claim: ExternalClosureClaim, facts: Exte
     (o.content.positions ?? []).some((p) => p.positionId === positionId && p.etoroInstrumentId === open.etoroInstrumentId && p.direction === open.side && p.openOrder !== null && p.openOrder.orderId === open.brokerOrderId));
   if (continuity === undefined) reasons.push('ACCOUNT_CONTINUITY_NOT_SHOWN');
 
-  if (reasons.length > 0 || continuity === undefined) return { reasons, evidence: null };
+  // R3 access continuity: the order was sent, and both snapshots were read, with the configured broker access (same credentials).
+  // A record without a stamp (every O22 record) shows nothing: refused, never filled in.
+  const accessChecks: [string, unknown][] = [['OPEN_ATTEMPT', facts.openAccess], ['EVIDENCE_SNAPSHOT', snapshot.access ?? null]];
+  if (continuity !== undefined) accessChecks.splice(1, 0, ['CONTINUITY_SNAPSHOT', continuity.access ?? null]);
+  for (const [prefix, stamp] of accessChecks) {
+    const refusal = accessRefusal(prefix, facts.checkAccess(stamp));
+    if (refusal !== null) reasons.push(refusal);
+  }
+
+  if (reasons.length > 0 || continuity === undefined || !facts.openAccess || !continuity.access || !snapshot.access) return { reasons, evidence: null };
   return {
     reasons: [],
-    evidence: { positionId, etoroInstrumentId: open.etoroInstrumentId, direction: open.side, brokerOrderId: open.brokerOrderId, bindingConfirmationId: binding.confirmationId, boundAt, snapshot, continuity },
+    evidence: {
+      positionId, etoroInstrumentId: open.etoroInstrumentId, direction: open.side, brokerOrderId: open.brokerOrderId, bindingConfirmationId: binding.confirmationId, boundAt, snapshot, continuity,
+      access: { openAttempt: facts.openAccess, continuitySnapshot: continuity.access, evidenceSnapshot: snapshot.access },
+    },
   };
 }
 

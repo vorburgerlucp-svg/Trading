@@ -6,6 +6,7 @@
 // Error messages never contain a secret or the database URL.
 
 import { isValidEtoroKey } from '../broker/etoro/etoro-credentials.js';
+import { ACCESS_KEY_ID, ACCESS_KEY_SECRET } from '../broker/etoro/etoro-access-fingerprint.js';
 
 export const RUNTIME_CONFIG_VERSION = 'nexus-runtime-config:v1' as const;
 
@@ -49,6 +50,13 @@ export interface RuntimeConfig {
    * intent route is refused. The token is server-side only: never logged, returned or persisted.
    */
   readonly operator: { readonly id: string; readonly token: string } | null;
+  /**
+   * O22 Plan B review R3: the NEXUS key of the broker access fingerprint (HMAC-SHA256; etoro-access-fingerprint.ts), managed separately
+   * from the broker keys: NEXUS_BROKER_ACCESS_KEY_ID / NEXUS_BROKER_ACCESS_KEY, and during a rotation the previous pair
+   * NEXUS_BROKER_ACCESS_PREVIOUS_KEY_ID / NEXUS_BROKER_ACCESS_PREVIOUS_KEY. No default. Without it, no demo open or close passes the
+   * gate. Server-side only: never logged, returned or persisted (only the key ids appear in stored stamps).
+   */
+  readonly brokerAccess: { readonly current: { readonly id: string; readonly secret: string } | null; readonly previous: { readonly id: string; readonly secret: string } | null };
   readonly etoroDemoExecution: {
     /**
      * ETORO_DEMO_EXECUTION_ENABLED=1 (O21). Off by default. It needs ETORO_ENABLED=1 and ETORO_TRADING_MODE=demo, and it does not
@@ -69,6 +77,9 @@ export interface RuntimeConfigSummary {
   etoro: 'demo_read_only' | 'not_configured';
   etoroDemoExecution: 'enabled' | 'disabled';
   operatorAuth: 'configured' | 'not_configured';
+  /** O22 Plan B review R3: whether a broker access key is configured, and (not secret) its key ids. */
+  brokerAccess: 'configured' | 'not_configured';
+  brokerAccessKeyIds: { current: string | null; previous: string | null };
 }
 
 const API_KEY = /^[A-Za-z0-9]{8,128}$/;
@@ -155,6 +166,25 @@ export function loadRuntimeConfig(env: Environment): RuntimeConfig {
     if (operatorToken === etoroApiKey || operatorToken === etoroUserKey) invalid('NEXUS_OPERATOR_TOKEN must not be a broker key');
   }
 
+  // Broker access fingerprint key (O22 Plan B review R3). Each id/key pair together or not at all; the previous pair only with a
+  // current one; ids and keys differ; no key may be a broker key or the operator token. Refusals name the variable, never a value.
+  const accessPair = (idName: string, keyName: string): { id: string; secret: string } | null => {
+    const id = text(env, idName);
+    const secret = text(env, keyName);
+    if ((id === undefined) !== (secret === undefined)) invalid(idName + ' and ' + keyName + ' must be set together');
+    if (id === undefined || secret === undefined) return null;
+    if (!ACCESS_KEY_ID.test(id)) invalid(idName + ' must be 1 to 32 characters: a-z, 0-9, ".", "_" or "-"');
+    if (!ACCESS_KEY_SECRET.test(secret)) invalid(keyName + ' must be 32 to 512 printable characters without spaces');
+    if (secret === etoroApiKey || secret === etoroUserKey || secret === operatorToken) invalid(keyName + ' must not be a broker key or the operator token');
+    return { id, secret };
+  };
+  const accessCurrent = accessPair('NEXUS_BROKER_ACCESS_KEY_ID', 'NEXUS_BROKER_ACCESS_KEY');
+  const accessPrevious = accessPair('NEXUS_BROKER_ACCESS_PREVIOUS_KEY_ID', 'NEXUS_BROKER_ACCESS_PREVIOUS_KEY');
+  if (accessPrevious !== null && accessCurrent === null) invalid('NEXUS_BROKER_ACCESS_PREVIOUS_KEY needs a current NEXUS_BROKER_ACCESS_KEY');
+  if (accessPrevious !== null && accessCurrent !== null && (accessPrevious.id === accessCurrent.id || accessPrevious.secret === accessCurrent.secret)) {
+    invalid('the previous broker access key must differ from the current one (id and key)');
+  }
+
   return Object.freeze({
     version: RUNTIME_CONFIG_VERSION,
     host,
@@ -175,6 +205,7 @@ export function loadRuntimeConfig(env: Environment): RuntimeConfig {
     }),
     operator: operatorId !== undefined && operatorToken !== undefined ? Object.freeze({ id: operatorId, token: operatorToken }) : null,
     etoroDemoExecution: Object.freeze({ enabled: demoExecutionEnabled }),
+    brokerAccess: Object.freeze({ current: accessCurrent === null ? null : Object.freeze(accessCurrent), previous: accessPrevious === null ? null : Object.freeze(accessPrevious) }),
   });
 }
 
@@ -189,5 +220,7 @@ export function summarizeRuntimeConfig(config: RuntimeConfig): RuntimeConfigSumm
     etoro: config.etoro.enabled ? 'demo_read_only' : 'not_configured',
     etoroDemoExecution: config.etoroDemoExecution.enabled ? 'enabled' : 'disabled',
     operatorAuth: config.operator !== null ? 'configured' : 'not_configured',
+    brokerAccess: config.brokerAccess.current !== null ? 'configured' : 'not_configured',
+    brokerAccessKeyIds: { current: config.brokerAccess.current?.id ?? null, previous: config.brokerAccess.previous?.id ?? null },
   };
 }

@@ -20,11 +20,19 @@ import {
 import { DEFAULT_DEMO_EXECUTION_POLICY, type DemoExecutionPolicy, type EvidencePosition, type GateQuote } from '../../../src/broker/etoro/execution/execution-gate.js';
 import type { ExternalClosureRecord } from '../../../src/broker/etoro/execution/external-closure.js';
 import type { EtoroSnapshotHistory } from '../../../src/broker/etoro/etoro-broker-service.js';
+import { BrokerAccessFingerprint, type AccessVerifier } from '../../../src/broker/etoro/etoro-access-fingerprint.js';
 import { AAPL } from '../../market-data/fixtures.js';
 
 export const O21_NOW = '2026-10-16T14:00:00.000Z';
 export const API_KEY_MARKER = 'O21-API-KEY-MARKER-0000000000000001';
 export const USER_KEY_MARKER = 'O21-USER-KEY-MARKER-000000000000000000000000000000000002';
+/** O22 Plan B review R3, TEST ONLY: the NEXUS access fingerprint key of the tests (a marker, not a real secret). */
+export const TEST_ACCESS_KEY = Object.freeze({ id: 'test-k1', secret: 'O22-TEST-ACCESS-HMAC-KEY-MARKER-0123456789abcdef' });
+/** The access fingerprint of the fixture's credentials under the test key: what the fixture's process is configured with. */
+export function testAccess(options: { userKey?: string; current?: { id: string; secret: string }; previous?: { id: string; secret: string } | null } = {}): BrokerAccessFingerprint {
+  return new BrokerAccessFingerprint({ broker: 'etoro', environment: 'demo', credentials: { apiKey: API_KEY_MARKER, userKey: options.userKey ?? USER_KEY_MARKER }, current: options.current ?? TEST_ACCESS_KEY, previous: options.previous ?? null });
+}
+export const TEST_ACCESS = testAccess();
 export const ETORO_AAPL_ID = 1001;
 /** A second test instrument with its own governed eToro mapping, for cross-instrument limits. */
 export const MSFT = Object.freeze({ ...AAPL, instrumentId: 'ins_o21_msft', symbol: 'MSFT', name: 'Microsoft Corp' });
@@ -151,6 +159,8 @@ export interface FixtureOptions {
    * complete). Default: the default test position, open (AAPL, buy). null: no snapshot at all.
    */
   brokerPositions?: EvidencePosition[] | null;
+  /** O22 Plan B review R3: the process's broker access fingerprint. Default TEST_ACCESS; null: none configured (fail closed). */
+  access?: AccessVerifier | null;
   /** O22 D4: replaces the scripted snapshot by a real position source (e.g. storedPositionSource over the stored O20 logs). */
   positionSource?: DemoPositionSource;
   /** O22 Plan B: the store of the external closure attestations, and the stored sync history they are checked against. */
@@ -177,7 +187,7 @@ export interface Fixture {
   setSafety(safety: PortfolioSafetyDecision | null): void;
   setBroker(status: { connection: string; lastSuccessfulSync: string | null }): void;
   /** O22 D4: the stored broker snapshot a close is checked against (null: none). */
-  setSnapshot(snapshot: { observedAt?: string; freshness?: 'fresh' | 'stale'; positionCount?: number; positions: EvidencePosition[] } | null): void;
+  setSnapshot(snapshot: { observedAt?: string; freshness?: 'fresh' | 'stale'; positionCount?: number; positions: EvidencePosition[]; access?: unknown } | null): void;
   advance(ms: number): void;
   requestIds: string[];
 }
@@ -234,7 +244,8 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
   let quote: GateQuote | null = options.quote === undefined ? freshQuote() : options.quote;
   let safety: PortfolioSafetyDecision | null = options.safety === undefined ? normalSafety() : options.safety;
   let brokerStatus = options.broker ?? { connection: 'connected', lastSuccessfulSync: '2026-10-16T13:58:00.000Z' };
-  type SnapshotSetting = { observedAt?: string; freshness?: 'fresh' | 'stale'; positionCount?: number; positions: EvidencePosition[] } | null;
+  type SnapshotSetting = { observedAt?: string; freshness?: 'fresh' | 'stale'; positionCount?: number; positions: EvidencePosition[]; access?: unknown } | null;
+  const access = options.access === undefined ? TEST_ACCESS : options.access;
   let snapshot: SnapshotSetting = options.brokerPositions === null ? null : { positions: options.brokerPositions ?? [DEFAULT_BROKER_POSITION] };
   const service = new EtoroDemoExecutionService({
     adapter,
@@ -254,12 +265,15 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
           freshness: snapshot.freshness ?? 'fresh',
           positionCount: snapshot.positionCount ?? snapshot.positions.length,
           positions: snapshot.positions,
+          // The scripted snapshot was read with the fixture's configured access, unless a test says otherwise.
+          access: 'access' in snapshot ? snapshot.access : TEST_ACCESS.stamp(),
         },
         problem: null,
       }),
     },
     ...(externalClosures !== null ? { externalClosures } : {}),
     ...(options.snapshotHistory !== undefined ? { snapshotHistory: options.snapshotHistory } : {}),
+    ...(access !== null ? { access } : {}),
     executionEnabled: options.executionEnabled ?? true,
     policy: options.policy ?? DEFAULT_DEMO_EXECUTION_POLICY,
     clock: now,

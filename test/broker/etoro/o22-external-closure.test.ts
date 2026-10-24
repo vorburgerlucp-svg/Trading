@@ -26,7 +26,7 @@ import {
   type ExternalClosureFacts,
   type ExternalClosureRecord,
 } from '../../../src/broker/etoro/execution/external-closure.js';
-import { CREATOR, HUMAN, approvedOpen, closeInput, filledOpen, openInput, orderAccepted } from './o21-fixture.js';
+import { CREATOR, HUMAN, TEST_ACCESS, approvedOpen, closeInput, filledOpen, openInput, orderAccepted } from './o21-fixture.js';
 import { FaultStore, InjectedCrash } from './o22-fault-store.js';
 import { OPEN_ORDER, POSITION, closureProcess, filledThenClosedByHand, inMemoryEtoroStores, type ClosureProcess } from './o22-external-closure-scenario.js';
 
@@ -71,7 +71,10 @@ describe('O22 Plan B: a complete attestation', () => {
     expect(record.continuitySnapshotId).not.toBe(closedSnapshot);
     expect(record.bindingConfirmationId).toMatch(/^econf_/);
     expect(record.evidenceHeads.intents.size).toBe(before.intents);
-    expect(record.evidenceHeads.observations).toBe(2);
+    // The seeded empty read (the process's first sync), the read with the position, the read without it.
+    expect(record.evidenceHeads.observations).toBe(3);
+    // R3: the order and both snapshots were stamped with the configured access; the record keeps the stamps, never a key.
+    expect(record).toMatchObject({ accessContinuity: 'same_configured_credentials', access: { openAttempt: TEST_ACCESS.stamp(), continuitySnapshot: TEST_ACCESS.stamp(), evidenceSnapshot: TEST_ACCESS.stamp() } });
     expect(untouched(p)).toEqual(before);
     expect(await p.f.service.cycleBudget()).toEqual(budget);
     const view = await p.f.service.get(open);
@@ -166,7 +169,8 @@ describe('O22 Plan B: missing evidence refuses (nothing recorded)', () => {
     // The sync appends the snapshot, then the reconciliation, then the sync record: crash after the snapshot.
     const etoroStores = inMemoryEtoroStores();
     const syncs = new FaultStore(etoroStores.syncs);
-    const q = await closureProcess({ stores: p.f.stores, etoroStores: { ...etoroStores, syncs }, broker: p.f.broker });
+    // No seeded read here: its (empty) content would be the same snapshot as the one whose sync record is lost.
+    const q = await closureProcess({ stores: p.f.stores, etoroStores: { ...etoroStores, syncs }, broker: p.f.broker, seed: false });
     q.f.clock.now = new Date(p.f.clock.now.getTime());
     syncs.crashAt(() => true, 'before');
     await expect(q.sync('without_position')).rejects.toBeInstanceOf(InjectedCrash);
@@ -367,7 +371,7 @@ describe('O22 Plan B: the rule and the open check (pure)', () => {
       ...(over.content ?? {}),
     };
     const at = over.observedAt ?? '2026-10-16T14:05:00.000Z';
-    return { snapshotId: over.snapshotId ?? 'esnap_' + hashOf(content).slice(0, 40), observedAt: at, retrievedAt: at, storedAt: at, sequence: over.sequence ?? 2, content: content as unknown as EtoroSnapshotObservation['content'] };
+    return { snapshotId: over.snapshotId ?? 'esnap_' + hashOf(content).slice(0, 40), observedAt: at, retrievedAt: at, storedAt: at, sequence: over.sequence ?? 2, content: content as unknown as EtoroSnapshotObservation['content'], access: TEST_ACCESS.stamp() };
   }
   const continuity = observation({ observedAt: '2026-10-16T14:02:00.000Z', sequence: 1, positions: [heldPosition] });
   const closed = observation({});
@@ -380,6 +384,8 @@ describe('O22 Plan B: the rule and the open check (pure)', () => {
     closes: [],
     existing: [],
     history: { observations: [continuity, closed], missingSnapshotRecords: 0 },
+    openAccess: TEST_ACCESS.stamp(),
+    checkAccess: (stamp) => TEST_ACCESS.check(stamp),
     ...over,
   });
   const claim = { positionId: POSITION, snapshotId: closed.snapshotId, statement: EXTERNAL_CLOSURE_STATEMENT, accountStatement: EXTERNAL_CLOSURE_ACCOUNT_STATEMENT } as const;
@@ -412,6 +418,14 @@ describe('O22 Plan B: the rule and the open check (pure)', () => {
     ['the earlier snapshot states no opening order', earlier([{ ...heldPosition, openOrder: null }]), ['ACCOUNT_CONTINUITY_NOT_SHOWN']],
     ['the earlier snapshot shows another direction', earlier([{ ...heldPosition, direction: 'sell' }]), ['ACCOUNT_CONTINUITY_NOT_SHOWN']],
     ['the earlier snapshot was taken before the order was submitted', earlier([heldPosition], '2026-10-16T13:59:00.000Z'), ['ACCOUNT_CONTINUITY_NOT_SHOWN']],
+    // Review R3, the O22 case after a status read and a sync: the open's attempt and the continuity snapshot (both of 20.10.) carry
+    // no access stamp; only the new evidence snapshot does. Never filled in: refused.
+    ['O22-like: the attempt of the open and the continuity snapshot carry no stamp', {
+      openAccess: null,
+      history: { observations: [{ ...continuity, access: null }, closed], missingSnapshotRecords: 0 },
+    }, ['OPEN_ATTEMPT_ACCESS_NOT_SHOWN', 'CONTINUITY_SNAPSHOT_ACCESS_NOT_SHOWN']],
+    ['the evidence snapshot was read with other credentials', { history: { observations: [continuity, { ...closed, access: { ...closed.access!, fingerprint: 'f'.repeat(64) } }], missingSnapshotRecords: 0 } }, ['EVIDENCE_SNAPSHOT_ACCESS_MISMATCH']],
+    ['the process has no access key', { checkAccess: () => 'not_configured' as const }, ['OPEN_ATTEMPT_ACCESS_NOT_CONFIGURED', 'CONTINUITY_SNAPSHOT_ACCESS_NOT_CONFIGURED', 'EVIDENCE_SNAPSHOT_ACCESS_NOT_CONFIGURED']],
   ] as const)('%s', (_name, over, expected) => {
     expect(externalClosureRefusals(claim, facts(over as Partial<ExternalClosureFacts>)).reasons).toEqual(expected);
   });

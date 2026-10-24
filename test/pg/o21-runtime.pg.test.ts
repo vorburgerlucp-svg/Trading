@@ -41,6 +41,7 @@ async function rows(database: string, text: string): Promise<Record<string, unkn
 
 const databases: TestDatabase[] = [];
 const OPERATOR_TOKEN = 'O21-PG-OPERATOR-TOKEN-0123456789abcdef-xyz';
+const ACCESS_KEY = 'O22-PG-ACCESS-HMAC-KEY-MARKER-0123456789abcdef';
 
 /** The route takes the intent without createdBy: the creator is the authenticated operator. Since O22 the runtime cycle policy caps an open at 100 USD. */
 function routeIntent(): Record<string, unknown> {
@@ -71,6 +72,9 @@ describe.skipIf(!pgAvailable)('O21 runtime on PostgreSQL' + (pgAvailable ? '' : 
       ETORO_DEMO_EXECUTION_ENABLED: '1',
       NEXUS_OPERATOR_ID: 'operator-pg',
       NEXUS_OPERATOR_TOKEN: OPERATOR_TOKEN,
+      // O22 Plan B review R3: the separately managed key of the broker access fingerprint.
+      NEXUS_BROKER_ACCESS_KEY_ID: 'pg-k1',
+      NEXUS_BROKER_ACCESS_KEY: ACCESS_KEY,
     };
     const runtime = await startRuntime(env, {
       provider: null,
@@ -131,6 +135,10 @@ describe.skipIf(!pgAvailable)('O21 runtime on PostgreSQL' + (pgAvailable ? '' : 
     expect(everything).not.toContain(API_KEY_MARKER);
     expect(everything).not.toContain(USER_KEY_MARKER);
     expect(everything).not.toContain(OPERATOR_TOKEN);
+    expect(everything).not.toContain(ACCESS_KEY);
+    // R3: the stored read carries the stamp of the configured access (key id and HMAC only), never a key.
+    const syncs = await rows(db.name, "SELECT payload FROM append_only_records WHERE log_name = 'etoro-sync-events' ORDER BY sequence");
+    expect(syncs.map((r) => (r.payload as { access?: { keyId: string } }).access?.keyId)).toEqual(['pg-k1']);
     expect(everything.toLowerCase()).not.toContain('x-api-key');
   });
 

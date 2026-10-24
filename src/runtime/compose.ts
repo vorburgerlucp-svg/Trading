@@ -31,6 +31,7 @@ import {
 import { DEMO_E2E_CYCLE_POLICY } from '../broker/etoro/execution/execution-gate.js';
 import { EtoroDemoAccountSafetySource, type DemoAccountValuationRecord } from '../broker/etoro/execution/demo-account-safety.js';
 import type { ExternalClosureRecord } from '../broker/etoro/execution/external-closure.js';
+import type { AccessVerifier } from '../broker/etoro/etoro-access-fingerprint.js';
 import { NO_DEMO_SAFETY_SOURCE, storedPositionSource, storedQuoteSource } from './demo-execution-sources.js';
 
 export interface ComposeInput {
@@ -43,6 +44,11 @@ export interface ComposeInput {
   ping: () => Promise<boolean>;
   version: string;
   clock?: () => Date;
+  /**
+   * O22 Plan B review R3: the access fingerprint of the configured eToro credentials. Absent: syncs and write attempts carry no stamp,
+   * and every demo open and close is refused (fail closed).
+   */
+  brokerAccess?: AccessVerifier;
   /** The eToro demo read-only wiring (O20). Absent when ETORO_ENABLED is 0: the broker then reports not connected. */
   etoro?: {
     transport: EtoroTransport;
@@ -97,6 +103,8 @@ export async function composeRuntime(input: ComposeInput): Promise<RuntimeServic
         clock,
         // The human-governed etoro mapping maps eToro positions to NEXUS instruments; nothing is registered automatically.
         instruments: registry,
+        // O22 Plan B review R3: every successful sync is stamped with the configured broker access.
+        access: input.brokerAccess ?? null,
       })
     : null;
   const executionInput = input.etoroDemoExecution;
@@ -134,6 +142,7 @@ export async function composeRuntime(input: ComposeInput): Promise<RuntimeServic
         ...(executionInput.externalClosures !== undefined && etoro !== null
           ? { externalClosures: executionInput.externalClosures, snapshotHistory: { history: () => etoro.snapshotHistory() } }
           : {}),
+        ...(input.brokerAccess !== undefined ? { access: input.brokerAccess } : {}),
         executionEnabled: true,
         // O22: the runtime runs the one controlled demo cycle only: one open and one close submission over the whole intent log,
         // at most 100 USD at leverage 1. Stricter than the O21 default in every field; a code constant, never configuration.

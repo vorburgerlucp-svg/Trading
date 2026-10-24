@@ -17,7 +17,7 @@ import { parseExecutionIntent } from '../../../src/broker/etoro/execution/execut
 import { storedPositionSource } from '../../../src/runtime/demo-execution-sources.js';
 import { FixtureEtoroTransport, emptyDemoPortfolio } from './o20-fixture.js';
 import { documentedPortfolio, documentedPosition } from './o21a-documented-fixture.js';
-import { CREATOR, DEFAULT_BROKER_POSITION, ETORO_AAPL_ID, HUMAN, closeInput, filledOpen, o21Fixture, type Fixture } from './o21-fixture.js';
+import { CREATOR, DEFAULT_BROKER_POSITION, ETORO_AAPL_ID, HUMAN, TEST_ACCESS, closeInput, filledOpen, o21Fixture, openInput, type Fixture } from './o21-fixture.js';
 import { refusal } from './o22-recovery-scenarios.js';
 
 const POSITION = DEFAULT_BROKER_POSITION.positionId;
@@ -127,7 +127,8 @@ describe('O22 D4 R1: latestStoredSnapshot reads the store, with every process\'s
     a.portfolio.response = { status: 200, body: withPosition() };
     await a.service.sync();
     expect(await storedPositionSource(a.service).latest()).toEqual({
-      snapshot: { observedAt: T0, freshness: 'fresh', positionCount: 1, positions: [{ positionId: POSITION, etoroInstrumentId: ETORO_AAPL_ID, direction: 'buy', openOrderId: 13902598 }] },
+      // This process has no access key: its read carries no stamp (null), which the execution service refuses (R3).
+      snapshot: { observedAt: T0, freshness: 'fresh', positionCount: 1, positions: [{ positionId: POSITION, etoroInstrumentId: ETORO_AAPL_ID, direction: 'buy', openOrderId: 13902598 }], access: null },
       problem: null,
     });
     expect(await storedPositionSource({ latestStoredSnapshot: async () => ({ kind: 'ambiguous' }) }).latest()).toEqual({ snapshot: null, problem: 'ambiguous' });
@@ -176,27 +177,34 @@ describe('O22 D4 R2: the evidence is read again right before the reservation', (
   });
 
   it('the store turns ambiguous between the gate and the reservation: refused in the reservation step', async () => {
+    // Counted from the close's execute on (the open reads the stored snapshot too, for the access check of review R3).
+    let armed = false;
     let reads = 0;
     const f = await o21Fixture({ positionSource: { latest: async () => {
-      reads += 1;
-      if (reads >= 3) return { snapshot: null, problem: 'ambiguous' as const }; // read 1: create, 2: execute gate, 3: reservation
-      return { snapshot: { observedAt: '2026-10-16T14:00:00.000Z', freshness: 'fresh' as const, positionCount: 1, positions: [DEFAULT_BROKER_POSITION] }, problem: null };
+      if (armed) reads += 1;
+      if (armed && reads >= 2) return { snapshot: null, problem: 'ambiguous' as const }; // read 1: execute gate, 2: reservation
+      return { snapshot: { observedAt: '2026-10-16T14:00:00.000Z', freshness: 'fresh' as const, positionCount: 1, positions: [DEFAULT_BROKER_POSITION], access: TEST_ACCESS.stamp() }, problem: null };
     } } });
     const close = await approvedClose(f);
+    armed = true;
     const e = await refusal(f.service.execute(close, HUMAN));
-    expect(e).toEqual({ code: 'GATE_REFUSED', reasons: ['CLOSE_POSITION_EVIDENCE_AMBIGUOUS'] });
-    expect(reads).toBe(3);
+    // Without a usable snapshot there is no access stamp to check either (review R3): both refusals.
+    expect(e).toEqual({ code: 'GATE_REFUSED', reasons: ['CLOSE_POSITION_EVIDENCE_AMBIGUOUS', 'CLOSE_POSITION_EVIDENCE_ACCESS_NOT_SHOWN'] });
+    expect(reads).toBe(2);
     expect(f.broker.writes).toHaveLength(1);
     expect(await f.service.cycleBudget()).toMatchObject({ closeSubmissions: 0 });
   });
 
-  it('an open never reads the position evidence', async () => {
+  it('review R3: an open reads the newest stored snapshot for the access check only; without a stamped one it is refused', async () => {
     let reads = 0;
     const f = await o21Fixture({ positionSource: { latest: async () => {
       reads += 1;
       return { snapshot: null, problem: null };
     } } });
-    await filledOpen(f, POSITION);
-    expect(reads).toBe(0);
+    const created = await f.service.create(openInput(), CREATOR);
+    expect(created.state).toBe('REJECTED');
+    expect(created.gateReasons).toEqual(['BROKER_SNAPSHOT_ACCESS_NOT_SHOWN']);
+    expect(reads).toBe(1);
+    expect(f.broker.requests).toHaveLength(0);
   });
 });

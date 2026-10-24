@@ -21,7 +21,8 @@ import { OperatorAuthenticator } from '../../src/runtime/operator-auth.js';
 import { startHttpServer, type RunningServer } from '../../src/runtime/server.js';
 import { AAPL } from '../market-data/fixtures.js';
 import { FixtureEtoroTransport } from '../broker/etoro/o20-fixture.js';
-import { API_KEY_MARKER, ETORO_AAPL_ID, O21_NOW, ScriptedBroker, USER_KEY_MARKER, closeInput, freshQuote, normalSafety, openInput } from '../broker/etoro/o21-fixture.js';
+import { API_KEY_MARKER, ETORO_AAPL_ID, O21_NOW, ScriptedBroker, TEST_ACCESS, USER_KEY_MARKER, closeInput, freshQuote, normalSafety, openInput } from '../broker/etoro/o21-fixture.js';
+import { seedStampedSync } from './broker-access-seed.js';
 
 const OPERATOR_ID = 'operator-real';
 const OPERATOR_TOKEN = 'O21-OPERATOR-TOKEN-MARKER-0123456789abcdef';
@@ -43,7 +44,8 @@ interface Runtime {
   attempts: AppendOnlyLog<AttemptRecord> | null;
 }
 
-async function runtime(options: { execution: boolean; injectSafety?: boolean; auth?: boolean }): Promise<Runtime> {
+async function runtime(options: { execution: boolean; injectSafety?: boolean; auth?: boolean; brokerAccess?: boolean }): Promise<Runtime> {
+  const brokerAccess = options.brokerAccess ?? true;
   const now = () => new Date(O21_NOW);
   const instruments = new InMemoryAppendOnlyStore<InstrumentEvent>();
   const registry = await InstrumentRegistry.open(instruments, { clock: now });
@@ -77,6 +79,8 @@ async function runtime(options: { execution: boolean; injectSafety?: boolean; au
       ...(options.injectSafety ? { safetyForTests: { current: async () => normalSafety() }, quotesForTests: { latest: async () => freshQuote() } } : {}),
     };
   }
+  // O22 Plan B review R3: a configured broker access key, and one stored read made with it (own transport: no call counted).
+  if (options.execution && brokerAccess) await seedStampedSync(etoro, now, TEST_ACCESS);
   const services = await composeRuntime({
     instruments,
     marketData: new InMemoryMarketDataStore(),
@@ -88,6 +92,7 @@ async function runtime(options: { execution: boolean; injectSafety?: boolean; au
     version: 'o21-test',
     clock: now,
     etoro,
+    ...(options.execution && brokerAccess ? { brokerAccess: TEST_ACCESS } : {}),
     ...(execution ? { etoroDemoExecution: execution } : {}),
   });
   const operatorAuth = options.auth === false ? null : new OperatorAuthenticator({ id: OPERATOR_ID, token: OPERATOR_TOKEN });

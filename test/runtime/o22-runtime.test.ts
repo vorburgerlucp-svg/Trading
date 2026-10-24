@@ -22,7 +22,8 @@ import { AAPL } from '../market-data/fixtures.js';
 import { FixtureEtoroTransport } from '../broker/etoro/o20-fixture.js';
 import { documentedPortfolio } from '../broker/etoro/o21a-documented-fixture.js';
 import { schemaPnl, schemaPnlPosition } from '../broker/etoro/o21a1-pnl-fixture.js';
-import { API_KEY_MARKER, ETORO_AAPL_ID, O21_NOW, ScriptedBroker, USER_KEY_MARKER, freshQuote, normalSafety, openInput } from '../broker/etoro/o21-fixture.js';
+import { API_KEY_MARKER, ETORO_AAPL_ID, O21_NOW, ScriptedBroker, TEST_ACCESS, USER_KEY_MARKER, freshQuote, normalSafety, openInput } from '../broker/etoro/o21-fixture.js';
+import { seedStampedSync } from './broker-access-seed.js';
 
 const TOKEN = 'O22-OPERATOR-TOKEN-MARKER-0123456789abcdef';
 const AUTH = { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' };
@@ -33,7 +34,8 @@ afterEach(async () => {
   server = null;
 });
 
-async function runtime(execution: boolean, options: { injectSafety?: boolean } = {}) {
+async function runtime(execution: boolean, options: { injectSafety?: boolean; brokerAccess?: boolean } = {}) {
+  const brokerAccess = options.brokerAccess ?? true;
   const injectSafety = options.injectSafety ?? true;
   const now = () => new Date(O21_NOW);
   const instruments = new InMemoryAppendOnlyStore<InstrumentEvent>();
@@ -51,6 +53,8 @@ async function runtime(execution: boolean, options: { injectSafety?: boolean } =
     syncs: await AppendOnlyLog.inMemory<EtoroSyncRecord>('etoro-sync-events', { clock: now }),
   };
   const intents = await AppendOnlyLog.inMemory<IntentEvent>('etoro-demo-execution-intents', { clock: now });
+  // O22 Plan B review R3: a configured broker access key, and one stored read made with it (own transport: no call counted).
+  if (execution && brokerAccess) await seedStampedSync(etoro, now, TEST_ACCESS);
   const services = await composeRuntime({
     instruments,
     marketData: new InMemoryMarketDataStore(),
@@ -62,6 +66,7 @@ async function runtime(execution: boolean, options: { injectSafety?: boolean } =
     version: 'o22-test',
     clock: now,
     etoro,
+    ...(execution && brokerAccess ? { brokerAccess: TEST_ACCESS } : {}),
     ...(execution
       ? {
           etoroDemoExecution: {
@@ -91,7 +96,8 @@ async function runtime(execution: boolean, options: { injectSafety?: boolean } =
 
 describe('O22 runtime: GET /api/broker/etoro/demo/cycle', () => {
   it('reports the cycle policy budget, an unknown reconciliation without a snapshot, and the wired safety source not yet evaluated; no broker request', async () => {
-    const r = await runtime(true);
+    // Without a stored snapshot (and so without the access key and its seeded read).
+    const r = await runtime(true, { brokerAccess: false });
     const res = await r.call('GET', '/api/broker/etoro/demo/cycle');
     expect(res.status).toBe(200);
     expect(res.json.cycle.execution).toBe('enabled');

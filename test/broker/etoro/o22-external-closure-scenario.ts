@@ -10,7 +10,8 @@ import type { DemoExecutionPolicy } from '../../../src/broker/etoro/execution/ex
 import { storedPositionSource } from '../../../src/runtime/demo-execution-sources.js';
 import { FixtureEtoroTransport, emptyDemoPortfolio } from './o20-fixture.js';
 import { documentedOrder, documentedPortfolio, documentedPosition } from './o21a-documented-fixture.js';
-import { ETORO_AAPL_ID, HUMAN, ScriptedBroker, filledOpen, inMemoryStores, o21Fixture, type Fixture, type O21Stores } from './o21-fixture.js';
+import { ETORO_AAPL_ID, HUMAN, ScriptedBroker, TEST_ACCESS, filledOpen, inMemoryStores, o21Fixture, type Fixture, type O21Stores } from './o21-fixture.js';
+import type { AccessVerifier } from '../../../src/broker/etoro/etoro-access-fingerprint.js';
 
 export const POSITION = 2150941015;
 /** The order id filledOpen() gets from the broker. */
@@ -58,13 +59,19 @@ export async function closureProcess(options: {
   closures?: AppendOnlyStore<ExternalClosureRecord>;
   broker?: ScriptedBroker;
   policy?: DemoExecutionPolicy;
+  /** Default true: store one empty read at the start (see below). */
+  seed?: boolean;
+  /** R3: the process's configured broker access (default TEST_ACCESS); null: no access key configured. */
+  access?: AccessVerifier | null;
 } = {}): Promise<ClosureProcess> {
+  const access = options.access === undefined ? TEST_ACCESS : options.access;
   const etoroStores = options.etoroStores ?? inMemoryEtoroStores();
   const holder: { etoro: EtoroBrokerService | null } = { etoro: null };
   const f = await o21Fixture({
     stores: options.stores ?? inMemoryStores(),
     ...(options.broker !== undefined ? { sharedBroker: options.broker } : {}),
     ...(options.policy !== undefined ? { policy: options.policy } : {}),
+    access,
     externalClosures: options.closures ?? new InMemoryAppendOnlyStore<ExternalClosureRecord>(),
     snapshotHistory: { history: () => holder.etoro!.snapshotHistory() },
     positionSource: { latest: () => storedPositionSource(holder.etoro).latest() },
@@ -79,8 +86,15 @@ export async function closureProcess(options: {
     reconciliations: await AppendOnlyLog.open<EtoroReconciliationRecord>('etoro-reconciliations', etoroStores.reconciliations, { clock }),
     syncs,
     clock,
+    access,
   });
   holder.etoro = etoro;
+  // R3: an open needs the newest stored snapshot to have been read with the configured access, so the process starts as a running
+  // runtime would: with one read of the (still empty) portfolio. Identical reads of several processes are one idempotent record.
+  if (options.seed !== false) {
+    portfolio.response = { status: 200, body: portfolioBody('without_position') };
+    await etoro.sync();
+  }
   return {
     f,
     etoro,
