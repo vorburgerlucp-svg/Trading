@@ -12,6 +12,7 @@ import { FixtureEtoroTransport, emptyDemoPortfolio } from './o20-fixture.js';
 import { documentedOrder, documentedPortfolio, documentedPosition } from './o21a-documented-fixture.js';
 import { ETORO_AAPL_ID, HUMAN, ScriptedBroker, TEST_ACCESS, filledOpen, inMemoryStores, o21Fixture, type Fixture, type O21Stores } from './o21-fixture.js';
 import type { AccessVerifier } from '../../../src/broker/etoro/etoro-access-fingerprint.js';
+import type { DemoCycleRecord } from '../../../src/broker/etoro/execution/demo-cycles.js';
 
 export const POSITION = 2150941015;
 /** The order id filledOpen() gets from the broker. */
@@ -61,6 +62,8 @@ export async function closureProcess(options: {
   policy?: DemoExecutionPolicy;
   /** Default true: store one empty read at the start (see below). */
   seed?: boolean;
+  /** O22 Plan C: the cycle log store (absent: no cycles). */
+  cycles?: AppendOnlyStore<DemoCycleRecord>;
   /** R3: the process's configured broker access (default TEST_ACCESS); null: no access key configured. */
   access?: AccessVerifier | null;
 } = {}): Promise<ClosureProcess> {
@@ -71,6 +74,7 @@ export async function closureProcess(options: {
     stores: options.stores ?? inMemoryStores(),
     ...(options.broker !== undefined ? { sharedBroker: options.broker } : {}),
     ...(options.policy !== undefined ? { policy: options.policy } : {}),
+    ...(options.cycles !== undefined ? { cycles: options.cycles } : {}),
     access,
     externalClosures: options.closures ?? new InMemoryAppendOnlyStore<ExternalClosureRecord>(),
     snapshotHistory: { history: () => holder.etoro!.snapshotHistory() },

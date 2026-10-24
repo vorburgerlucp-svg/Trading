@@ -19,6 +19,7 @@ import {
 } from '../../../src/broker/etoro/execution/etoro-demo-execution-service.js';
 import { DEFAULT_DEMO_EXECUTION_POLICY, type DemoExecutionPolicy, type EvidencePosition, type GateQuote } from '../../../src/broker/etoro/execution/execution-gate.js';
 import type { ExternalClosureRecord } from '../../../src/broker/etoro/execution/external-closure.js';
+import type { DemoCycleRecord } from '../../../src/broker/etoro/execution/demo-cycles.js';
 import type { EtoroSnapshotHistory } from '../../../src/broker/etoro/etoro-broker-service.js';
 import { BrokerAccessFingerprint, type AccessVerifier } from '../../../src/broker/etoro/etoro-access-fingerprint.js';
 import { AAPL } from '../../market-data/fixtures.js';
@@ -161,6 +162,8 @@ export interface FixtureOptions {
   brokerPositions?: EvidencePosition[] | null;
   /** O22 Plan B review R3: the process's broker access fingerprint. Default TEST_ACCESS; null: none configured (fail closed). */
   access?: AccessVerifier | null;
+  /** O22 Plan C: the store of the demo cycle log. Absent: the service runs without cycles (as the runtime does today). */
+  cycles?: AppendOnlyStore<DemoCycleRecord>;
   /** O22 D4: replaces the scripted snapshot by a real position source (e.g. storedPositionSource over the stored O20 logs). */
   positionSource?: DemoPositionSource;
   /** O22 Plan B: the store of the external closure attestations, and the stored sync history they are checked against. */
@@ -183,6 +186,8 @@ export interface Fixture {
   reconciliations: AppendOnlyLog<ReconciliationRecord>;
   /** O22 Plan B: the attestation log (null when the fixture has none). */
   externalClosures: AppendOnlyLog<ExternalClosureRecord> | null;
+  /** O22 Plan C: the cycle log (null when the fixture has none). */
+  cycles: AppendOnlyLog<DemoCycleRecord> | null;
   setQuote(quote: GateQuote | null): void;
   setSafety(safety: PortfolioSafetyDecision | null): void;
   setBroker(status: { connection: string; lastSuccessfulSync: string | null }): void;
@@ -241,6 +246,7 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
   const confirmations = await AppendOnlyLog.open<ConfirmationRecord>('etoro-demo-broker-confirmations', stores.confirmations, { clock: now });
   const reconciliations = await AppendOnlyLog.open<ReconciliationRecord>('etoro-demo-execution-reconciliations', stores.reconciliations, { clock: now });
   const externalClosures = options.externalClosures === undefined ? null : await AppendOnlyLog.open<ExternalClosureRecord>('etoro-demo-external-closures', options.externalClosures, { clock: now });
+  const cycles = options.cycles === undefined ? null : await AppendOnlyLog.open<DemoCycleRecord>('etoro-demo-cycles', options.cycles, { clock: now });
   let quote: GateQuote | null = options.quote === undefined ? freshQuote() : options.quote;
   let safety: PortfolioSafetyDecision | null = options.safety === undefined ? normalSafety() : options.safety;
   let brokerStatus = options.broker ?? { connection: 'connected', lastSuccessfulSync: '2026-10-16T13:58:00.000Z' };
@@ -274,6 +280,7 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
     ...(externalClosures !== null ? { externalClosures } : {}),
     ...(options.snapshotHistory !== undefined ? { snapshotHistory: options.snapshotHistory } : {}),
     ...(access !== null ? { access } : {}),
+    ...(cycles !== null ? { cycles } : {}),
     executionEnabled: options.executionEnabled ?? true,
     policy: options.policy ?? DEFAULT_DEMO_EXECUTION_POLICY,
     clock: now,
@@ -284,7 +291,7 @@ export async function o21Fixture(options: FixtureOptions = {}): Promise<Fixture>
     }),
   });
   return {
-    service, killSwitch, broker, clock, stores, intents, attempts, confirmations, reconciliations, externalClosures, requestIds,
+    service, killSwitch, broker, clock, stores, intents, attempts, confirmations, reconciliations, externalClosures, cycles, requestIds,
     setQuote: (q) => { quote = q; },
     setSafety: (s) => { safety = s; },
     setBroker: (b) => { brokerStatus = b; },
