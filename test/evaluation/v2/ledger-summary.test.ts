@@ -1,6 +1,6 @@
 // R2: sealing plans, the authenticity of a seal, recording evaluations (final only, append-only), and aggregates that never mix.
 import { describe, expect, it } from 'vitest';
-import { InMemoryAppendOnlyStore } from '../../../src/persistence/append-only-log.js';
+import { AppendOnlyLog, InMemoryAppendOnlyStore } from '../../../src/persistence/append-only-log.js';
 import { EvaluationLedgerV2, TradePlanLedger, type SealedPlanRecord } from '../../../src/evaluation/v2/plan-ledger.js';
 import { evaluateDecisionFromLedger, evaluateDecisionV2, type EvaluationV2 } from '../../../src/evaluation/v2/outcome-eval-v2.js';
 import { EvaluationMixError, summarizeEvaluationsV2 } from '../../../src/evaluation/v2/evaluation-summary.js';
@@ -50,6 +50,14 @@ describe('R2 seal authenticity', () => {
     expect(await fromLedger(ledger, 'missing')).toMatchObject({ status: 'NOT_EVALUABLE', reasons: ['PLAN_NOT_IN_LEDGER'] });
     await ledger.seal(continuation({ origin: 'research' }), '100');
     expect(await fromLedger(ledger, 'cont-1', 'HOLD')).toMatchObject({ status: 'EVALUATED', valueR: '2', authenticity: 'sealed_before_outcome' });
+  });
+
+  it('a stored record whose plan does not match its plan hash (written past the ledger, valid chain) is refused when read', async () => {
+    const store = new InMemoryAppendOnlyStore<SealedPlanRecord>();
+    const raw = await AppendOnlyLog.open<SealedPlanRecord>('trade-plans-v1', store);
+    await raw.append('plan-1', { plan: plan({ origin: 'research' }), planHash: 'f'.repeat(64) });
+    const ledger = await TradePlanLedger.open(store);
+    await expect(ledger.getVerified('plan-1')).rejects.toThrow(/does not match its hash/);
   });
 
   it('the same plan again is idempotent; a changed plan under the same id and an incomplete plan are refused', async () => {
