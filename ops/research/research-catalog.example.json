@@ -1,0 +1,13 @@
+{
+  "version": "research-catalog:v1",
+  "catalogId": "r1-start-6",
+  "interval": "15m",
+  "instruments": [
+    { "instrumentId": "rsx_xnas_aapl", "assetClass": "stock", "symbol": "AAPL", "name": "Apple Inc", "currency": "USD", "exchange": "NASDAQ", "mic": "XNAS", "timezone": "America/New_York", "tradingCalendar": "XNAS", "providerSymbol": "AAPL", "mappingValidFrom": "2026-01-01T00:00:00.000Z" },
+    { "instrumentId": "rsx_xnas_msft", "assetClass": "stock", "symbol": "MSFT", "name": "Microsoft Corp", "currency": "USD", "exchange": "NASDAQ", "mic": "XNAS", "timezone": "America/New_York", "tradingCalendar": "XNAS", "providerSymbol": "MSFT", "mappingValidFrom": "2026-01-01T00:00:00.000Z" },
+    { "instrumentId": "rsx_xnas_qqq", "assetClass": "etf", "symbol": "QQQ", "name": "Invesco QQQ Trust", "currency": "USD", "exchange": "NASDAQ", "mic": "XNAS", "timezone": "America/New_York", "tradingCalendar": "XNAS", "providerSymbol": "QQQ", "mappingValidFrom": "2026-01-01T00:00:00.000Z" },
+    { "instrumentId": "rsx_xnys_jpm", "assetClass": "stock", "symbol": "JPM", "name": "JPMorgan Chase & Co", "currency": "USD", "exchange": "NYSE", "mic": "XNYS", "timezone": "America/New_York", "tradingCalendar": "XNYS", "providerSymbol": "JPM", "mappingValidFrom": "2026-01-01T00:00:00.000Z" },
+    { "instrumentId": "rsx_crypto_btcusd", "assetClass": "crypto", "symbol": "BTC/USD", "currency": "USD", "timezone": "UTC", "tradingCalendar": "24x7", "providerSymbol": "BTC/USD", "mappingValidFrom": "2026-01-01T00:00:00.000Z" },
+    { "instrumentId": "rsx_crypto_ethusd", "assetClass": "crypto", "symbol": "ETH/USD", "currency": "USD", "timezone": "UTC", "tradingCalendar": "24x7", "providerSymbol": "ETH/USD", "mappingValidFrom": "2026-01-01T00:00:00.000Z" }
+  ]
+}

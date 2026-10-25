@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  NEXUS R1 research: Windows Task Scheduler DRAFT. NOT REGISTERED, NOT ENABLED. Registering it (schtasks /Create /XML ...) and
+  enabling it are separate, explicit owner decisions (docs/R1_RESEARCH_MVP.md section 8).
+  One short run every 15 minutes, 2 minutes after each quarter hour (the 15-minute bar is complete and settled by then):
+  IgnoreNew (never a second instance), at most 6 minutes per run, below-normal priority, no wake from sleep, no catch-up burst
+  after the PC was off, not on battery. The research process itself also enforces one worker (advisory lock), its run deadline,
+  a free-memory threshold and the credit budget.
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>NEXUS R1 research: one bounded market data run (15-minute bars). Draft; owner approval required.</Description>
+    <URI>\NEXUS\NEXUS Research R1</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT15M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2026-11-02T00:02:00</StartBoundary>
+      <Enabled>false</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>false</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT6M</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>powershell.exe</Command>
+      <Arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\NEXUS\research\ops\research\run-research.ps1"</Arguments>
+      <WorkingDirectory>C:\NEXUS\research</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
