@@ -7,6 +7,10 @@
 //  - every query is point-in-time: observations count only once their outcome was known (availableAt)
 //  - `storedThrough` (a memory position) additionally pins a query to what was stored at that moment,
 //    so a past evaluation can be re-derived exactly even after outcomes were back-filled
+//  - learning quarantine (R2): every observation carries the scoring method that produced it (no label = outcome-eval:v1, the
+//    observations written before R2). Only ACCEPTED methods reach stats(), published(), the router, the registry and the
+//    champion-challenger; any other method (outcome-eval:v2 until it is validated and a human accepts it) is stored and can be
+//    analysed through quarantinedObservations(), but influences nothing
 
 import type { NexusMemory } from '../memory/nexus-memory.js';
 import type { ModelCapabilityScore, ModelRegistry } from './model-registry.js';
@@ -25,12 +29,32 @@ export interface PerformanceObservation {
   occurredAt: string;
   /** Time the outcome became known. */
   availableAt: string;
+  /** The scoring method that produced `score`. Absent: outcome-eval:v1 (every observation written before R2). */
+  scoringMethod?: string;
 }
 
 export interface PerformancePolicy {
   minSamplesForScore: number;
   priorScore: number;
   priorWeight: number;
+  /**
+   * Scoring methods whose observations may influence anything (stats, published scores, router, registry, champions).
+   * Absent: ACCEPTED_SCORING_METHODS_DEFAULT (v1 only). Adding a method is a human decision after its validation.
+   */
+  acceptedScoringMethods?: readonly string[];
+}
+
+/** The scoring method of observations without a label (all observations written before R2). */
+export const LEGACY_SCORING_METHOD = 'outcome-eval:v1';
+/**
+ * The methods accepted when a policy names none: v1 only, exactly the behaviour before R2. outcome-eval:v2 is deliberately
+ * NOT in this list (learning quarantine): it needs an independent validation and an explicit human decision first.
+ */
+export const ACCEPTED_SCORING_METHODS_DEFAULT: readonly string[] = Object.freeze([LEGACY_SCORING_METHOD]);
+const SCORING_METHOD = /^outcome-eval:v[0-9]{1,3}$/;
+
+export function scoringMethodOf(observation: Pick<PerformanceObservation, 'scoringMethod'>): string {
+  return observation.scoringMethod ?? LEGACY_SCORING_METHOD;
 }
 
 export const DEFAULT_PERFORMANCE_POLICY: PerformancePolicy = Object.freeze({ minSamplesForScore: 20, priorScore: 0.5, priorWeight: 10 });
@@ -65,8 +89,14 @@ export class ModelPerformance {
     return this.memory.position;
   }
 
+  /** The methods whose observations count (see PerformancePolicy.acceptedScoringMethods). */
+  acceptedScoringMethods(): readonly string[] {
+    return this.policy.acceptedScoringMethods ?? ACCEPTED_SCORING_METHODS_DEFAULT;
+  }
+
   async record(id: string, observation: PerformanceObservation): Promise<void> {
     if (!(observation.score >= 0 && observation.score <= 1)) throw new Error('performance score must be within 0..1');
+    if (observation.scoringMethod !== undefined && !SCORING_METHOD.test(observation.scoringMethod)) throw new Error('scoringMethod must be outcome-eval:v<N>');
     await this.memory.remember({
       id,
       kind: 'model_performance',
@@ -79,7 +109,19 @@ export class ModelPerformance {
     });
   }
 
+  /** Observations of ACCEPTED scoring methods only: the only ones any score, routing or champion decision is built from. */
   observations(key: ModelKey, asOf: string, filter: PerformanceFilter = {}): PerformanceObservation[] {
+    const accepted = this.acceptedScoringMethods();
+    return this.allObservations(key, asOf, filter).filter((o) => accepted.includes(scoringMethodOf(o)));
+  }
+
+  /** ANALYSIS ONLY: observations of methods that are not accepted (quarantined). Nothing in routing or promotion reads this. */
+  quarantinedObservations(key: ModelKey, asOf: string, filter: PerformanceFilter = {}): PerformanceObservation[] {
+    const accepted = this.acceptedScoringMethods();
+    return this.allObservations(key, asOf, filter).filter((o) => !accepted.includes(scoringMethodOf(o)));
+  }
+
+  private allObservations(key: ModelKey, asOf: string, filter: PerformanceFilter): PerformanceObservation[] {
     const tags = [...(filter.domain ? ['domain:' + filter.domain] : []), ...(filter.subtask ? ['subtask:' + filter.subtask] : [])];
     const bound = filter.storedThrough === undefined ? {} : { storedThrough: filter.storedThrough };
     return this.memory.recall<PerformanceObservation>({ kind: 'model_performance', subject: key, tags, asOf, ...bound }).map((r) => r.content);
