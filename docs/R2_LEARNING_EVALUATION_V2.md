@@ -157,7 +157,7 @@ No v2.0 result was ever stored outside tests. Because the policy version is part
 
 ## 9. Tests
 
-- **Unit** (`test/evaluation/v2/`): 75 tests.
+- **Unit** (`test/evaluation/v2/`): 76 tests.
   - Simulator scenarios with hand-computed results, including late-arriving data and the grace period.
   - HOLD and EXIT of open long and short positions:
     - no new entry, no repeated entry costs, the open quantity;
