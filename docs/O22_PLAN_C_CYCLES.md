@@ -16,7 +16,7 @@
 | `defined` (draft) | a human (`defineCycle`) | cycle id, **its own policy** (limits, budget, sides, order types, instruments), its hash, the maximum active time | the id is invalid or used; the policy version is not `etoro-demo-cycle-policy:…` or was used by another cycle; the budget is not 1–3 per kind; the active time is not 1 ms to 7 days |
 | `activated` | a human (`activateCycle`) who names the **policy hash** and makes the statement `ACTIVATE_DEMO_CYCLE_WITH_THIS_POLICY` | approver, time, `activeUntil` = activation time + maximum active time, the intent log size checked | not a draft, wrong hash or statement, another cycle active, kill switch tripped, or an earlier broker state not settled (below) |
 | `closing` | a human (`closeCycle`) | approver, time. From then on, no reservation of the cycle can commit (section 1a) | the cycle is not active |
-| `closed` | `closeCycle` again, once nothing is in flight | approver, time, **the cycle's test verdict** over its own intents (`passed` / `failed` / `incomplete` / `not_evaluated`), the failures | the cycle is not `closing`, or an intent of it is `SUBMITTING` or `AMBIGUOUS` (the call then reports `closing` and the number in flight) |
+| `closed` | `closeCycle` again, once the cycle is **settled** (section 1b) | approver, time, **the cycle's test verdict** over its own intents (`passed` / `failed` / `incomplete` / `not_evaluated`), the failures | the cycle is not `closing`, or it is not settled (the call then reports `closing` and the settlement: writes in flight, unresolved orders, open positions) |
 
 The definition and activation steps run their rule again inside the cycle log's lock, after catching up with every process. So there is at most one activation per cycle and at most one active cycle, whatever the order of arrival.
 
@@ -81,6 +81,69 @@ An old live position therefore blocks a new cycle's open, whichever cycle it bel
 - An ambiguous open can be reconciled by its reference id. An ambiguous close is never reconciled by NEXUS, so its cycle stays `closing` until a human handles it outside this code.
 - A restarted process sees `closing` and takes no new intent.
 - Each stage is one record (fixed ids `<cycleId>:closing`, `<cycleId>:closed`). Concurrent closes give one record of each, and a repeated call records nothing more.
+
+## 1b. CLOSING is not CLOSED: settlement (review of PR #35: R5, R6)
+
+**Found on `f9d234d` (reproduced).** `closeCycle()` reported `closed` while the cycle still had an order without a final status, or an open position:
+- a `SUBMITTED` open;
+- a pending `ACCEPTED` open;
+- a `FILLED` open whose position no NEXUS close had closed.
+
+That was a misleading "settled" signal.
+
+**Four separate things:**
+
+| | Meaning | Where |
+|---|---|---|
+| **New activity ended** | No new intent and no new reservation of the cycle | `CLOSING` (and `CLOSED`) |
+| **Writes in flight** | `SUBMITTING`, `AMBIGUOUS`: a write may still be sent, its answer is outstanding, or its result is unclear | `settlement.writesInFlight` |
+| **Unresolved orders** | `SUBMITTED`, `ACCEPTED`, `RECONCILED`, `PARTIALLY_FILLED`: at the broker, without a final status read | `settlement.ordersUnresolved` |
+| **Open positions** | A position of a filled open of the cycle that no **filled NEXUS close** of the cycle closed. A position closed by hand counts as open here, attested or not: NEXUS did not settle it | `settlement.positionsOpen` |
+| **CLOSED** | All three are 0 by NEXUS's records, read after `CLOSING` committed. The record carries the cycle's test verdict | `closed` |
+
+**`CLOSED` is not success.** It says "settled", not "passed". The test verdict is a separate field in the record (`passed`, `failed`, `incomplete`, `not_evaluated`), and a hand close always gives `failed` (`POSITION_CLOSED_EXTERNALLY`).
+
+**R6: cancel during CLOSING and after CLOSED.**
+
+A cancel only removes a pending order of the cycle. It is not a trading order: it spends no budget and adds no exposure. While the cycle is `CLOSING`, it is how an unresolved order is settled. So:
+- **`ACTIVE` and `CLOSING`: allowed.** As always, the cancel must pass the PR #34 checks:
+  - exactly one open attempt, with the order bound to it;
+  - the configured broker access;
+  - at most once: an accepted, ambiguous or unfinished cancel blocks every further one, including across processes and after a crash.
+
+  The cancellation counts as settled only after a status read confirms it.
+- **`CLOSED`: refused** (`CANCEL_CYCLE_CLOSED`, recorded, nothing sent). By definition, a `CLOSED` cycle has no pending order. A pending order with a `CLOSED` cycle can only come from inconsistent records, and NEXUS does not act on them.
+- **Not a new write path.** Cancel existed before Plan C; Plan C only restricts it. No new order type and no exception for a new broker write was introduced.
+
+### Decision template: winding down a cycle with an open position
+
+**The situation.** Suppose `CLOSING` begins while a position of the cycle is still open. A closing cycle takes no new intent, so NEXUS can no longer close that position, and the cycle stays `CLOSING`.
+
+This is fail closed. The position can be closed by hand, but by the rule above that does not settle it either.
+
+**Today's safe procedure:** close the position through NEXUS while the cycle is still `ACTIVE`, then close the cycle.
+
+**Options. None is implemented; each needs an explicit decision:**
+
+| Option | What it would allow | What it needs |
+|---|---|---|
+| A. A wind-down mode | In `CLOSING`, only **close** intents of positions of this cycle, only within the cycle's close budget, with all close checks: D4 evidence, the access fingerprint, at most once, the guarded reservation | A new, reviewed write path: authorization by a human, the budget, the identity binding (access, ideally `demoCid`), its own tests and mutations. **This is a relaxation of "no new writes after CLOSING" and is not implemented** |
+| B. Refuse to begin CLOSING while a position is open | No trap; but new activity is stopped later | A stricter rule. It delays the stop, which is otherwise always risk-reducing |
+| C. Accept an attested hand close as settled (Plan B) | `CLOSED` with the verdict `failed`, after the position was closed by hand and attested | A decision that an operator attestation settles a NEXUS cycle. Today it deliberately does not |
+
+**Recommendation:** keep the current behavior, which is fail closed with the procedure above. Decide between B and C before the first real cycle. A only with its own review.
+
+**If option A is ever decided: the minimum safety rules (proposal, not implemented).**
+1. **Separate authorization.** A human starts the wind-down explicitly, for one named position of the cycle: a record such as `<cycleId>:winddown:<positionId>`, made once, with the statement and the operator. It is never automatic, and never set by a policy or a test result.
+2. **Close only.** The only intent allowed is a market close of exactly that position. It closes a filled open of the same cycle, bound by a checked status read, with the instrument and direction of the open. No open, no cancel of anything else, no new instrument.
+3. **Budget.** The cycle's own close budget, counted in the guarded reservation like every other write; never a new or reset budget.
+4. **Identity.** The access fingerprint of the open's attempt and of the evidence snapshot must match. Once available, a verified account pseudonym (`demoCid`) is required as well.
+5. **Evidence.** The D4 rules: a fresh, complete stored snapshot that still shows the position, read again right before the reservation.
+6. **At most once.** A fixed reservation and record per position, the guarded reservation against the cycle log, no retry after an ambiguous answer; an ambiguous close keeps the cycle `CLOSING`.
+7. **Kill switch and build lock** in force as for every write.
+8. **Settlement and verdict.** Only a filled NEXUS close settles the position. The cycle verdict records the wind-down as such, and never as a passed test.
+
+Each rule needs its own tests, including races, a crash and a restart, and its own mutation counter-proof before any use.
 
 ## 2. Activation preconditions (requirement 6)
 
@@ -202,11 +265,12 @@ An old live position therefore blocks a new cycle's open, whichever cycle it bel
 
 ## 7. Overlap with PR #34 (cancel bound to the open attempt)
 
-- **Shared file:** only `src/broker/etoro/execution/etoro-demo-execution-service.ts`, in separate regions:
-  - #34 changes `cancel()`, adds `cancelRefusals` and one import;
-  - Plan C changes create, execute, book, `cycleBudget` and the imports, and adds the cycle methods.
-- **Textual merge:** a trial merge computed in memory (`git merge-tree --write-tree`, no branch or worktree changed) shows **no conflict**. The branches were **not** merged. Whichever PR is merged second must be rebased or merged onto the other, and its full test suite run again on the result.
-- **Semantics:**
-  - `cancel()` is **not** bound to a cycle in Plan C. A cancel removes a pending order of any cycle, spends no budget and keeps the #34 checks (open attempt, order binding, access).
-  - With market-only cycle policies, a cancel is only possible for a market order still pending.
-  - A cancel budget per cycle is proposed in section 4.
+- **Shared file:** only `src/broker/etoro/execution/etoro-demo-execution-service.ts`.
+- **Since R6 a textual conflict in `cancel()`.** Both PRs add a refusal block right after the "order is not pending" check:
+  - #35: the cycle rule `CANCEL_CYCLE_CLOSED`;
+  - #34: `cancelRefusals` (exactly one open attempt, the order bound to it, the broker access).
+- **Resolution, verified on a temporary local branch** (`tmp/integration-34-35`, never pushed; the PR branches unchanged): keep **both** blocks, the cycle rule first, then the #34 check. The #34 re-check inside the attempt log's lock merges without conflict.
+- **Tested on the combined state**, one worker:
+  - the cancel tests of #34, the Plan C tests, two PostgreSQL integration tests (other credentials while `CLOSING`; two processes cancelling at once, followed by `CLOSED`) and a lock test without the mock;
+  - the full suite: unit 3178 / 3178, PostgreSQL 259 / 259, typecheck green.
+- **Merge order:** whichever PR is merged second must be updated with this resolution and tested again in full.

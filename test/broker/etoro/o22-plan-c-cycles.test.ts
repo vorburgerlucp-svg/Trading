@@ -27,6 +27,7 @@ import {
 import { DEFAULT_DEMO_EXECUTION_POLICY, DEMO_E2E_CYCLE_POLICY, type DemoExecutionPolicy } from '../../../src/broker/etoro/execution/execution-gate.js';
 import { DemoExecutionError } from '../../../src/broker/etoro/execution/etoro-demo-execution-errors.js';
 import { closureProcess, filledThenClosedByHand } from './o22-external-closure-scenario.js';
+import { evaluateDemoCycleTest } from '../../../src/broker/etoro/execution/demo-cycle-test-verdict.js';
 import { CREATOR, ETORO_AAPL_ID, HUMAN, approvedOpen, closeInput, filledOpen, inMemoryStores, o21Fixture, openInput, orderAccepted, trippedKillSwitch, type Fixture } from './o21-fixture.js';
 
 const NOW = '2026-10-16T14:00:00.000Z';
@@ -248,9 +249,10 @@ describe('Plan C: the service with a cycle log', () => {
     const f = await withCycles();
     await defineAndActivate(f, 'cycle-1', policyOf('one'));
     await filledOpen(f);
-    await f.service.closeCycle('cycle-1', OPERATOR);
+    // Review R5: the cycle with an open position is not reported closed; it stays CLOSING with the open position named.
+    expect(await f.service.closeCycle('cycle-1', OPERATOR)).toMatchObject({ status: 'closing', settlement: { writesInFlight: 0, ordersUnresolved: 0, positionsOpen: 1 } });
     await f.service.defineCycle({ cycleId: 'cycle-2', policy: policyOf('two'), maxActiveMs: HOUR }, OPERATOR);
-    expect((await refusal(f.service.activateCycle('cycle-2', { policyHash: policyHashOf(policyOf('two')), statement: CYCLE_ACTIVATION_STATEMENT }, OPERATOR))).reasons).toEqual(['PRIOR_POSITION_NOT_CLOSED_BY_NEXUS']);
+    expect((await refusal(f.service.activateCycle('cycle-2', { policyHash: policyHashOf(policyOf('two')), statement: CYCLE_ACTIVATION_STATEMENT }, OPERATOR))).reasons).toEqual(['ANOTHER_CYCLE_ACTIVE', 'PRIOR_POSITION_NOT_CLOSED_BY_NEXUS']);
   });
 
   it('an intent of a closed cycle is never executed: not in the closed cycle, not in a new one', async () => {
@@ -320,19 +322,23 @@ describe('Plan C: the service with a cycle log', () => {
     expect((await f.service.create(openInput(), CREATOR)).gateReasons).toContain('CYCLE_INSTRUMENT_NOT_ALLOWED');
   });
 
-  it('a position closed by hand never makes a cycle passed: the close records failed (POSITION_CLOSED_EXTERNALLY), and the next cycle waits', async () => {
+  it('a position closed by hand never makes a cycle passed or settled: the cycle stays CLOSING, its verdict is failed (POSITION_CLOSED_EXTERNALLY), and the next cycle waits', async () => {
     const p = await closureProcess({ cycles: new InMemoryAppendOnlyStore<DemoCycleRecord>(), seed: false });
     await defineAndActivate(p.f, 'cycle-1', policyOf('one'));
     await p.sync('without_position');
     p.f.advance(1_000);
     const { open, closedSnapshot } = await filledThenClosedByHand(p);
     await p.attest(open, closedSnapshot);
-    const closed = await p.f.service.closeCycle('cycle-1', OPERATOR);
-    expect(closed.verdict).toBe('failed');
-    const record = p.f.cycles!.all().map((r) => r.payload).find((r) => r.kind === 'closed')!;
-    expect(record.kind === 'closed' && record.failures).toContain('POSITION_CLOSED_EXTERNALLY');
+    // Review R5: the attested hand close is not a NEXUS settlement: the cycle is not reported closed (no closed record at all).
+    expect(await p.f.service.closeCycle('cycle-1', OPERATOR)).toMatchObject({ status: 'closing', settlement: { positionsOpen: 1 } });
+    expect(p.f.cycles!.all().some((r) => r.payload.kind === 'closed')).toBe(false);
+    // The cycle's test verdict, over its own intents and the stored snapshots, is failed with POSITION_CLOSED_EXTERNALLY.
+    const history = await p.etoro.snapshotHistory();
+    const verdict = evaluateDemoCycleTest({ intents: (await p.f.service.list()).filter((v) => v.intent.cycleId === 'cycle-1'), snapshots: history.observations, missingSnapshotRecords: history.missingSnapshotRecords });
+    expect(verdict.result).toBe('failed');
+    expect(verdict.failures).toContain('POSITION_CLOSED_EXTERNALLY');
     await p.f.service.defineCycle({ cycleId: 'cycle-2', policy: policyOf('two'), maxActiveMs: HOUR }, OPERATOR);
-    expect((await refusal(p.f.service.activateCycle('cycle-2', { policyHash: policyHashOf(policyOf('two')), statement: CYCLE_ACTIVATION_STATEMENT }, OPERATOR))).reasons).toEqual(['PRIOR_POSITION_NOT_CLOSED_BY_NEXUS']);
+    expect((await refusal(p.f.service.activateCycle('cycle-2', { policyHash: policyHashOf(policyOf('two')), statement: CYCLE_ACTIVATION_STATEMENT }, OPERATOR))).reasons).toEqual(['ANOTHER_CYCLE_ACTIVE', 'PRIOR_POSITION_NOT_CLOSED_BY_NEXUS']);
   });
 
   it('P16: a close in cycle 2 of an open of cycle 1 is refused by the cross-cycle rule itself (CLOSE_TARGET_UNKNOWN)', async () => {

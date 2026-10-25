@@ -14,6 +14,7 @@ import { AppendOnlyLog, AppendOnlyLogError, GENESIS_HASH, hashRecord } from '../
 import { encodeJson } from '../../src/persistence/json-codec.js';
 
 const closeSubmitted = { status: 200, body: { orderForClose: { positionID: 2150941015, instrumentID: ETORO_AAPL_ID, orderID: 13904638, statusID: 1 }, token: '5fe065bc-f6f9-4897-a2ce-c4fccef73ff8' } };
+const closeFilled = { status: 200, body: { orderID: 13904638, CID: 1, statusID: 3, orderType: 19, instrumentID: ETORO_AAPL_ID, positions: [{ positionID: 2150941015 }] } };
 
 /** An approved close of a FILLED open of the active cycle (the open spent the cycle's open budget). */
 async function approvedClose(f: Fixture): Promise<string> {
@@ -88,8 +89,8 @@ describe.skipIf(!pgAvailable)('O22 Plan C review R1-R4: cycle close against a wr
     await execution;
     expect(broker.writes).toHaveLength(1);
     expect((await b.service.get(id)).state).toBe('SUBMITTED');
-    // Now nothing of the cycle is in flight: the close completes.
-    expect((await b.service.closeCycle('cycle-1', HUMAN)).status).toBe('closed');
+    // Nothing is in flight any more, but the order is at the broker without a final status (review R5): still not closed.
+    expect(await b.service.closeCycle('cycle-1', HUMAN)).toMatchObject({ status: 'closing', settlement: { writesInFlight: 0, ordersUnresolved: 1, positionsOpen: 0 } });
   }, 60_000);
 
   it('R1/R3 for a CLOSE intent: A passed its last cycle check and is about to send the close; B closes the cycle: CLOSING until A is settled', async () => {
@@ -107,6 +108,11 @@ describe.skipIf(!pgAvailable)('O22 Plan C review R1-R4: cycle close against a wr
     hold!.release();
     await execution;
     expect(broker.writes.map((w) => w.method)).toEqual(['POST', 'POST']); // the open, and the close that passed before the close began
+    // The close order is submitted, not yet confirmed, and the open's position is therefore still open (review R5): still CLOSING.
+    // Its status read (simulated: filled) settles both.
+    expect(await b.service.closeCycle('cycle-1', HUMAN)).toMatchObject({ status: 'closing', settlement: { writesInFlight: 0, ordersUnresolved: 1, positionsOpen: 1 } });
+    broker.next(closeFilled);
+    expect((await b.service.refresh(close)).state).toBe('FILLED');
     expect((await b.service.closeCycle('cycle-1', HUMAN)).status).toBe('closed');
   }, 60_000);
 
@@ -115,7 +121,8 @@ describe.skipIf(!pgAvailable)('O22 Plan C review R1-R4: cycle close against a wr
     const id = kind === 'open' ? await approvedOpen(a) : await approvedClose(a);
     const writes = broker.writes.length;
     const budget = await b.service.cycleBudget('cycle-1');
-    expect((await b.service.closeCycle('cycle-1', HUMAN)).status).toBe('closed');
+    // Closing begins (CLOSING). With the close intent the filled open's position is still open, so the cycle is not settled (R5).
+    expect((await b.service.closeCycle('cycle-1', HUMAN)).status).toBe(kind === 'open' ? 'closed' : 'closing');
     await expect(a.service.execute(id, HUMAN)).rejects.toMatchObject({ code: 'GATE_REFUSED' });
     expect((await b.service.get(id)).history.some((h) => h.state === 'SUBMITTING')).toBe(false);
     expect(broker.writes).toHaveLength(writes);

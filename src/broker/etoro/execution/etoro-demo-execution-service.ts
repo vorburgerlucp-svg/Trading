@@ -57,8 +57,10 @@ import {
 } from './execution-intent.js';
 import type { EtoroSnapshotHistory } from '../etoro-broker-service.js';
 import {
-  CYCLE_IN_FLIGHT_STATES,
   DEMO_CYCLE_RECORD_SCHEMA,
+  cycleSettlement,
+  isSettled,
+  type CycleSettlement,
   activeCycle,
   cycleActivationRefusals,
   cycleDefinitionRefusals,
@@ -796,6 +798,15 @@ export class EtoroDemoExecutionService {
     const p = this.require(intentId);
     if (p.intent.action !== 'open' || p.state !== 'ACCEPTED' || p.brokerOrderId === null) throw new DemoExecutionError('INTENT_STATE_INVALID', p.state);
     if (p.lastStatusId === null || !CANCELLABLE_STATUS_IDS.has(p.lastStatusId)) throw new DemoExecutionError('INTENT_STATE_INVALID', 'the order is not pending');
+    // Review of PR #35 (R6): a cancel only removes a pending order of the cycle; it is not a new trading order (no budget, no
+    // exposure), and while the cycle is CLOSING it is the way to settle that order. It is allowed while the cycle is ACTIVE or
+    // CLOSING. A CLOSED cycle has no pending order by definition (CLOSED needs it settled): such a state can only come from
+    // inconsistent records, and nothing is cancelled. (The order's provenance and the broker access are checked by cancel-guard.ts,
+    // PR #34.)
+    if (this.deps.cycles !== undefined && p.intent.cycleId !== undefined && this.cycleMap().get(p.intent.cycleId)?.status === 'closed') {
+      await this.recordGateRefusal(intentId, ['CANCEL_CYCLE_CLOSED']);
+      throw new DemoExecutionError('GATE_REFUSED', 'CANCEL_CYCLE_CLOSED', ['CANCEL_CYCLE_CLOSED']);
+    }
     if (!this.deps.adapter.pacer.tryAcquire(this.deps.clock().getTime())) throw new DemoExecutionError('GATE_REFUSED', 'BROKER_WRITE_PACING', ['BROKER_WRITE_PACING']);
     // A new cancel is allowed only when every earlier cancel of this intent was conclusively refused by the broker (it did not act).
     // An accepted, ambiguous or unfinished cancel blocks every further one: a cancel is never resent automatically or blindly.
@@ -1406,13 +1417,14 @@ export class EtoroDemoExecutionService {
    * stopped by the re-read after its reservation). The record carries the cycle's test verdict over its own intents: a position
    * closed outside NEXUS fails it (POSITION_CLOSED_EXTERNALLY), so it can never count as a passed NEXUS cycle.
    */
-  async closeCycle(cycleId: string, by: IntentActor): Promise<DemoCycle & { readonly inFlight: number }> {
+  async closeCycle(cycleId: string, by: IntentActor): Promise<DemoCycle & { readonly inFlight: number; readonly settlement: CycleSettlement }> {
     const operator = this.requireHumanOperator(by);
     this.requireCycles();
     const history = this.deps.snapshotHistory === undefined ? null : await this.deps.snapshotHistory.history();
     await this.syncAll();
     const status = () => this.cycleMap().get(cycleId)?.status ?? null;
-    const current = (inFlight: number) => ({ ...this.cycleMap().get(cycleId)!, inFlight });
+    const none: CycleSettlement = { writesInFlight: 0, ordersUnresolved: 0, positionsOpen: 0 };
+    const current = (settlement: CycleSettlement) => ({ ...this.cycleMap().get(cycleId)!, inFlight: settlement.writesInFlight, settlement });
     // Review of PR #35 (R3), step 1: CLOSING. From its commit on, no reservation of the cycle can commit (the reservation reads the
     // cycle log in its own critical section), so the set of the cycle's writes in flight can only shrink.
     if (status() === 'active') {
@@ -1426,14 +1438,17 @@ export class EtoroDemoExecutionService {
         await this.syncAll();
       }
     }
-    if (status() === 'closed') return current(0);
+    if (status() === 'closed') return current(none);
     if (status() !== 'closing') throw new DemoExecutionError('CYCLE_REFUSED', 'CYCLE_NOT_ACTIVE', ['CYCLE_NOT_ACTIVE']);
-    // Step 2: CLOSED, only when nothing of the cycle is in flight: no SUBMITTING (a write may still be sent, an answer is outstanding)
-    // and no AMBIGUOUS (the result is unclear). The intents are read AFTER CLOSING committed: every reservation of the cycle committed
-    // before it is seen, and none can follow. Otherwise the cycle stays CLOSING; a later call completes it.
+    // Step 2: CLOSED, only when the cycle is SETTLED by NEXUS's records (review of PR #35, R5): no write in flight (SUBMITTING,
+    // AMBIGUOUS), no broker order without a final status (SUBMITTED, ACCEPTED, RECONCILED, PARTIALLY_FILLED), and no position of a
+    // filled open that a filled NEXUS close did not close. The intents are read AFTER CLOSING committed: every reservation of the cycle
+    // committed before it is seen, and none can follow. Otherwise the cycle stays CLOSING with the breakdown; a later call completes
+    // it. Nothing here sends anything: settling an open order or position is a separate, existing step (refresh, cancel) or a decision.
     await this.syncAll();
-    const inFlight = [...this.projections().values()].filter((p) => p.intent.cycleId === cycleId && CYCLE_IN_FLIGHT_STATES.has(p.state)).length;
-    if (inFlight > 0) return current(inFlight);
+    const settlement = cycleSettlement([...this.projections().values()].filter((p) => p.intent.cycleId === cycleId)
+      .map((p) => ({ action: p.intent.action, state: p.state, expiresAt: p.intent.expiresAt, positionIds: p.positionIds, positionId: p.intent.positionId })));
+    if (!isSettled(settlement)) return current(settlement);
     const views = [...this.projections().values()].filter((p) => p.intent.cycleId === cycleId).map((p) => this.view(p));
     const verdict = history === null ? null : evaluateDemoCycleTest({ intents: views, snapshots: history.observations, missingSnapshotRecords: history.missingSnapshotRecords });
     try {
@@ -1448,7 +1463,7 @@ export class EtoroDemoExecutionService {
       await this.syncAll();
       if (status() !== 'closed') throw error;
     }
-    return current(0);
+    return current(none);
   }
 
   private async runGate(intent: ExecutionIntent, phase: 'create' | 'execute'): Promise<{ verdict: GateVerdict; exposure: Decimal }> {

@@ -154,6 +154,43 @@ export interface CycleIntentFact {
  */
 export const CYCLE_IN_FLIGHT_STATES: ReadonlySet<IntentState> = new Set(['SUBMITTING', 'AMBIGUOUS']);
 
+/**
+ * Review of PR #35 (R5): what is still open of a cycle, by NEXUS's own records, in three separate kinds. A cycle is SETTLED, and may
+ * be reported CLOSED, only when all three are zero. Ending new activity (CLOSING) is a separate step and needs none of this.
+ *   writesInFlight    a write may still be sent, its answer is outstanding, or its result is unclear (SUBMITTING, AMBIGUOUS)
+ *   ordersUnresolved  an order at the broker without a final status read: submitted, accepted (pending), found by reference, or
+ *                     partially filled (SUBMITTED, ACCEPTED, RECONCILED, PARTIALLY_FILLED), of an open or a close
+ *   positionsOpen     a position of a FILLED open of the cycle that no FILLED NEXUS close of the cycle closed. A position closed by
+ *                     hand (attested or not) counts as open here: NEXUS did not settle it (see docs, decision template)
+ */
+export interface CycleSettlement {
+  readonly writesInFlight: number;
+  readonly ordersUnresolved: number;
+  readonly positionsOpen: number;
+}
+
+const ORDER_UNRESOLVED: ReadonlySet<IntentState> = new Set(['SUBMITTED', 'ACCEPTED', 'RECONCILED', 'PARTIALLY_FILLED']);
+
+/** R5: the settlement of a cycle from the facts of its own intents (pure). */
+export function cycleSettlement(intents: readonly CycleIntentFact[]): CycleSettlement {
+  const closedByNexus = new Set(intents.filter((i) => i.action === 'close' && i.state === 'FILLED' && i.positionId !== null).map((i) => i.positionId!));
+  let positionsOpen = 0;
+  for (const i of intents) {
+    if (i.action !== 'open' || i.state !== 'FILLED') continue;
+    // A filled open names its position; one without a confirmed position is not settled either.
+    positionsOpen += i.positionIds.length === 0 ? 1 : i.positionIds.filter((id) => !closedByNexus.has(id)).length;
+  }
+  return {
+    writesInFlight: intents.filter((i) => CYCLE_IN_FLIGHT_STATES.has(i.state)).length,
+    ordersUnresolved: intents.filter((i) => ORDER_UNRESOLVED.has(i.state)).length,
+    positionsOpen,
+  };
+}
+
+export function isSettled(s: CycleSettlement): boolean {
+  return s.writesInFlight === 0 && s.ordersUnresolved === 0 && s.positionsOpen === 0;
+}
+
 /** States in which a write may have reached the broker without a final, confirmed outcome. */
 const UNRESOLVED: ReadonlySet<IntentState> = new Set(['SUBMITTING', 'SUBMITTED', 'ACCEPTED', 'AMBIGUOUS', 'RECONCILED', 'PARTIALLY_FILLED']);
 const PENDING: ReadonlySet<IntentState> = new Set(['CREATED', 'RISK_APPROVED', 'APPROVED']);
