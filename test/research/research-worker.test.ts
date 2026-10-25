@@ -343,3 +343,36 @@ describe('R1 worker: run ids are used once', () => {
     expect(await second.lock.tryAcquire()).not.toBeNull(); // the lock was released
   });
 });
+
+describe('R1 worker: settlement and identical run ids (mutation findings)', () => {
+  it('a bar is not requested before its settlement delay has passed (30 s after its end: the previous bar is the latest)', async () => {
+    const h = harness({ catalog: catalogOf([BTC_ENTRY]), clock: new FakeClock('2026-10-07T15:30:30Z') });
+    const out = await h.run();
+    if (out.kind !== 'finished') throw new Error();
+    // The bar 15:15-15:30 ended 30 s ago, the provider settles after 60 s: it is not complete yet and is not requested.
+    expect(out.instruments[0]).toMatchObject({ outcome: 'fetched', to: '2026-10-07T15:15:00.000Z', droppedInProgress: 0 });
+  });
+
+  it('a second process with the same run id and the same clock (identical start record) stops before any request', async () => {
+    const stores = memoryStores();
+    const crashing = new InMemoryAppendOnlyStore<ResearchRunRecord>();
+    stores.runStores.set(TODAY, crashing);
+    const first = harness({ stores, catalog: catalogOf([BTC_ENTRY]), runIdPrefix: 'same' });
+    first.transport.beforeAnswer = () => {
+      throw new Error('simulated crash');
+    };
+    (crashing as unknown as { writeExclusive: unknown }).writeExclusive = ((orig) =>
+      function (this: unknown, ...args: unknown[]) {
+        const kind = (args as [number, (n: readonly unknown[]) => { kind: string; record?: { payload: { kind: string } } }])[1]([]);
+        if (kind.kind === 'append' && kind.record?.payload.kind === 'run_finished') return Promise.reject(new Error('simulated crash'));
+        return (orig as (...a: unknown[]) => Promise<unknown>).apply(crashing, args);
+      })(InMemoryAppendOnlyStore.prototype.writeExclusive);
+    await expect(first.run()).rejects.toThrow('simulated crash');
+    delete (crashing as unknown as { writeExclusive?: unknown }).writeExclusive;
+    const second = harness({ stores, catalog: catalogOf([BTC_ENTRY]), runIdPrefix: 'same' });
+    await expect(second.run()).rejects.toThrow(/already used/);
+    expect(second.transport.calls).toHaveLength(0);
+    // Nothing was merged into the first run's protocol: no finish record under its id.
+    expect((await crashing.loadAll()).map((r) => r.id).filter((id) => id.startsWith('same-run-1:finished'))).toEqual([]);
+  });
+});

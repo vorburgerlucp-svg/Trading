@@ -20,7 +20,7 @@ import { INTERVAL_MS, type BarSession, type Instrument } from '../market-data/ma
 import type { FetchLike } from '../market-data/providers/resilience.js';
 import { requireCalendar } from '../market-data/sessions.js';
 import { toUtcIso } from '../market-data/time.js';
-import type { AppendOnlyLog, AppendOnlyStore } from '../persistence/append-only-log.js';
+import { AppendOnlyLogError, type AppendOnlyLog, type AppendOnlyStore } from '../persistence/append-only-log.js';
 import { hashOf } from '../persistence/canonical-json.js';
 import { FinalBarsOnlyProvider } from './final-bars-provider.js';
 import { CreditBudget, guardedFetch, ResearchBudgetError } from './research-budget.js';
@@ -74,6 +74,11 @@ export type ResearchRunOutcome =
 
 class CatalogMismatchError extends Error {
   override readonly name = 'CatalogMismatchError';
+}
+
+/** The run id was already used by another run: this run writes nothing more under it (no finish record) and stops. */
+export class RunIdReusedError extends Error {
+  override readonly name = 'RunIdReusedError';
 }
 
 function defaultRunId(now: Date): string {
@@ -162,7 +167,7 @@ export async function runResearchOnce(deps: ResearchWorkerDeps): Promise<Researc
     });
     // A run id is used exactly once: an existing start record means another process used the same id, and its credit and
     // protocol records would silently merge with this run's. Fail closed.
-    if (startedRecord.status !== 'APPLIED') throw new Error('run id ' + runId + ' was already used');
+    if (startedRecord.status !== 'APPLIED') throw new RunIdReusedError('run id ' + runId + ' was already used');
 
     if (settings.dataClearance === null) {
       status = 'license_not_cleared';
@@ -212,6 +217,12 @@ export async function runResearchOnce(deps: ResearchWorkerDeps): Promise<Researc
       }
     }
   } catch (error) {
+    // Every protocol id of a run starts with its run id: a conflicting record means the id belongs to another run. Nothing may be
+    // merged into that run's protocol: release the lock and stop without a finish record.
+    if (error instanceof RunIdReusedError || (error instanceof AppendOnlyLogError && error.code === 'idempotency_conflict')) {
+      await lock.release();
+      throw error;
+    }
     status = 'failed';
     detail = (error as Error).name + ': ' + (error as Error).message.slice(0, 200);
   }
