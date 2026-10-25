@@ -19,7 +19,9 @@ export type DemoExecutionErrorCode =
   | 'EXECUTION_AMBIGUOUS'
   | 'RECONCILIATION_PENDING'
   | 'EXTERNAL_CLOSURE_REFUSED'
-  | 'EXTERNAL_CLOSURE_NOT_AVAILABLE';
+  | 'EXTERNAL_CLOSURE_NOT_AVAILABLE'
+  | 'CYCLE_REFUSED'
+  | 'CYCLES_NOT_AVAILABLE';
 
 const FIXED_MESSAGE: Readonly<Record<DemoExecutionErrorCode, string>> = Object.freeze({
   EXECUTION_DISABLED: 'eToro demo execution is not enabled for this process',
@@ -40,6 +42,8 @@ const FIXED_MESSAGE: Readonly<Record<DemoExecutionErrorCode, string>> = Object.f
   RECONCILIATION_PENDING: 'the broker state does not yet decide the outcome: reconcile again later',
   EXTERNAL_CLOSURE_REFUSED: 'the evidence does not prove that the position was closed outside NEXUS: nothing was recorded',
   EXTERNAL_CLOSURE_NOT_AVAILABLE: 'external closure attestations are not available in this process: nothing was recorded',
+  CYCLE_REFUSED: 'the demo cycle step was refused: nothing was recorded',
+  CYCLES_NOT_AVAILABLE: 'demo cycles are not available in this process: nothing was recorded',
 });
 
 export class DemoExecutionError extends Error {

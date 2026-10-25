@@ -34,6 +34,22 @@ export interface AppendOnlyStore<T> {
    * Persistence is atomic: the record is stored completely or not at all.
    */
   writeExclusive<R>(knownSequence: number, decide: (newer: readonly LogRecord<T>[]) => WriteDecision<T, R>): Promise<R>;
+  /**
+   * O22 Plan C review: like writeExclusive, and inside the SAME critical section also reads another log of the same storage (the
+   * guard), so that no writer of the guard log can commit between that read and this write. In PostgreSQL: the guard log's head
+   * row is locked FOR SHARE in the same transaction (after this log's FOR UPDATE: one fixed lock order), and its records after
+   * `guard.knownSequence` are read in it. A writer of the guard log takes FOR UPDATE on that row and so waits, or has committed
+   * before and is seen. Absent: the store cannot do this, and a guarded append is refused (never done without the guard).
+   */
+  writeExclusiveGuarded?<R, G>(knownSequence: number, guard: GuardRead<G>, decide: (newer: readonly LogRecord<T>[], guardNewer: readonly LogRecord<G>[]) => WriteDecision<T, R>): Promise<R>;
+  /** The store that holds the data (a wrapper returns its inner store's target); used to find the guard log in the same storage. */
+  storageTarget?(): AppendOnlyStore<T>;
+}
+
+/** O22 Plan C review: the other log a guarded write reads in its critical section. */
+export interface GuardRead<G> {
+  readonly store: AppendOnlyStore<G>;
+  readonly knownSequence: number;
 }
 
 export type AppendOnlyLogErrorCode = 'idempotency_conflict' | 'integrity' | 'store_conflict' | 'invalid';
@@ -90,6 +106,22 @@ export class InMemoryAppendOnlyStore<T> implements AppendOnlyStore<T> {
     });
     this.queue = run.catch(() => undefined);
     return run;
+  }
+
+  /** The records, read synchronously inside another in-memory store's critical section (one event-loop turn: atomic). */
+  recordsAfter(sequence: number): readonly LogRecord<T>[] {
+    return this.records.slice(sequence);
+  }
+
+  writeExclusiveGuarded<R, G>(knownSequence: number, guard: GuardRead<G>, decide: (newer: readonly LogRecord<T>[], guardNewer: readonly LogRecord<G>[]) => WriteDecision<T, R>): Promise<R> {
+    const target = guard.store.storageTarget?.() ?? guard.store;
+    if (!(target instanceof InMemoryAppendOnlyStore)) return Promise.reject(new AppendOnlyLogError('invalid', 'a guarded write needs the guard log in the same storage'));
+    // The guard's records are read synchronously in the same turn as the decision and the push: no other store can commit between.
+    return this.writeExclusive(knownSequence, (newer) => decide(newer, (target as InMemoryAppendOnlyStore<G>).recordsAfter(guard.knownSequence)));
+  }
+
+  storageTarget(): AppendOnlyStore<T> {
+    return this;
   }
 }
 
@@ -148,8 +180,8 @@ export class AppendOnlyLog<T> {
    * Appends (idempotently) and freezes the payload. `precondition` runs inside the critical section,
    * after records from other processes were applied, and can veto the append by throwing.
    */
-  append(id: string, payload: T, options: { precondition?: () => void } = {}): Promise<LogAppendResult<T>> {
-    const run = this.queue.then(() => this.appendNow(id, payload, options.precondition));
+  append<G = unknown>(id: string, payload: T, options: { precondition?: () => void; guard?: AppendGuard<G> } = {}): Promise<LogAppendResult<T>> {
+    const run = this.queue.then(() => (options.guard ? this.appendGuardedNow(id, payload, options.guard, options.precondition) : this.appendNow(id, payload, options.precondition)));
     this.queue = run.catch(() => undefined);
     return run;
   }
@@ -193,6 +225,47 @@ export class AppendOnlyLog<T> {
     return result;
   }
 
+  /** O22 Plan C review: this log's records and store, as a guard of another log's append (read only; the log is not changed). */
+  guardView(): { store: AppendOnlyStore<T>; records: readonly LogRecord<T>[] } {
+    this.assertHealthy();
+    return { store: this.store, records: [...this.records] };
+  }
+
+  /**
+   * O22 Plan C review: an append whose decision also reads the guard log inside the same critical section (the store's
+   * writeExclusiveGuarded). The guard's newer records are verified (sequence, chain, hash) against this process's copy, and
+   * `guard.check` sees the guard log as it is in that critical section. Neither log is changed by the check itself.
+   */
+  private async appendGuardedNow<G>(id: string, payload: T, guard: AppendGuard<G>, precondition: (() => void) | undefined): Promise<LogAppendResult<T>> {
+    this.assertHealthy();
+    if (typeof id !== 'string' || id.trim() === '') throw new AppendOnlyLogError('invalid', this.name + ': id is required');
+    if (this.store.writeExclusiveGuarded === undefined) throw new AppendOnlyLogError('invalid', this.name + ': the store cannot make a guarded write');
+    const view = guard.log.guardView();
+    const result = await this.store.writeExclusiveGuarded<LogAppendResult<T>, G>(this.records.length, { store: view.store, knownSequence: view.records.length }, (newer, guardNewer) => {
+      this.applyVerified(newer);
+      const existing = this.byId.get(id);
+      if (existing) {
+        if (hashOf(existing.payload) === hashOf(payload)) return { kind: 'none', result: { status: 'ALREADY_APPLIED', record: existing } };
+        throw new AppendOnlyLogError('idempotency_conflict', this.name + ': id "' + id + '" already exists with different content');
+      }
+      const guardRecords = [...view.records];
+      for (const record of guardNewer) {
+        const head = guardRecords.at(-1)?.hash ?? GENESIS_HASH;
+        if (record.sequence !== guardRecords.length + 1 || record.prevHash !== head || hashRecord(record) !== record.hash) {
+          throw new AppendOnlyLogError('integrity', this.name + ': the guard log has an invalid record at sequence ' + record.sequence);
+        }
+        guardRecords.push(record);
+      }
+      guard.check(guardRecords);
+      precondition?.();
+      const unsigned = { sequence: this.records.length + 1, id, recordedAt: this.clock().toISOString(), payload, prevHash: this.headHash };
+      const created = deepFreeze({ ...unsigned, hash: hashRecord(unsigned) });
+      return { kind: 'append', record: created, result: { status: 'APPLIED', record: created } };
+    });
+    if (result.status === 'APPLIED') this.apply(result.record);
+    return result;
+  }
+
   private applyVerified(records: readonly LogRecord<T>[]): void {
     for (const record of records) {
       const expectedSequence = this.records.length + 1;
@@ -230,6 +303,12 @@ export class AppendOnlyLog<T> {
   private assertHealthy(): void {
     if (this.corruption) throw this.corruption;
   }
+}
+
+/** O22 Plan C review: the guard of an append: another log read in the same critical section, and the check on it (throw = refuse). */
+export interface AppendGuard<G> {
+  readonly log: AppendOnlyLog<G>;
+  readonly check: (records: readonly LogRecord<G>[]) => void;
 }
 
 export function hashRecord<T>(record: Omit<LogRecord<T>, 'hash'>): string {

@@ -47,6 +47,7 @@ import {
   LIVE_AT_BROKER_STATES,
   assertTransition,
   bindClosePosition,
+  bindCycle,
   economicFingerprint,
   isIntentId,
   parseExecutionIntent,
@@ -55,6 +56,22 @@ import {
   type IntentState,
 } from './execution-intent.js';
 import type { EtoroSnapshotHistory } from '../etoro-broker-service.js';
+import {
+  DEMO_CYCLE_RECORD_SCHEMA,
+  cycleSettlement,
+  isSettled,
+  type CycleSettlement,
+  activeCycle,
+  cycleActivationRefusals,
+  cycleDefinitionRefusals,
+  cycleRecordId,
+  intentCycleRefusals,
+  policyHashOf,
+  projectCycles,
+  type DemoCycle,
+  type DemoCycleRecord,
+} from './demo-cycles.js';
+import { evaluateDemoCycleTest } from './demo-cycle-test-verdict.js';
 import { NO_ACCESS_VERIFIER, accessRefusal, type AccessStamp, type AccessVerifier } from '../etoro-access-fingerprint.js';
 import {
   EXTERNAL_CLOSURE_SCHEMA,
@@ -201,6 +218,12 @@ export interface DemoExecutionServiceDeps {
    * the stored broker data it relies on to match it. Absent: nothing matches, every open and close is refused (fail closed).
    */
   access?: AccessVerifier;
+  /**
+   * O22 Plan C: the demo cycle log (demo-cycles.ts). Present: every new intent is bound to the active cycle, its policy and budget
+   * are the cycle's, and an intent of another cycle is never executed. Absent (the runtime today): exactly the behaviour before, with
+   * `policy` and the budget of the whole intent log.
+   */
+  cycles?: AppendOnlyLog<DemoCycleRecord>;
   executionEnabled: boolean;
   clock: () => Date;
   policy?: DemoExecutionPolicy;
@@ -366,7 +389,14 @@ export class EtoroDemoExecutionService {
   async create(input: unknown, createdBy: IntentActor): Promise<IntentView> {
     await this.syncAll();
     const parsed = parseExecutionIntent(input, createdBy);
-    const intent = parsed.action === 'close' ? bindClosePosition(parsed, this.closePositionOf(parsed)) : parsed;
+    const bound = parsed.action === 'close' ? bindClosePosition(parsed, this.closePositionOf(parsed)) : parsed;
+    // O22 Plan C: with cycles, a new intent belongs to the cycle active now, and only to it. Without an active cycle nothing is created.
+    let intent = bound;
+    if (this.deps.cycles !== undefined) {
+      const active = activeCycle(this.cycleMap(), this.now());
+      if (active === null) throw new DemoExecutionError('GATE_REFUSED', 'CYCLE_NOT_ACTIVE', ['CYCLE_NOT_ACTIVE']);
+      intent = bindCycle(bound, active.cycleId);
+    }
     const existing = this.projections().get(intent.intentId);
     if (existing) return this.view(existing);
     const now = this.now();
@@ -464,21 +494,36 @@ export class EtoroDemoExecutionService {
     const reservationRead = p.intent.action === 'open' ? await this.readPositions() : null;
     const reservationExternal = this.externalClosureInput(p.intent, reservationRead);
     const reservationAccess = this.accessRefusals(p.intent, p.intent.action === 'close' ? reservationEvidence?.snapshot ?? null : reservationRead?.snapshot ?? null);
+    await this.deps.cycles?.sync();
+    const policy = this.policyFor(p.intent);
     // The reservation step and the at-most-once guard. SUBMITTING is entered once, only from APPROVED, and only if the book limits
     // still hold for the book as it is inside the critical section, after every other process's records were applied.
     let submitting;
     try {
-      submitting = await guarded(() => this.deps.intents.append(intentId + ':SUBMITTING', {
+      // Review of PR #35 (R2): with cycles, the reservation reads the cycle log INSIDE its own critical section (a guarded write: in
+      // PostgreSQL the cycle log's head row FOR SHARE in the same transaction). A CLOSING or CLOSED record committed before it is seen,
+      // and none can commit while it runs: no reservation on a cycle whose close has begun, so no budget spent on it.
+      let cycleRefusalsInLock: string[] = [];
+      const cycleGuard = this.deps.cycles === undefined ? undefined : {
+        log: this.deps.cycles,
+        check: (records: readonly { payload: DemoCycleRecord }[]) => {
+          cycleRefusalsInLock = intentCycleRefusals(p.intent.cycleId, projectCycles(records.map((r) => r.payload)), this.now());
+        },
+      };
+      submitting = await guarded(() => this.deps.intents.append<DemoCycleRecord>(intentId + ':SUBMITTING', {
         schema: 'etoro-demo-intent-event:v1', intentId, state: 'SUBMITTING', from: 'APPROVED', at: this.now(), reason: 'SUBMISSION_STARTED', requestId, attemptId,
       }, {
+        ...(cycleGuard !== undefined ? { guard: cycleGuard } : {}),
         precondition: () => {
           const current = this.projections().get(intentId);
           if (!current || current.state !== 'APPROVED') throw new DemoExecutionError('INTENT_STATE_INVALID', current?.state ?? 'missing');
-          const refusals = bookRefusals(p.intent, this.book(p.intent), p.intent.action === 'open' ? exposure : null, this.policy);
+          const refusals = bookRefusals(p.intent, this.book(p.intent), p.intent.action === 'open' ? exposure : null, policy);
           // O22 D4 (R2): the re-read evidence, judged at this moment (age), with the binding from the caught-up intent log.
-          if (reservationEvidence !== null) refusals.push(...closePositionRefusals(p.intent, { ...reservationEvidence, ...this.bindingOf(p.intent) }, this.now(), this.policy));
-          if (reservationExternal !== undefined) refusals.push(...externalClosureOpenRefusals(reservationExternal.attestedPositionIds, reservationExternal.read, this.now(), this.policy.maxBrokerSyncAgeMs));
+          if (reservationEvidence !== null) refusals.push(...closePositionRefusals(p.intent, { ...reservationEvidence, ...this.bindingOf(p.intent) }, this.now(), policy));
+          if (reservationExternal !== undefined) refusals.push(...externalClosureOpenRefusals(reservationExternal.attestedPositionIds, reservationExternal.read, this.now(), policy.maxBrokerSyncAgeMs));
           refusals.push(...reservationAccess);
+          // O22 Plan C: the intent's cycle is still the active one (and not expired), read in this critical section (the guard).
+          if (this.deps.cycles !== undefined) refusals.push(...cycleRefusalsInLock);
           if (refusals.length > 0) throw new DemoExecutionError('GATE_REFUSED', refusals.join(','), refusals);
         },
       }));
@@ -488,6 +533,18 @@ export class EtoroDemoExecutionService {
     }
     if (submitting.status !== 'APPLIED') throw new DemoExecutionError('INTENT_STATE_INVALID', 'SUBMITTING');
     await this.deps.attempts.append(attemptId + ':started', { schema: 'etoro-demo-execution-attempt:v1', attemptId, intentId, operation, phase: 'started', requestId, at: this.now(), by: operator, ...this.accessStamp() });
+
+    // O22 Plan C: the cycle log again AFTER the reservation and before the write. A cycle closed (or expired) in the meantime stops
+    // it: not sent (REJECTED), the budget of that cycle stays spent. A close record therefore always stops every later write.
+    if (this.deps.cycles !== undefined) {
+      await this.deps.cycles.sync();
+      const cycleRefused = intentCycleRefusals(p.intent.cycleId, this.cycleMap(), this.now());
+      if (cycleRefused.length > 0) {
+        await this.finishAttempt(attemptId, intentId, operation, requestId, { outcome: 'not_sent', httpStatus: null, code: cycleRefused[0]! });
+        await this.transition(intentId, 'REJECTED', 'NOT_SENT_CYCLE_NOT_ACTIVE', { attemptId });
+        throw new DemoExecutionError('GATE_REFUSED', cycleRefused.join(','), cycleRefused);
+      }
+    }
 
     // O22 Plan B review R1: a close reads the attestation log again AFTER its reservation is recorded and before the write. An
     // attestation of its position that committed in the meantime stops it: not sent (REJECTED), the budget stays spent. Together with
@@ -741,6 +798,15 @@ export class EtoroDemoExecutionService {
     const p = this.require(intentId);
     if (p.intent.action !== 'open' || p.state !== 'ACCEPTED' || p.brokerOrderId === null) throw new DemoExecutionError('INTENT_STATE_INVALID', p.state);
     if (p.lastStatusId === null || !CANCELLABLE_STATUS_IDS.has(p.lastStatusId)) throw new DemoExecutionError('INTENT_STATE_INVALID', 'the order is not pending');
+    // Review of PR #35 (R6): a cancel only removes a pending order of the cycle; it is not a new trading order (no budget, no
+    // exposure), and while the cycle is CLOSING it is the way to settle that order. It is allowed while the cycle is ACTIVE or
+    // CLOSING. A CLOSED cycle has no pending order by definition (CLOSED needs it settled): such a state can only come from
+    // inconsistent records, and nothing is cancelled. (The order's provenance and the broker access are checked by cancel-guard.ts,
+    // PR #34.)
+    if (this.deps.cycles !== undefined && p.intent.cycleId !== undefined && this.cycleMap().get(p.intent.cycleId)?.status === 'closed') {
+      await this.recordGateRefusal(intentId, ['CANCEL_CYCLE_CLOSED']);
+      throw new DemoExecutionError('GATE_REFUSED', 'CANCEL_CYCLE_CLOSED', ['CANCEL_CYCLE_CLOSED']);
+    }
     if (!this.deps.adapter.pacer.tryAcquire(this.deps.clock().getTime())) throw new DemoExecutionError('GATE_REFUSED', 'BROKER_WRITE_PACING', ['BROKER_WRITE_PACING']);
     // A new cancel is allowed only when every earlier cancel of this intent was conclusively refused by the broker (it did not act).
     // An accepted, ambiguous or unfinished cancel blocks every further one: a cancel is never resent automatically or blindly.
@@ -1033,6 +1099,7 @@ export class EtoroDemoExecutionService {
     await Promise.all([
       this.deps.intents.sync(), this.deps.attempts.sync(), this.deps.confirmations.sync(), this.deps.reconciliations.sync(),
       ...(this.deps.externalClosures !== undefined ? [this.deps.externalClosures.sync()] : []),
+      ...(this.deps.cycles !== undefined ? [this.deps.cycles.sync()] : []),
     ]);
   }
 
@@ -1194,6 +1261,7 @@ export class EtoroDemoExecutionService {
 
   private book(intent: ExecutionIntent): GateBook {
     const all = [...this.projections().values()].filter((p) => p.intent.intentId !== intent.intentId);
+    const sameCycle = (p: Projection) => (p.intent.cycleId ?? null) === (intent.cycleId ?? null);
     const closedPositions = new Set<number>();
     for (const p of all) if (p.intent.action === 'close' && p.state === 'FILLED' && p.intent.positionId !== null) closedPositions.add(p.intent.positionId);
     // O22 Plan B: a position attested as closed outside NEXUS no longer counts as live (only for the open it was attested for).
@@ -1209,7 +1277,9 @@ export class EtoroDemoExecutionService {
       closeTargetKnown =
         target !== undefined && target.intent.action === 'open' && (target.state === 'FILLED' || target.state === 'PARTIALLY_FILLED') &&
         this.brokerConfirmedPositions(target.intent.intentId).includes(intent.positionId) && target.intent.instrumentId === intent.instrumentId && target.intent.etoroInstrumentId === intent.etoroInstrumentId &&
-        target.intent.side === intent.side && !settled(target, intent.positionId);
+        target.intent.side === intent.side && !settled(target, intent.positionId) &&
+        // O22 Plan C: a close closes an open of its own cycle only (its budget is that cycle's).
+        (target.intent.cycleId ?? null) === (intent.cycleId ?? null);
       // Any other close of this position that is not finished (or that filled) counts, from CREATED on.
       closeTargetAlreadyClosing = all.some((p) => p.intent.action === 'close' && p.intent.positionId === intent.positionId && (!TERMINAL.has(p.state) || p.state === 'FILLED'));
     }
@@ -1222,22 +1292,178 @@ export class EtoroDemoExecutionService {
       closeTargetKnown,
       closeTargetAlreadyClosing,
       // O22 cycle budget: every intent that ever reached SUBMITTING, whatever happened after it (rejected, ambiguous, crashed).
-      openSubmissions: all.filter((p) => p.intent.action === 'open' && p.submittingAt !== null).length,
-      closeSubmissions: all.filter((p) => p.intent.action === 'close' && p.submittingAt !== null).length,
+      // O22 Plan C: only the intents of the same cycle count (without cycles: all of them, exactly as before). A new cycle starts with
+      // its own count; no old count is ever reset.
+      openSubmissions: all.filter((p) => p.intent.action === 'open' && p.submittingAt !== null && sameCycle(p)).length,
+      closeSubmissions: all.filter((p) => p.intent.action === 'close' && p.submittingAt !== null && sameCycle(p)).length,
     };
   }
 
   /** O22: the cycle budget of the policy and how much of it the intent log has spent. Read only; no broker request. */
-  async cycleBudget(): Promise<{ policyVersion: string; maxOpenSubmissions: number | null; maxCloseSubmissions: number | null; openSubmissions: number; closeSubmissions: number }> {
+  async cycleBudget(cycleId?: string): Promise<{ cycleId?: string | null; policyVersion: string; maxOpenSubmissions: number | null; maxCloseSubmissions: number | null; openSubmissions: number; closeSubmissions: number }> {
     await this.syncAll();
     const all = [...this.projections().values()];
+    // O22 Plan C: with cycles, the budget of the named cycle (default: the active one); without, the whole log as before.
+    const cycle = this.deps.cycles === undefined ? null : cycleId !== undefined ? this.cycleMap().get(cycleId) ?? null : activeCycle(this.cycleMap(), this.now());
+    const policy = cycle?.policy ?? this.policy;
+    const counted = (p: Projection) => this.deps.cycles === undefined || (p.intent.cycleId ?? null) === (cycle?.cycleId ?? null);
     return {
-      policyVersion: this.policy.version,
-      maxOpenSubmissions: this.policy.maxOpenSubmissions,
-      maxCloseSubmissions: this.policy.maxCloseSubmissions,
-      openSubmissions: all.filter((p) => p.intent.action === 'open' && p.submittingAt !== null).length,
-      closeSubmissions: all.filter((p) => p.intent.action === 'close' && p.submittingAt !== null).length,
+      // Only with cycles: without them the answer is exactly the one before (no cycle field).
+      ...(this.deps.cycles !== undefined ? { cycleId: cycle?.cycleId ?? null } : {}),
+      policyVersion: policy.version,
+      maxOpenSubmissions: policy.maxOpenSubmissions,
+      maxCloseSubmissions: policy.maxCloseSubmissions,
+      openSubmissions: all.filter((p) => p.intent.action === 'open' && p.submittingAt !== null && counted(p)).length,
+      closeSubmissions: all.filter((p) => p.intent.action === 'close' && p.submittingAt !== null && counted(p)).length,
     };
+  }
+
+  // ------------------------------------------------------------------------------------------------------- cycles (Plan C)
+
+  private cycleMap(): Map<string, DemoCycle> {
+    return this.deps.cycles === undefined ? new Map() : projectCycles(this.deps.cycles.all().map((r) => r.payload));
+  }
+
+  /** The policy an intent is judged by: its cycle's (fixed at definition), or without cycles the service policy. */
+  private policyFor(intent: ExecutionIntent): DemoExecutionPolicy {
+    if (this.deps.cycles === undefined || intent.cycleId === undefined) return this.policy;
+    return this.cycleMap().get(intent.cycleId)?.policy ?? this.policy;
+  }
+
+  private requireCycles(): AppendOnlyLog<DemoCycleRecord> {
+    if (this.deps.cycles === undefined) throw new DemoExecutionError('CYCLES_NOT_AVAILABLE');
+    return this.deps.cycles;
+  }
+
+  private async appendCycle(record: DemoCycleRecord, precondition: () => void): Promise<void> {
+    const log = this.requireCycles();
+    try {
+      const result = await log.append(cycleRecordId(record.cycleId, record.kind), record, { precondition });
+      if (result.status !== 'APPLIED') throw new DemoExecutionError('CYCLE_REFUSED', 'CYCLE_STEP_ALREADY_RECORDED', ['CYCLE_STEP_ALREADY_RECORDED']);
+    } catch (error) {
+      if (error instanceof AppendOnlyLogError && error.code === 'idempotency_conflict') throw new DemoExecutionError('CYCLE_REFUSED', 'CYCLE_STEP_ALREADY_RECORDED', ['CYCLE_STEP_ALREADY_RECORDED']);
+      throw error;
+    }
+  }
+
+  /** The cycles, read only. */
+  async listCycles(): Promise<DemoCycle[]> {
+    await this.syncAll();
+    return [...this.cycleMap().values()];
+  }
+
+  /**
+   * O22 Plan C: defines a cycle as an inactive draft: its id, its own policy version, budget and limits, and its active time. A human
+   * only. Nothing is activated and no write becomes possible. Refused (CYCLE_REFUSED) for a used id or policy version, or an
+   * unbounded budget. The policy is stored with its hash; the activation must name that hash.
+   */
+  async defineCycle(input: { cycleId: string; policy: DemoExecutionPolicy; maxActiveMs: number }, by: IntentActor): Promise<DemoCycle> {
+    const operator = this.requireHumanOperator(by);
+    this.requireCycles();
+    await this.syncAll();
+    const refused = cycleDefinitionRefusals(input, this.cycleMap());
+    if (refused.length > 0) throw new DemoExecutionError('CYCLE_REFUSED', refused.join(','), refused);
+    const policy = Object.freeze({ ...input.policy });
+    await this.appendCycle(
+      { schema: DEMO_CYCLE_RECORD_SCHEMA, kind: 'defined', cycleId: input.cycleId, policy, policyHash: policyHashOf(policy), maxActiveMs: input.maxActiveMs, definedBy: operator, definedAt: this.now() },
+      () => {
+        const again = cycleDefinitionRefusals(input, this.cycleMap());
+        if (again.length > 0) throw new DemoExecutionError('CYCLE_REFUSED', again.join(','), again);
+      },
+    );
+    return this.cycleMap().get(input.cycleId)!;
+  }
+
+  /**
+   * O22 Plan C: activates a draft cycle, by the explicit authorization of a human who names the exact policy (its hash) and makes
+   * the activation statement. Refused unless every earlier broker state is settled (cycleActivationRefusals), no other cycle is
+   * active and the kill switch is armed. The build lock and every gate rule stay in force: an active cycle opens no lock.
+   */
+  async activateCycle(cycleId: string, authorization: { policyHash: unknown; statement: unknown }, by: IntentActor): Promise<DemoCycle> {
+    const operator = this.requireHumanOperator(by);
+    this.requireCycles();
+    await this.syncAll();
+    await this.deps.killSwitch.sync();
+    const check = () => cycleActivationRefusals({
+      cycleId,
+      policyHash: authorization.policyHash,
+      statement: authorization.statement,
+      now: this.now(),
+      cycles: this.cycleMap(),
+      intents: [...this.projections().values()].map((p) => ({ action: p.intent.action, state: p.state, expiresAt: p.intent.expiresAt, positionIds: p.positionIds, positionId: p.intent.positionId })),
+      killSwitchArmed: this.deps.killSwitch.current().status === 'ARMED',
+    });
+    const refused = check();
+    if (refused.length > 0) throw new DemoExecutionError('CYCLE_REFUSED', refused.join(','), refused);
+    const cycle = this.cycleMap().get(cycleId)!;
+    const now = this.now();
+    await this.appendCycle(
+      {
+        schema: DEMO_CYCLE_RECORD_SCHEMA, kind: 'activated', cycleId, policyHash: cycle.policyHash, statement: 'ACTIVATE_DEMO_CYCLE_WITH_THIS_POLICY',
+        activatedBy: operator, activatedAt: now, activeUntil: new Date(Date.parse(now) + cycle.maxActiveMs).toISOString(), checkedIntentLogSize: this.deps.intents.size,
+      },
+      // Inside the cycle log's lock, after catching up with it: still a draft, still no other active cycle (the intent facts were read
+      // just before; no settled intent can become unsettled again, and no intent of a closed cycle can be sent).
+      () => {
+        const again = check();
+        if (again.length > 0) throw new DemoExecutionError('CYCLE_REFUSED', again.join(','), again);
+      },
+    );
+    return this.cycleMap().get(cycleId)!;
+  }
+
+  /**
+   * O22 Plan C: closes the active cycle, by a human. From then on no intent of it is created or sent (a write already reserved is
+   * stopped by the re-read after its reservation). The record carries the cycle's test verdict over its own intents: a position
+   * closed outside NEXUS fails it (POSITION_CLOSED_EXTERNALLY), so it can never count as a passed NEXUS cycle.
+   */
+  async closeCycle(cycleId: string, by: IntentActor): Promise<DemoCycle & { readonly inFlight: number; readonly settlement: CycleSettlement }> {
+    const operator = this.requireHumanOperator(by);
+    this.requireCycles();
+    const history = this.deps.snapshotHistory === undefined ? null : await this.deps.snapshotHistory.history();
+    await this.syncAll();
+    const status = () => this.cycleMap().get(cycleId)?.status ?? null;
+    const none: CycleSettlement = { writesInFlight: 0, ordersUnresolved: 0, positionsOpen: 0 };
+    const current = (settlement: CycleSettlement) => ({ ...this.cycleMap().get(cycleId)!, inFlight: settlement.writesInFlight, settlement });
+    // Review of PR #35 (R3), step 1: CLOSING. From its commit on, no reservation of the cycle can commit (the reservation reads the
+    // cycle log in its own critical section), so the set of the cycle's writes in flight can only shrink.
+    if (status() === 'active') {
+      try {
+        await this.appendCycle({ schema: DEMO_CYCLE_RECORD_SCHEMA, kind: 'closing', cycleId, closingBy: operator, closingAt: this.now() }, () => {
+          if (status() !== 'active') throw new DemoExecutionError('CYCLE_REFUSED', 'CYCLE_NOT_ACTIVE', ['CYCLE_NOT_ACTIVE']);
+        });
+      } catch (error) {
+        // Another process began (or completed) the close first: continue from what is stored.
+        if (!(error instanceof DemoExecutionError && error.code === 'CYCLE_REFUSED')) throw error;
+        await this.syncAll();
+      }
+    }
+    if (status() === 'closed') return current(none);
+    if (status() !== 'closing') throw new DemoExecutionError('CYCLE_REFUSED', 'CYCLE_NOT_ACTIVE', ['CYCLE_NOT_ACTIVE']);
+    // Step 2: CLOSED, only when the cycle is SETTLED by NEXUS's records (review of PR #35, R5): no write in flight (SUBMITTING,
+    // AMBIGUOUS), no broker order without a final status (SUBMITTED, ACCEPTED, RECONCILED, PARTIALLY_FILLED), and no position of a
+    // filled open that a filled NEXUS close did not close. The intents are read AFTER CLOSING committed: every reservation of the cycle
+    // committed before it is seen, and none can follow. Otherwise the cycle stays CLOSING with the breakdown; a later call completes
+    // it. Nothing here sends anything: settling an open order or position is a separate, existing step (refresh, cancel) or a decision.
+    await this.syncAll();
+    const settlement = cycleSettlement([...this.projections().values()].filter((p) => p.intent.cycleId === cycleId)
+      .map((p) => ({ action: p.intent.action, state: p.state, expiresAt: p.intent.expiresAt, positionIds: p.positionIds, positionId: p.intent.positionId })));
+    if (!isSettled(settlement)) return current(settlement);
+    const views = [...this.projections().values()].filter((p) => p.intent.cycleId === cycleId).map((p) => this.view(p));
+    const verdict = history === null ? null : evaluateDemoCycleTest({ intents: views, snapshots: history.observations, missingSnapshotRecords: history.missingSnapshotRecords });
+    try {
+      await this.appendCycle(
+        { schema: DEMO_CYCLE_RECORD_SCHEMA, kind: 'closed', cycleId, closedBy: operator, closedAt: this.now(), verdict: verdict?.result ?? 'not_evaluated', failures: verdict?.failures ?? [] },
+        () => {
+          if (status() !== 'closing') throw new DemoExecutionError('CYCLE_REFUSED', 'CYCLE_NOT_CLOSING', ['CYCLE_NOT_CLOSING']);
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof DemoExecutionError && error.code === 'CYCLE_REFUSED')) throw error;
+      await this.syncAll();
+      if (status() !== 'closed') throw error;
+    }
+    return current(none);
   }
 
   private async runGate(intent: ExecutionIntent, phase: 'create' | 'execute'): Promise<{ verdict: GateVerdict; exposure: Decimal }> {
@@ -1259,7 +1485,7 @@ export class EtoroDemoExecutionService {
       phase,
       intent,
       now,
-      policy: this.policy,
+      policy: this.policyFor(intent),
       buildLocked: this.locked,
       executionEnabled: this.deps.executionEnabled,
       killSwitch: this.deps.killSwitch.current(),
@@ -1273,6 +1499,7 @@ export class EtoroDemoExecutionService {
       closePosition: closeEvidence,
       ...(externalClosures !== undefined ? { externalClosures } : {}),
       accessRefusals,
+      ...(this.deps.cycles !== undefined ? { cycleRefusals: intentCycleRefusals(intent.cycleId, this.cycleMap(), now) } : {}),
     });
     let exposure = Decimal.from(0);
     if (intent.action === 'open' && quote !== null && quote.last.isPositive()) {
