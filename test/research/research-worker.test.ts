@@ -376,3 +376,13 @@ describe('R1 worker: settlement and identical run ids (mutation findings)', () =
     expect((await crashing.loadAll()).map((r) => r.id).filter((id) => id.startsWith('same-run-1:finished'))).toEqual([]);
   });
 });
+
+describe('R1 worker: an exhausted day budget refuses at once (mutation finding B1)', () => {
+  it('day and minute budget both used up: refused immediately, without waiting for the minute window', async () => {
+    const h = harness({ catalog: catalogOf([AAPL_ENTRY, BTC_ENTRY]), settings: { budget: { dailyCredits: 1, minuteCredits: 1 } } });
+    const out = await h.run();
+    if (out.kind !== 'finished') throw new Error();
+    expect(out.instruments[1]).toMatchObject({ outcome: 'failed', errorCode: 'DAILY_BUDGET_EXHAUSTED' });
+    expect(h.clock.slept.filter((ms) => ms >= 1_000)).toEqual([]);
+  });
+});
