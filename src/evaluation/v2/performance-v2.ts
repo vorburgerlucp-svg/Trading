@@ -2,7 +2,8 @@
 // ModelPerformance stores them, but no score, route, registry entry or champion decision uses them until outcome-eval:v2 is
 // added to the accepted methods (a human decision after an independent validation). The score mapping is provisional and part
 // of the method version.
-//   analyst      score = clamp(0.5 + 0.25 × valueR, 0, 1) of an EVALUATED decision;
+//   analyst      score = clamp(0.5 + 0.25 × valueR, 0, 1) of an EVALUATED decision whose plan was READ FROM THE LEDGER
+//                (authenticity sealed_before_outcome or historical_reconstruction; a caller-supplied plan never becomes one);
 //   critic, counter-analyst: a warning is NOT scored against the outcome (v1 did, and rewarded silence before gains). It is
 //                scored only as a forecast (Brier score of a stated probability of a defined event), in the evaluation record.
 
@@ -24,6 +25,7 @@ export interface AttemptRefV2 {
 
 export function performanceObservationOfV2(evaluation: EvaluationV2, attempt: AttemptRefV2): PerformanceObservation | null {
   if (evaluation.status !== 'EVALUATED' || evaluation.valueR === null || attempt.role !== 'analyst') return null;
+  if (evaluation.authenticity === 'unverified') return null;
   if (evaluation.planSealedAt === null || parseUtc(evaluation.evaluatedAt) <= parseUtc(evaluation.planSealedAt)) return null;
   const score = Math.min(1, Math.max(0, 0.5 + 0.25 * Number(evaluation.valueR)));
   return {

@@ -106,14 +106,14 @@ describe('R2 simulator: gaps and ambiguous bars', () => {
 
 describe('R2 simulator: costs', () => {
   it('commission turns a gross gain into a net loss (entry 100, exit 100.6, 30 bp per side)', () => {
-    const p = plan({ maxHoldingBars: 1, costs: { version: 'c1', commissionBps: 30, fixedFeePerSide: '0', spreadBps: 0, spreadSource: 'modeled', slippageBps: 0 } });
+    const p = plan({ maxHoldingBars: 1, costs: { version: 'c1', commissionBps: 30, fixedFeePerSide: '0', feeCurrency: 'USD', spreadBps: 0, spreadSource: 'modeled', slippageBps: 0 } });
     const r = sim(p, bars([['100', '100.7', '99.9', '100.6']]));
     // gross 10 × 0.6 = 6; fees 10 × 100 × 0.003 + 10 × 100.6 × 0.003 = 3 + 3.018 = 6.018; net -0.018.
     expect(r).toMatchObject({ grossPnl: '6', fees: '6.018', netPnl: '-0.018' });
   });
 
   it('spread and slippage are paid on both fills, against the trade, for long and short', () => {
-    const costs = { version: 'c2', commissionBps: 0, fixedFeePerSide: '0', spreadBps: 20, spreadSource: 'modeled' as const, slippageBps: 5 };
+    const costs = { version: 'c2', commissionBps: 0, fixedFeePerSide: '0', feeCurrency: 'USD', spreadBps: 20, spreadSource: 'modeled' as const, slippageBps: 5 };
     // adverse = 10 + 5 bp = 0.0015. Long: buy 100.15, target 110 sells at 109.835.
     const long = sim(plan({ costs, size: { kind: 'quantity', quantity: '10' } }), bars([['100', '101', '99', '100'], ['100', '111', '99', '109']]));
     expect(long).toMatchObject({ entry: { fillPrice: '100.15' }, exit: { fillPrice: '109.835' }, grossPnl: '96.85', executionCosts: '3.15' });
@@ -123,7 +123,24 @@ describe('R2 simulator: costs', () => {
   });
 
   it('a fixed fee per side is charged twice', () => {
-    const p = plan({ maxHoldingBars: 1, costs: { version: 'c3', commissionBps: 0, fixedFeePerSide: '1.5', spreadBps: 0, spreadSource: 'modeled', slippageBps: 0 } });
+    const p = plan({ maxHoldingBars: 1, costs: { version: 'c3', commissionBps: 0, fixedFeePerSide: '1.5', feeCurrency: 'USD', spreadBps: 0, spreadSource: 'modeled', slippageBps: 0 } });
     expect(sim(p, bars([['100', '101', '99', '100']]))).toMatchObject({ grossPnl: '0', fees: '3', netPnl: '-3' });
+  });
+});
+
+describe('R2 simulator: data that arrives late', () => {
+  it('a bar NEXUS received only after the evaluation time is not used (the evaluation stays reproducible at its time)', () => {
+    const late = bar(1, '100', '111', '99', '109', undefined, { knowledge: { knownAt: '2026-10-09T00:00:00.000Z', knowledgeSource: 'captured_by_nexus', vintage: 'historical_reconstruction', vintagePolicy: 'bar-vintage:v1' } });
+    const r = sim(plan(), [bar(0, '100', '101', '99', '100'), late], '2026-10-07T11:00:00.000Z');
+    expect(r).toMatchObject({ status: 'PENDING', reasons: ['BAR_NOT_YET_RECEIVED 2026-10-07T10:15:00.000Z'] });
+    // At a later evaluation time the same bar is known and used.
+    expect(sim(plan(), [bar(0, '100', '101', '99', '100'), late], '2026-10-10T00:00:00.000Z')).toMatchObject({ status: 'COMPLETED', netR: '2' });
+  });
+
+  it('a missing bar is PENDING during the data grace period and INSUFFICIENT_DATA after it', () => {
+    const only = [bar(0, '100', '101', '99', '100')];
+    expect(sim(plan(), only, '2026-10-07T12:00:00.000Z').status).toBe('PENDING');
+    expect(simulateTradePlan(plan(), only, CAL, '2026-10-07T12:00:00.000Z', { dataGraceMs: 60_000 }).status).toBe('INSUFFICIENT_DATA');
+    expect(sim(plan(), only, AFTER).status).toBe('INSUFFICIENT_DATA');
   });
 });

@@ -9,7 +9,7 @@ import { PostgresAppendOnlyStore } from '../../src/persistence/postgres/postgres
 import { memoryProjector } from '../../src/persistence/postgres/projectors.js';
 import type { PgPool } from '../../src/persistence/postgres/pool.js';
 import { EVALUATION_V2_LOG, EvaluationLedgerV2, TRADE_PLAN_LOG, TradePlanLedger, type SealedPlanRecord } from '../../src/evaluation/v2/plan-ledger.js';
-import { evaluateDecisionV2, type EvaluationV2 } from '../../src/evaluation/v2/outcome-eval-v2.js';
+import { evaluateDecisionFromLedger, evaluateDecisionV2, type EvaluationV2 } from '../../src/evaluation/v2/outcome-eval-v2.js';
 import { AFTER, CAL, bars, plan } from '../evaluation/v2/fixtures.js';
 import { createTestDatabase, pgAvailable, pgSkipReason, type TestDatabase } from './db.js';
 
@@ -62,6 +62,25 @@ describe.skipIf(!pgAvailable)('R2 learning evaluation v2 on PostgreSQL' + (pgAva
     const other = await EvaluationLedgerV2.open(await PostgresAppendOnlyStore.open<EvaluationV2>(db.extraPool(), EVALUATION_V2_LOG));
     expect(await other.record(e)).toBe('ALREADY_APPLIED');
     expect(await other.all()).toEqual([e]);
+  }, 60_000);
+
+  it('authenticity across processes: a research plan sealed by one process is read from the database by another and verified', async () => {
+    const db = await database();
+    const writer = await TradePlanLedger.open(await PostgresAppendOnlyStore.open<SealedPlanRecord>(db.pool, TRADE_PLAN_LOG), { clock: at('2026-10-07T09:50:00.000Z') });
+    await writer.seal(plan({ origin: 'research' }), '100');
+    const reader = await TradePlanLedger.open(await PostgresAppendOnlyStore.open<SealedPlanRecord>(db.extraPool(), TRADE_PLAN_LOG));
+    const e = await evaluateDecisionFromLedger({ ledger: reader, planId: 'plan-1', decision: { decisionId: 'dec-1', action: 'ENTER_LONG', positionContext: 'flat' }, bars: bars([['100', '101', '99', '100'], ['100', '111', '99', '109']]), calendar: CAL, evaluatedAt: AFTER });
+    expect(e).toMatchObject({ status: 'EVALUATED', authenticity: 'sealed_before_outcome', planSealedAt: '2026-10-07T09:50:00.000Z' });
+    // A stored plan changed directly in the database (bypassing the log rules) is detected when it is read.
+    const admin = await db.privilegedClient();
+    try {
+      await admin.query('ALTER TABLE append_only_records DISABLE TRIGGER USER');
+      await admin.query("UPDATE append_only_records SET payload = jsonb_set(payload, '{plan,stopLoss}', '\"80\"') WHERE log_name = $1", [TRADE_PLAN_LOG]);
+      await admin.query('ALTER TABLE append_only_records ENABLE TRIGGER USER');
+    } finally {
+      await admin.end();
+    }
+    await expect(TradePlanLedger.open(await PostgresAppendOnlyStore.open<SealedPlanRecord>(db.extraPool(), TRADE_PLAN_LOG))).rejects.toThrow();
   }, 60_000);
 
   it('quarantine on the persistent memory: v2 observations written by another process do not change published scores', async () => {

@@ -4,7 +4,7 @@ import { getCalendar } from '../../../src/market-data/sessions.js';
 import { parseUtc, toUtcIso } from '../../../src/market-data/time.js';
 import { Decimal } from '../../../src/money/decimal.js';
 import type { SealedPlan } from '../../../src/evaluation/v2/plan-ledger.js';
-import { OUTCOME_EVAL_V2, TRADE_PLAN_SCHEMA, tradePlanHash, type TradePlan } from '../../../src/evaluation/v2/trade-plan.js';
+import { CONTINUATION_PLAN_SCHEMA, OUTCOME_EVAL_V2, TRADE_PLAN_SCHEMA, tradePlanHash, type AnyPlan, type ContinuationPlan, type TradePlan } from '../../../src/evaluation/v2/trade-plan.js';
 
 export const CAL = getCalendar('24x7')!;
 export const XNAS = getCalendar('XNAS')!;
@@ -45,7 +45,7 @@ export function bars(rows: Array<[string, string, string, string]>, first = ENTR
   return rows.map((r, i) => bar(i, ...r, first));
 }
 
-export const ZERO_COSTS = Object.freeze({ version: 'costs:zero', commissionBps: 0, fixedFeePerSide: '0', spreadBps: 0, spreadSource: 'modeled' as const, slippageBps: 0 });
+export const ZERO_COSTS = Object.freeze({ version: 'costs:zero', commissionBps: 0, fixedFeePerSide: '0', feeCurrency: 'USD', spreadBps: 0, spreadSource: 'modeled' as const, slippageBps: 0 });
 
 /** A complete long plan: entry 100 (next bar open), stop 95, target 110, 4 bars, 1000 notional, no costs. */
 export function plan(overrides: Partial<TradePlan> = {}): TradePlan {
@@ -57,6 +57,7 @@ export function plan(overrides: Partial<TradePlan> = {}): TradePlan {
     instrumentId: 'ins_test',
     source: SOURCE,
     interval: '15m',
+    quoteCurrency: 'USD',
     side: 'long',
     positionContext: 'flat',
     strategy: { id: 'ref-strategy', version: '1.0.0' },
@@ -82,6 +83,28 @@ export function shortPlan(overrides: Partial<TradePlan> = {}): TradePlan {
   return plan({ side: 'short', stopLoss: '105', takeProfit: '90', ...overrides });
 }
 
-export function sealed(p: TradePlan, sealedAt = SEALED_AT): SealedPlan {
+/**
+ * An OPEN long position at the decision point ENTRY_AT: 10 units bought earlier at 90 (costs 1.8 already paid), current stop 95,
+ * target 110, managed for at most 4 more bars. Its value is "hold" versus "close at the decision bar's open".
+ */
+export function continuation(overrides: Partial<ContinuationPlan> = {}): ContinuationPlan {
+  const { schema: _s, side: _side, positionContext: _c, entry: _e, size: _z, ...common } = plan();
+  return {
+    ...common,
+    schema: CONTINUATION_PLAN_SCHEMA,
+    planId: 'cont-1',
+    positionContext: 'long_open',
+    position: { positionRef: 'pos-1', side: 'long', quantity: '10', entryPrice: '90', openedAt: '2026-10-06T10:00:00.000Z', costsAlreadyPaid: '1.8' },
+    decisionAt: ENTRY_AT,
+    ...overrides,
+  };
+}
+
+/** An OPEN short position: 10 units sold earlier at 110, current stop 105, target 90. */
+export function shortContinuation(overrides: Partial<ContinuationPlan> = {}): ContinuationPlan {
+  return continuation({ positionContext: 'short_open', position: { positionRef: 'pos-2', side: 'short', quantity: '10', entryPrice: '110', openedAt: '2026-10-06T10:00:00.000Z', costsAlreadyPaid: '2.2' }, stopLoss: '105', takeProfit: '90', ...overrides });
+}
+
+export function sealed(p: AnyPlan, sealedAt = SEALED_AT): SealedPlan {
   return { plan: p, planHash: tradePlanHash(p), sealedAt, sequence: 1 };
 }

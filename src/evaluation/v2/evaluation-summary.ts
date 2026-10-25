@@ -4,7 +4,7 @@
 // evidence of a better strategy, and a loss within the planned risk is not by itself a bad decision (see the quadrants).
 
 import { Decimal } from '../../money/decimal.js';
-import type { EvaluationStatusV2, EvaluationV2, Quadrant } from './outcome-eval-v2.js';
+import type { Authenticity, EvaluationStatusV2, EvaluationV2, Quadrant } from './outcome-eval-v2.js';
 import type { EvaluationOrigin, Realization } from './trade-plan.js';
 
 export const EVALUATION_SUMMARY_VERSION = 'evaluation-summary:v2' as const;
@@ -17,6 +17,8 @@ export interface EvaluationSummaryV2 {
   version: typeof EVALUATION_SUMMARY_VERSION;
   origin: EvaluationOrigin;
   realization: Realization;
+  policyVersion: string | null;
+  authenticity: Partial<Record<Authenticity, number>>;
   total: number;
   byStatus: Partial<Record<EvaluationStatusV2, number>>;
   evaluated: number;
@@ -33,9 +35,18 @@ export interface EvaluationSummaryV2 {
   meanBrier: number | null;
 }
 
-/** Summarizes evaluations of exactly one origin and realization; any other record in the input is a refusal, not a filter. */
-export function summarizeEvaluationsV2(records: readonly EvaluationV2[], scope: { origin: EvaluationOrigin; realization: Realization; minSamples?: number }): EvaluationSummaryV2 {
+/**
+ * Summarizes evaluations of exactly one origin, one realization and one policy version; any other record is a refusal, not a filter.
+ * Research and demo aggregates also refuse caller-supplied (unverified) plans unless `allowUnverified` (synthetic tests only).
+ */
+export function summarizeEvaluationsV2(records: readonly EvaluationV2[], scope: { origin: EvaluationOrigin; realization: Realization; minSamples?: number; allowUnverified?: boolean }): EvaluationSummaryV2 {
   const minSamples = scope.minSamples ?? 30;
+  const versions = new Set(records.map((r) => r.policyVersion));
+  if (versions.size > 1) throw new EvaluationMixError('evaluations of different policy versions are never mixed: ' + [...versions].join(', '));
+  if (scope.origin !== 'historical_simulation' && !scope.allowUnverified) {
+    const unverified = records.find((r) => r.origin !== null && r.authenticity === 'unverified');
+    if (unverified) throw new EvaluationMixError('evaluation ' + unverified.decisionId + ' rests on a caller-supplied plan: a ' + scope.origin + ' aggregate needs plans read from the ledger');
+  }
   for (const r of records) {
     if (r.status !== 'NOT_EVALUABLE' || r.origin !== null) {
       if (r.origin !== scope.origin || r.realization !== scope.realization) {
@@ -68,6 +79,8 @@ export function summarizeEvaluationsV2(records: readonly EvaluationV2[], scope: 
     version: EVALUATION_SUMMARY_VERSION,
     origin: scope.origin,
     realization: scope.realization,
+    policyVersion: records[0]?.policyVersion ?? null,
+    authenticity: records.reduce<Partial<Record<Authenticity, number>>>((acc, r) => ({ ...acc, [r.authenticity]: (acc[r.authenticity] ?? 0) + 1 }), {}),
     total: records.length,
     byStatus,
     evaluated: n,

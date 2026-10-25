@@ -1,7 +1,7 @@
 // R2 learning quarantine: outcome-eval:v2 observations are stored, but routing, published scores, the model registry, the
 // champion-challenger and the shadow exit gate decide EXACTLY as without them. A positive control proves the test is sensitive:
 // once a policy accepts v2, the same observations do change the routing.
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ChampionBoard, shadowExitGate } from '../../../src/ai/champion-challenger.js';
@@ -12,9 +12,11 @@ import { NexusMemory } from '../../../src/memory/nexus-memory.js';
 import { AiRouter } from '../../../src/nexus/ai-router.js';
 import type { PlanStep } from '../../../src/nexus/nexus-types.js';
 import { performanceObservationOfV2, recordQuarantinedV2 } from '../../../src/evaluation/v2/performance-v2.js';
-import { evaluateDecisionV2 } from '../../../src/evaluation/v2/outcome-eval-v2.js';
+import { evaluateDecisionFromLedger, evaluateDecisionV2 } from '../../../src/evaluation/v2/outcome-eval-v2.js';
+import { TradePlanLedger, type SealedPlanRecord } from '../../../src/evaluation/v2/plan-ledger.js';
+import { InMemoryAppendOnlyStore } from '../../../src/persistence/append-only-log.js';
 import { CLAUDE, GEMINI, HUMAN, MODELS, OPENAI, ScriptedAdapter, opinion, task } from '../../nexus/fakes.js';
-import { AFTER, CAL, bars, plan, sealed } from './fixtures.js';
+import { AFTER, CAL, bars, plan } from './fixtures.js';
 
 const T = '2026-10-01T08:00:00.000Z';
 const AS_OF = '2026-12-01T00:00:00.000Z';
@@ -99,7 +101,9 @@ describe('R2 learning quarantine', () => {
   });
 
   it('a v2 evaluation becomes an observation only for an analyst and only when EVALUATED; recording it quarantines it', async () => {
-    const evaluated = evaluateDecisionV2({ decision: { decisionId: 'dec-1', action: 'ENTER_LONG', positionContext: 'flat', plan: sealed(plan()) }, bars: bars([['100', '101', '99', '100'], ['100', '111', '99', '109']]), calendar: CAL, evaluatedAt: AFTER });
+    const ledger = await TradePlanLedger.open(new InMemoryAppendOnlyStore<SealedPlanRecord>(), { clock: () => new Date('2026-10-07T09:50:00.000Z') });
+    await ledger.seal(plan({ origin: 'research' }));
+    const evaluated = await evaluateDecisionFromLedger({ ledger, planId: 'plan-1', decision: { decisionId: 'dec-1', action: 'ENTER_LONG', positionContext: 'flat' }, bars: bars([['100', '101', '99', '100'], ['100', '111', '99', '109']]), calendar: CAL, evaluatedAt: AFTER });
     const attempt = { modelKey: OPENAI, role: 'analyst' as const, domain: 'equities' as const, subtask: 'technical_interpretation' as const, shadow: false, occurredAt: '2026-10-07T09:58:00.000Z' };
     const o = performanceObservationOfV2(evaluated, attempt)!;
     expect(o).toMatchObject({ scoringMethod: 'outcome-eval:v2', score: 1, availableAt: AFTER });
@@ -129,5 +133,32 @@ describe('R2 learning quarantine', () => {
     }
     const forbidden = [...files].filter((f) => /ai-router|champion-challenger|model-registry|calibration|src\/nexus\/|src\/broker\/|src\/runtime\/|src\/capital\/(?!ledger-errors)/.test(f));
     expect(forbidden).toEqual([]);
+  });
+});
+
+describe('R2 guard against the flawed v1 method in a future runtime', () => {
+  it('runtime and research code never import the v1 evaluator, and any ModelPerformance they build names its accepted methods', () => {
+    const root = resolve(__dirname, '..', '..', '..');
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(join(root, dir))) {
+        const rel = dir + '/' + name;
+        if (statSync(join(root, rel)).isDirectory()) walk(rel);
+        else if (rel.endsWith('.ts')) files.push(rel);
+      }
+    };
+    for (const dir of ['src/runtime', 'src/research']) {
+      try {
+        walk(dir);
+      } catch {
+        // the directory does not exist on this branch
+      }
+    }
+    expect(files.length).toBeGreaterThan(0);
+    for (const file of files) {
+      const text = readFileSync(join(root, file), 'utf8');
+      expect(text, file).not.toMatch(/evaluation\/outcome-evaluator/);
+      for (const m of text.matchAll(/new ModelPerformance\(([^;]*)\)/g)) expect(m[1], file).toMatch(/acceptedScoringMethods/);
+    }
   });
 });

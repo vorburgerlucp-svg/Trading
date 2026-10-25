@@ -7,9 +7,9 @@ import { ModelPerformance } from '../../../src/ai/model-performance.js';
 import { NexusMemory } from '../../../src/memory/nexus-memory.js';
 import { Decimal } from '../../../src/money/decimal.js';
 import { rappen } from '../../../src/money/money.js';
-import { AFTER, CAL, bars, plan, sealed, shortPlan } from './fixtures.js';
+import { AFTER, CAL, bars, continuation, plan, sealed, shortPlan } from './fixtures.js';
 
-const v2 = (action: 'ENTER_LONG' | 'ENTER_SHORT' | 'HOLD' | 'NO_TRADE', p: ReturnType<typeof plan>, b: ReturnType<typeof bars>, positionContext: 'flat' | 'long_open' | 'short_open' = 'flat') =>
+const v2 = (action: 'ENTER_LONG' | 'ENTER_SHORT' | 'HOLD' | 'NO_TRADE', p: ReturnType<typeof plan> | ReturnType<typeof continuation>, b: ReturnType<typeof bars>, positionContext: 'flat' | 'long_open' | 'short_open' = 'flat') =>
   evaluateDecisionV2({ decision: { decisionId: 'dec-1', action, positionContext, plan: sealed(p) }, bars: b, calendar: CAL, evaluatedAt: AFTER });
 
 const outcome = (over: Partial<TradeOutcome>): TradeOutcome => ({
@@ -33,8 +33,8 @@ describe('outcome-eval:v1 weaknesses, pinned (v1 unchanged) and fixed in v2', ()
   it('B1 v1 scores hold and no_trade like sell: a correct "hold" of a long before a rise scores 0', () => {
     expect(scoreRecommendation('hold', 300)).toBe(0);
     expect(scoreRecommendation('no_trade', 300)).toBe(0);
-    // v2: HOLD of an open long that reaches its target is +2R.
-    expect(v2('HOLD', plan({ positionContext: 'long_open' }), bars([['100', '101', '99', '100'], ['100', '111', '99', '109']]), 'long_open')).toMatchObject({ valueR: '2', outcome: 'FAVORABLE' });
+    // v2: HOLD of an open long that reaches its target is +2R (hold versus close now).
+    expect(v2('HOLD', continuation(), bars([['100', '101', '99', '100'], ['100', '111', '99', '109']]), 'long_open')).toMatchObject({ valueR: '2', outcome: 'FAVORABLE' });
   });
 
   it('B2 v1 scores the gross price move: costs and the stop do not count', () => {
@@ -79,7 +79,7 @@ describe('outcome-eval:v1 weaknesses, pinned (v1 unchanged) and fixed in v2', ()
 
   it('B8 v1 only checks knownAt > asOf; v2 also refuses a plan stored after its earliest entry', () => {
     expect(v2('ENTER_LONG', plan(), bars([['100', '101', '99', '100']]))).not.toMatchObject({ reasons: ['PLAN_SEALED_TOO_LATE'] });
-    const late = evaluateDecisionV2({ decision: { decisionId: 'dec-1', action: 'ENTER_LONG', positionContext: 'flat', plan: sealed(plan(), '2026-10-07T10:05:00.000Z') }, bars: bars([['100', '101', '99', '100']]), calendar: CAL, evaluatedAt: AFTER });
+    const late = evaluateDecisionV2({ decision: { decisionId: 'dec-1', action: 'ENTER_LONG', positionContext: 'flat', plan: sealed(plan({ origin: 'research' }), '2026-10-07T10:05:00.000Z') }, bars: bars([['100', '101', '99', '100']]), calendar: CAL, evaluatedAt: AFTER });
     expect(late.reasons).toEqual(['PLAN_SEALED_TOO_LATE']);
   });
 

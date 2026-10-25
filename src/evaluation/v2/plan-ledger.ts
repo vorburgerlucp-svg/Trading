@@ -1,26 +1,29 @@
-// R2: sealing trade plans and recording v2 evaluations, each in its own append-only, hash-chained log. A plan's seal is the
-// log record that stored it: its recordedAt and sequence prove when NEXUS had fixed the plan. An evaluation refuses a plan that
-// was sealed at or after its earliest entry (the plan could have been written knowing part of the outcome). Evaluations are
-// stored per decision, method and origin, and never overwritten: a correction is a new method version.
+// R2: sealing plans and recording v2 evaluations, each in its own append-only, hash-chained log. A plan's seal is the log record
+// that stored it: its recordedAt and sequence say when NEXUS had fixed the plan. The ledger is the ONLY source of a verified seal:
+// `getVerified` re-reads the plan from the log (whose hash chain is verified on every load) and checks the plan hash, so a caller
+// cannot present a hand-made `sealedAt` as a stored one. Evaluations are stored per decision, method and origin, never overwritten,
+// and only when final: a PENDING result is not recorded (it would block the later, complete evaluation).
 
 import { AppendOnlyLog, type AppendOnlyStore } from '../../persistence/append-only-log.js';
-import { tradePlanHash, tradePlanProblems, TradePlanError, type TradePlan } from './trade-plan.js';
 import type { EvaluationV2 } from './outcome-eval-v2.js';
+import { tradePlanHash, tradePlanProblems, TradePlanError, type AnyPlan } from './trade-plan.js';
 
 export const TRADE_PLAN_LOG = 'trade-plans-v1';
 export const EVALUATION_V2_LOG = 'evaluations-v2';
 
 export interface SealedPlanRecord {
-  plan: TradePlan;
+  plan: AnyPlan;
   planHash: string;
 }
 
+/**
+ * A plan with its seal. A SealedPlan object by itself proves nothing (anyone can build one): an evaluation counts it as a stored
+ * seal only when it read the plan from a TradePlanLedger itself (evaluateDecisionFromLedger).
+ */
 export interface SealedPlan {
-  plan: TradePlan;
+  plan: AnyPlan;
   planHash: string;
-  /** When the plan was stored (the log record's recordedAt). */
   sealedAt: string;
-  /** Position of the seal in the plan log. */
   sequence: number;
 }
 
@@ -32,7 +35,7 @@ export class TradePlanLedger {
   }
 
   /** Seals a complete plan. The same plan again is idempotent; a different plan under the same planId is refused. */
-  async seal(plan: TradePlan, referencePrice?: string): Promise<SealedPlan> {
+  async seal(plan: AnyPlan, referencePrice?: string): Promise<SealedPlan> {
     const problems = tradePlanProblems(plan, referencePrice);
     if (problems.length > 0) throw new TradePlanError('trade plan is not complete: ' + problems.join('; '));
     const planHash = tradePlanHash(plan);
@@ -40,12 +43,18 @@ export class TradePlanLedger {
     return { plan: record.payload.plan, planHash: record.payload.planHash, sealedAt: record.recordedAt, sequence: record.sequence };
   }
 
-  async get(planId: string): Promise<SealedPlan | null> {
+  /** The stored plan and its seal, read from the log (verified hash chain) and checked against its hash. */
+  async getVerified(planId: string): Promise<SealedPlan | null> {
     await this.log.sync();
     const record = this.log.get(planId);
     if (!record) return null;
     if (tradePlanHash(record.payload.plan) !== record.payload.planHash) throw new TradePlanError('stored plan ' + planId + ' does not match its hash');
     return { plan: record.payload.plan, planHash: record.payload.planHash, sealedAt: record.recordedAt, sequence: record.sequence };
+  }
+
+  /** Same as getVerified (kept for readers). */
+  get(planId: string): Promise<SealedPlan | null> {
+    return this.getVerified(planId);
   }
 }
 
@@ -57,12 +66,13 @@ export class EvaluationLedgerV2 {
     return new EvaluationLedgerV2(await AppendOnlyLog.open<EvaluationV2>(EVALUATION_V2_LOG, store, options.clock ? { clock: options.clock } : {}));
   }
 
-  static idOf(evaluation: Pick<EvaluationV2, 'decisionId' | 'method' | 'origin'>): string {
-    return evaluation.decisionId + ':' + evaluation.method + ':' + evaluation.origin;
+  static idOf(evaluation: Pick<EvaluationV2, 'decisionId' | 'method' | 'origin' | 'policyVersion'>): string {
+    return evaluation.decisionId + ':' + evaluation.method + ':' + evaluation.policyVersion + ':' + evaluation.origin;
   }
 
-  /** Records an evaluation once. The same evaluation again is idempotent; a different one under the same id is refused. */
+  /** Records a FINAL evaluation once (PENDING is refused). The same evaluation again is idempotent; a different one is refused. */
   async record(evaluation: EvaluationV2): Promise<'APPLIED' | 'ALREADY_APPLIED'> {
+    if (evaluation.status === 'PENDING') throw new TradePlanError('a pending evaluation is not recorded: evaluate again after its data is complete');
     return (await this.log.append(EvaluationLedgerV2.idOf(evaluation), evaluation)).status;
   }
 
